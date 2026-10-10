@@ -5,13 +5,13 @@ import (
 	"time"
 
 	badger "github.com/dgraph-io/badger/v4"
-	"github.com/ehsanranjbar/badgerutils"
-	"github.com/ehsanranjbar/badgerutils/examples/petstore/types"
-	"github.com/ehsanranjbar/badgerutils/iters"
-	extstore "github.com/ehsanranjbar/badgerutils/store/ext"
-	pstore "github.com/ehsanranjbar/badgerutils/store/prefix"
-	recstore "github.com/ehsanranjbar/badgerutils/store/rec"
-	"github.com/ehsanranjbar/badgerutils/store/rec/rectools"
+	"github.com/ehsanranjbar/kvutil"
+	"github.com/ehsanranjbar/kvutil/examples/petstore/types"
+	"github.com/ehsanranjbar/kvutil/iters"
+	extstore "github.com/ehsanranjbar/kvutil/store/ext"
+	pstore "github.com/ehsanranjbar/kvutil/store/prefix"
+	recstore "github.com/ehsanranjbar/kvutil/store/rec"
+	"github.com/ehsanranjbar/kvutil/store/rec/rectools"
 	"github.com/google/uuid"
 )
 
@@ -21,7 +21,7 @@ type File = recstore.Object[uuid.UUID, []byte]
 type DB struct {
 	base     *badger.DB
 	gcTicker *time.Ticker
-	reg      *badgerutils.NameRegistry
+	reg      *kvutil.NameRegistry
 
 	categoriesIdSeq   *badger.Sequence
 	categoriesStore   *recstore.Store[int64, types.Category, *types.Category]
@@ -49,7 +49,7 @@ func NewDB(opt badger.Options) (*DB, error) {
 		}
 	}()
 
-	reg, err := badgerutils.NewNameRegistry(base)
+	reg, err := kvutil.NewNameRegistry(base)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create name registry: %w", err)
 	}
@@ -151,7 +151,11 @@ func (db *DB) GetPetImageIds(txn *badger.Txn, petId int64) ([]uuid.UUID, error) 
 
 	var imageIds []uuid.UUID
 	for imagesIter.Rewind(); imagesIter.Valid(); imagesIter.Next() {
-		imageIds = append(imageIds, imagesIter.Key())
+		id, err := imagesIter.Key()
+		if err != nil {
+			return nil, err
+		}
+		imageIds = append(imageIds, id)
 	}
 	return imageIds, nil
 }

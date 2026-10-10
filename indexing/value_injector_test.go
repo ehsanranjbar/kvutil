@@ -4,9 +4,9 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/ehsanranjbar/badgerutils"
-	"github.com/ehsanranjbar/badgerutils/indexing"
-	"github.com/ehsanranjbar/badgerutils/testutil/mocks"
+	"github.com/ehsanranjbar/kvutil"
+	"github.com/ehsanranjbar/kvutil/indexing"
+	"github.com/ehsanranjbar/kvutil/testutil/mocks"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
@@ -55,7 +55,7 @@ func TestValueInjector_Index(t *testing.T) {
 			idx.
 				EXPECT().
 				Index(mock.Anything, mock.Anything).
-				Return([]badgerutils.RawKVPair{
+				Return([]kvutil.RawKVPair{
 					{Key: []byte("key1")},
 					{Key: []byte("key2")},
 				}, nil).

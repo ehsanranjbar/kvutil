@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // PathExtractor is an interface for extracting a value with the given path from a given value.
@@ -13,36 +14,31 @@ type PathExtractor[T any] interface {
 }
 
 // ReflectPathExtractor is a PathExtractor that uses reflection to extract the value.
+// It is safe for concurrent use.
 type ReflectPathExtractor[T any] struct {
 	rt        reflect.Type
 	returnAny bool
-	cache     map[string][]int
+	cache     sync.Map // path -> []int
 }
 
 // NewReflectPathExtractor creates a new ReflectPathExtractor for the given type.
-func NewReflectPathExtractor[T any](returnAny bool) ReflectPathExtractor[T] {
+func NewReflectPathExtractor[T any](returnAny bool) *ReflectPathExtractor[T] {
 	rt := reflect.TypeFor[T]()
 	if unwrapPtr(rt).Kind() != reflect.Struct {
 		panic(fmt.Sprintf("reflect path extractor only supports struct types but got %s", rt))
 	}
 
-	return ReflectPathExtractor[T]{
+	return &ReflectPathExtractor[T]{
 		rt:        rt,
 		returnAny: returnAny,
-		cache:     make(map[string][]int),
 	}
 }
 
 // ExtractPath implements the PathExtractor interface.
-func (pe ReflectPathExtractor[T]) ExtractPath(v T, path string) (any, error) {
-	indices, ok := pe.cache[path]
-	if !ok {
-		var err error
-		pe.cache[path], err = pe.verifyPath(path)
-		if err != nil {
-			return nil, err
-		}
-		indices = pe.cache[path]
+func (pe *ReflectPathExtractor[T]) ExtractPath(v T, path string) (any, error) {
+	indices, err := pe.indices(path)
+	if err != nil {
+		return nil, err
 	}
 
 	rv := reflect.ValueOf(v)
@@ -64,7 +60,22 @@ func (pe ReflectPathExtractor[T]) ExtractPath(v T, path string) (any, error) {
 	}
 }
 
-func (pe ReflectPathExtractor[T]) verifyPath(path string) ([]int, error) {
+// indices returns the field indices of the path, verifying and caching them on first use.
+// Only valid paths are cached, so an invalid path fails on every call.
+func (pe *ReflectPathExtractor[T]) indices(path string) ([]int, error) {
+	if cached, ok := pe.cache.Load(path); ok {
+		return cached.([]int), nil
+	}
+
+	indices, err := pe.verifyPath(path)
+	if err != nil {
+		return nil, err
+	}
+	pe.cache.Store(path, indices)
+	return indices, nil
+}
+
+func (pe *ReflectPathExtractor[T]) verifyPath(path string) ([]int, error) {
 	indices := make([]int, 0)
 	t := pe.rt
 	for _, part := range strings.Split(path, ".") {

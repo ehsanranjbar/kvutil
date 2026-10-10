@@ -2,17 +2,17 @@ package iters
 
 import (
 	badger "github.com/dgraph-io/badger/v4"
-	"github.com/ehsanranjbar/badgerutils"
+	"github.com/ehsanranjbar/kvutil"
 )
 
 // FilterIterator is an iterator that filters the items based on a predicate.
 type FilterIterator[K, V any] struct {
-	base badgerutils.Iterator[K, V]
+	base kvutil.Iterator[K, V]
 	f    func(V, *badger.Item) bool
 }
 
 // Filter creates a new filter iterator.
-func Filter[K, V any](base badgerutils.Iterator[K, V], f func(V, *badger.Item) bool) *FilterIterator[K, V] {
+func Filter[K, V any](base kvutil.Iterator[K, V], f func(V, *badger.Item) bool) *FilterIterator[K, V] {
 	return &FilterIterator[K, V]{base: base, f: f}
 }
 

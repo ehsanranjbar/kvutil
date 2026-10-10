@@ -7,13 +7,13 @@ import (
 	"sync"
 
 	badger "github.com/dgraph-io/badger/v4"
-	"github.com/ehsanranjbar/badgerutils"
-	"github.com/ehsanranjbar/badgerutils/codec"
-	"github.com/ehsanranjbar/badgerutils/iters"
-	extstore "github.com/ehsanranjbar/badgerutils/store/ext"
-	pstore "github.com/ehsanranjbar/badgerutils/store/prefix"
-	recstore "github.com/ehsanranjbar/badgerutils/store/rec"
-	refstore "github.com/ehsanranjbar/badgerutils/store/ref"
+	"github.com/ehsanranjbar/kvutil"
+	"github.com/ehsanranjbar/kvutil/codec"
+	"github.com/ehsanranjbar/kvutil/iters"
+	extstore "github.com/ehsanranjbar/kvutil/store/ext"
+	pstore "github.com/ehsanranjbar/kvutil/store/prefix"
+	recstore "github.com/ehsanranjbar/kvutil/store/rec"
+	refstore "github.com/ehsanranjbar/kvutil/store/ref"
 )
 
 var dataStorePrefix = []byte{'d'}
@@ -185,7 +185,7 @@ func (a *AssociationInstance[PI, PT, PR, CI, CT, CR]) GetParentId(cid CI) (pid P
 }
 
 // GetChildren returns the children of the given parent id.
-func (a *AssociationInstance[PI, PT, PR, CI, CT, CR]) GetChildrenIterator(pid PI, opts badger.IteratorOptions) (badgerutils.Iterator[CI, *CT], error) {
+func (a *AssociationInstance[PI, PT, PR, CI, CT, CR]) GetChildrenIterator(pid PI, opts badger.IteratorOptions) (kvutil.Iterator[CI, *CT], error) {
 	pk, err := a.pidCodec.Encode(pid)
 	if err != nil {
 		panic(fmt.Errorf("failed to encode parent id: %w", err))
@@ -234,7 +234,7 @@ func (e associationPExt[PI, PT, PR, CI, CT, CR]) Instantiate(txn *badger.Txn) ex
 	}
 }
 
-func (e associationPExt[PI, PT, PR, CI, CT, CR]) RegisterStore(store badgerutils.Instantiator[badgerutils.BadgerStore]) {
+func (e associationPExt[PI, PT, PR, CI, CT, CR]) RegisterStore(store kvutil.Instantiator[kvutil.BadgerStore]) {
 	e.asc.p2c = refstore.New(store)
 }
 
@@ -320,7 +320,7 @@ func (e associationCExt[PI, PT, PR, CI, CT, CR]) Instantiate(txn *badger.Txn) ex
 	}
 }
 
-func (e associationCExt[PI, PT, PR, CI, CT, CR]) RegisterStore(store badgerutils.Instantiator[badgerutils.BadgerStore]) {
+func (e associationCExt[PI, PT, PR, CI, CT, CR]) RegisterStore(store kvutil.Instantiator[kvutil.BadgerStore]) {
 	e.asc.c2p = refstore.New(store)
 }
 
@@ -334,7 +334,7 @@ type associationCExtIns[
 ] struct {
 	name        string
 	pidCodec    codec.Codec[PI]
-	parentStore badgerutils.BadgerStore
+	parentStore kvutil.BadgerStore
 	pidFunc     func(*CT) (PI, error)
 	p2c         *refstore.Instance
 	c2p         *refstore.Instance

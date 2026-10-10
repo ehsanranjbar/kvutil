@@ -2,11 +2,11 @@ package iters
 
 import (
 	badger "github.com/dgraph-io/badger/v4"
-	"github.com/ehsanranjbar/badgerutils"
+	"github.com/ehsanranjbar/kvutil"
 )
 
 // Count returns an aggregate iterator that counts the number of items in the base iterator.
-func Count[K, V any](it badgerutils.Iterator[K, V]) *AggregateIterator[K, V, uint] {
+func Count[K, V any](it kvutil.Iterator[K, V]) *AggregateIterator[K, V, uint] {
 	return Aggregate(it, func(count uint, _ V, _ *badger.Item) uint {
 		return count + 1
 	})

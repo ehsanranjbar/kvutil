@@ -5,7 +5,7 @@ import (
 	"math"
 	"testing"
 
-	"github.com/ehsanranjbar/badgerutils/codec/lex"
+	"github.com/ehsanranjbar/kvutil/codec/lex"
 	"github.com/stretchr/testify/require"
 )
 
@@ -214,5 +214,31 @@ func TestDecodeFloat64(t *testing.T) {
 			continue
 		}
 		require.Equal(t, test.expected, result, "DecodeFloat64(%v)", test.input)
+	}
+}
+
+func TestEncodeFloatNegativeZero(t *testing.T) {
+	negZero32 := float32(math.Copysign(0, -1))
+	require.Equal(t, lex.EncodeFloat32(0), lex.EncodeFloat32(negZero32))
+	require.Equal(t, float32(0), lex.DecodeFloat32(lex.EncodeFloat32(negZero32)))
+
+	negZero64 := math.Copysign(0, -1)
+	require.Equal(t, lex.EncodeFloat64(0), lex.EncodeFloat64(negZero64))
+	require.Equal(t, float64(0), lex.DecodeFloat64(lex.EncodeFloat64(negZero64)))
+}
+
+func TestInt16RoundTrip(t *testing.T) {
+	ordered := []int16{math.MinInt16, -1, 0, 1, math.MaxInt16}
+	for i, v := range ordered {
+		bz := lex.EncodeInt16(v)
+		require.Equal(t, v, lex.DecodeInt16(bz), "DecodeInt16(EncodeInt16(%d))", v)
+
+		if i < len(ordered)-1 {
+			require.True(t, bytes.Compare(bz, lex.EncodeInt16(ordered[i+1])) < 0, "EncodeInt16(%d) < EncodeInt16(%d)", v, ordered[i+1])
+		}
+	}
+
+	for _, v := range []uint16{0, 1, math.MaxUint16} {
+		require.Equal(t, v, lex.DecodeUint16(lex.EncodeUint16(v)), "DecodeUint16(EncodeUint16(%d))", v)
 	}
 }

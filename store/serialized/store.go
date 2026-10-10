@@ -6,9 +6,9 @@ import (
 	"sync"
 
 	badger "github.com/dgraph-io/badger/v4"
-	"github.com/ehsanranjbar/badgerutils"
-	"github.com/ehsanranjbar/badgerutils/codec"
-	pstore "github.com/ehsanranjbar/badgerutils/store/prefix"
+	"github.com/ehsanranjbar/kvutil"
+	"github.com/ehsanranjbar/kvutil/codec"
+	pstore "github.com/ehsanranjbar/kvutil/store/prefix"
 )
 
 // BSP is an interface for pointer of T that is binary serializable/deserializable.
@@ -19,7 +19,7 @@ type BSP[T any] interface {
 }
 
 type Store[K, V any, PV BSP[V]] struct {
-	base        badgerutils.Instantiator[badgerutils.BadgerStore]
+	base        kvutil.Instantiator[kvutil.BadgerStore]
 	prefix      []byte
 	keyCodec    codec.Codec[K]
 	initialized bool
@@ -30,7 +30,7 @@ type Store[K, V any, PV BSP[V]] struct {
 func New[
 	K, V any,
 	PV BSP[V],
-](base badgerutils.Instantiator[badgerutils.BadgerStore]) *Store[K, V, PV] {
+](base kvutil.Instantiator[kvutil.BadgerStore]) *Store[K, V, PV] {
 	var prefix []byte
 	if pfx, ok := base.(prefixed); ok {
 		prefix = pfx.Prefix()
@@ -67,17 +67,21 @@ func (s *Store[K, V, PV]) KeyCodec() codec.Codec[K] {
 }
 
 // Instantiate creates a new Instance.
-func (s *Store[K, V, PV]) Instantiate(txn *badger.Txn) badgerutils.StoreInstance[K, *V, *V, badgerutils.Iterator[K, *V]] {
+func (s *Store[K, V, PV]) Instantiate(txn *badger.Txn) kvutil.StoreInstance[K, *V, *V, kvutil.Iterator[K, *V]] {
 	// Locking any changes to the store's configuration on first instantiation.
 	s.init.Do(func() {
 		if s.keyCodec == nil {
-			s.keyCodec = codec.CodecFor[K]()
+			kc, err := codec.CodecFor[K]()
+			if err != nil {
+				panic(err)
+			}
+			s.keyCodec = kc
 		}
 
 		s.initialized = true
 	})
 
-	var base badgerutils.BadgerStore = txn
+	var base kvutil.BadgerStore = txn
 	if s.base != nil {
 		base = s.base.Instantiate(txn)
 	}
@@ -91,7 +95,7 @@ func (s *Store[K, V, PV]) Instantiate(txn *badger.Txn) badgerutils.StoreInstance
 
 // Instance is a store that serializes all keys and values.
 type Instance[K, V any, PV BSP[V]] struct {
-	base     badgerutils.BadgerStore
+	base     kvutil.BadgerStore
 	prefix   []byte
 	keyCodec codec.Codec[K]
 }
@@ -117,8 +121,8 @@ func (s *Instance[K, V, PV]) Get(key K) (value *V, err error) {
 }
 
 // NewIterator creates a new iterator.
-func (s *Instance[K, V, PV]) NewIterator(opts badger.IteratorOptions) badgerutils.Iterator[K, *V] {
-	var iter badgerutils.BadgerIterator = s.base.NewIterator(opts)
+func (s *Instance[K, V, PV]) NewIterator(opts badger.IteratorOptions) kvutil.Iterator[K, *V] {
+	var iter kvutil.BadgerIterator = s.base.NewIterator(opts)
 	if pfx := s.Prefix(); pfx != nil {
 		iter = pstore.NewIterator(iter, pfx)
 	}

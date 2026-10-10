@@ -1,9 +1,9 @@
 package iters
 
-import "github.com/ehsanranjbar/badgerutils"
+import "github.com/ehsanranjbar/kvutil"
 
 // Collect collects all the items from the iterator and returns them as a slice.
-func Collect[K, V any](it badgerutils.Iterator[K, V]) ([]V, error) {
+func Collect[K, V any](it kvutil.Iterator[K, V]) ([]V, error) {
 	var items []V
 	for it.Rewind(); it.Valid(); it.Next() {
 		v, err := it.Value()
@@ -16,7 +16,7 @@ func Collect[K, V any](it badgerutils.Iterator[K, V]) ([]V, error) {
 }
 
 // CollectKeys collects all the keys from the iterator and returns them as a slice.
-func CollectKeys[K, V any](it badgerutils.Iterator[K, V]) ([]K, error) {
+func CollectKeys[K, V any](it kvutil.Iterator[K, V]) ([]K, error) {
 	var keys []K
 	for it.Rewind(); it.Valid(); it.Next() {
 		k, err := it.Key()

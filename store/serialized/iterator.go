@@ -4,13 +4,13 @@ import (
 	"fmt"
 
 	badger "github.com/dgraph-io/badger/v4"
-	"github.com/ehsanranjbar/badgerutils"
-	"github.com/ehsanranjbar/badgerutils/codec"
+	"github.com/ehsanranjbar/kvutil"
+	"github.com/ehsanranjbar/kvutil/codec"
 )
 
 // Iterator is an iterator that unmarshal the value.
 type Iterator[K, V any, PV BSP[V]] struct {
-	base        badgerutils.BadgerIterator
+	base        kvutil.BadgerIterator
 	keyCodec    codec.Codec[K]
 	keyProvider keyProvider
 	cachedKey   *K
@@ -22,7 +22,7 @@ type keyProvider interface {
 }
 
 // NewIterator creates a new serialized iterator.
-func NewIterator[K, V any, PV BSP[V]](base badgerutils.BadgerIterator, kc codec.Codec[K]) *Iterator[K, V, PV] {
+func NewIterator[K, V any, PV BSP[V]](base kvutil.BadgerIterator, kc codec.Codec[K]) *Iterator[K, V, PV] {
 	kp, _ := base.(keyProvider)
 
 	return &Iterator[K, V, PV]{

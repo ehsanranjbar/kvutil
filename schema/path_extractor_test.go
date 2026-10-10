@@ -2,9 +2,10 @@ package schema_test
 
 import (
 	"reflect"
+	"sync"
 	"testing"
 
-	"github.com/ehsanranjbar/badgerutils/schema"
+	"github.com/ehsanranjbar/kvutil/schema"
 	"github.com/stretchr/testify/require"
 )
 
@@ -115,4 +116,55 @@ func TestExtractPathFromAny(t *testing.T) {
 			require.True(t, reflect.DeepEqual(got, tt.want), "ExtractPathFromAny() = %v, want %v", got, tt.want)
 		})
 	}
+}
+
+type pathTestInner struct {
+	Value int
+}
+
+type pathTestOuter struct {
+	Name  string
+	Inner pathTestInner
+	Ptr   *pathTestInner
+}
+
+func TestReflectPathExtractor(t *testing.T) {
+	pe := schema.NewReflectPathExtractor[pathTestOuter](true)
+	v := pathTestOuter{Name: "foo", Inner: pathTestInner{Value: 1}, Ptr: &pathTestInner{Value: 2}}
+
+	t.Run("Extract", func(t *testing.T) {
+		got, err := pe.ExtractPath(v, "Name")
+		require.NoError(t, err)
+		require.Equal(t, "foo", got)
+
+		got, err = pe.ExtractPath(v, "Inner.Value")
+		require.NoError(t, err)
+		require.Equal(t, 1, got)
+
+		got, err = pe.ExtractPath(v, "Ptr.Value")
+		require.NoError(t, err)
+		require.Equal(t, 2, got)
+	})
+
+	t.Run("InvalidPathFailsEveryTime", func(t *testing.T) {
+		for range 2 {
+			_, err := pe.ExtractPath(v, "Missing")
+			require.Error(t, err)
+		}
+	})
+
+	t.Run("Concurrent", func(t *testing.T) {
+		pe := schema.NewReflectPathExtractor[pathTestOuter](true)
+
+		var wg sync.WaitGroup
+		for range 16 {
+			wg.Go(func() {
+				for _, path := range []string{"Name", "Inner.Value", "Ptr.Value"} {
+					_, err := pe.ExtractPath(v, path)
+					require.NoError(t, err)
+				}
+			})
+		}
+		wg.Wait()
+	})
 }

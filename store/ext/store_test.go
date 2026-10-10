@@ -5,11 +5,11 @@ import (
 	"testing"
 
 	badger "github.com/dgraph-io/badger/v4"
-	"github.com/ehsanranjbar/badgerutils"
-	"github.com/ehsanranjbar/badgerutils/indexing"
-	"github.com/ehsanranjbar/badgerutils/iters"
-	extstore "github.com/ehsanranjbar/badgerutils/store/ext"
-	"github.com/ehsanranjbar/badgerutils/testutil"
+	"github.com/ehsanranjbar/kvutil"
+	"github.com/ehsanranjbar/kvutil/indexing"
+	"github.com/ehsanranjbar/kvutil/iters"
+	extstore "github.com/ehsanranjbar/kvutil/store/ext"
+	"github.com/ehsanranjbar/kvutil/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -28,11 +28,11 @@ func (t *TestStruct) UnmarshalBinary(data []byte) error {
 
 type TestIndexer struct{}
 
-func (i TestIndexer) Index(v *TestStruct, update bool) ([]badgerutils.RawKVPair, error) {
-	return []badgerutils.RawKVPair{}, nil
+func (i TestIndexer) Index(v *TestStruct, update bool) ([]kvutil.RawKVPair, error) {
+	return []kvutil.RawKVPair{}, nil
 }
 
-func (i TestIndexer) Lookup(args ...any) (badgerutils.Iterator[[]byte, indexing.Chunk], error) {
+func (i TestIndexer) Lookup(args ...any) (kvutil.Iterator[[]byte, indexing.Chunk], error) {
 	return nil, nil
 }
 

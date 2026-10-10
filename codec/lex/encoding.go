@@ -20,9 +20,20 @@ func EncodeInt16(v int16) []byte {
 	return EncodeUint16(uint16(v) ^ (1 << 15))
 }
 
+// DecodeInt16 returns the int16 representation of the given byte slice which is decoded from lexicographical order.
+func DecodeInt16(b []byte) int16 {
+	u := DecodeUint16(b)
+	return int16(u ^ (1 << 15))
+}
+
 // EncodeUint16 returns the byte slice representation of the given uint16.
 func EncodeUint16(v uint16) []byte {
 	return binary.BigEndian.AppendUint16(nil, v)
+}
+
+// DecodeUint16 returns the uint16 representation of the given byte slice.
+func DecodeUint16(b []byte) uint16 {
+	return binary.BigEndian.Uint16(b)
 }
 
 // EncodeInt32 returns the byte slice representation of the given int32 which is encoded in lexicographical order.
@@ -68,9 +79,13 @@ func DecodeUint64(b []byte) uint64 {
 }
 
 // EncodeFloat32 returns the byte slice representation of the given float32 which is encoded in lexicographical order.
+// NaN sorts before every other value. -0 and +0 are equal, so both are encoded as +0.
 func EncodeFloat32(f float32) []byte {
 	if math.IsNaN(float64(f)) {
 		return EncodeUint32(0)
+	}
+	if f == 0 {
+		return EncodeUint32(1 << 31)
 	}
 
 	u := math.Float32bits(f)
@@ -100,9 +115,13 @@ func DecodeFloat32(b []byte) float32 {
 }
 
 // EncodeFloat64 returns the byte slice representation of the given float64 which is encoded in lexicographical order.
+// NaN sorts before every other value. -0 and +0 are equal, so both are encoded as +0.
 func EncodeFloat64(f float64) []byte {
 	if math.IsNaN(f) {
 		return EncodeUint64(0)
+	}
+	if f == 0 {
+		return EncodeUint64(1 << 63)
 	}
 
 	u := math.Float64bits(f)

@@ -2,20 +2,20 @@ package rec
 
 import (
 	badger "github.com/dgraph-io/badger/v4"
-	"github.com/ehsanranjbar/badgerutils"
-	"github.com/ehsanranjbar/badgerutils/codec"
+	"github.com/ehsanranjbar/kvutil"
+	"github.com/ehsanranjbar/kvutil/codec"
 )
 
-var _ badgerutils.Iterator[int64, *struct{}] = (*Iterator[int64, struct{}])(nil)
+var _ kvutil.Iterator[int64, *struct{}] = (*Iterator[int64, struct{}])(nil)
 
 // Iterator is an iterator that unmarshal id, data and optionally fetch metadata.
 type Iterator[I comparable, T any] struct {
-	base    badgerutils.Iterator[I, *T]
+	base    kvutil.Iterator[I, *T]
 	idCodec codec.Codec[I]
 }
 
 func newIterator[I comparable, T any](
-	base badgerutils.Iterator[I, *T],
+	base kvutil.Iterator[I, *T],
 	idCodec codec.Codec[I],
 ) *Iterator[I, T] {
 	return &Iterator[I, T]{

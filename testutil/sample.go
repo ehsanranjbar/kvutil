@@ -3,8 +3,8 @@ package testutil
 import (
 	"encoding/json"
 
-	pstore "github.com/ehsanranjbar/badgerutils/store/prefix"
-	recstore "github.com/ehsanranjbar/badgerutils/store/rec"
+	pstore "github.com/ehsanranjbar/kvutil/store/prefix"
+	recstore "github.com/ehsanranjbar/kvutil/store/rec"
 )
 
 type SampleStruct struct {

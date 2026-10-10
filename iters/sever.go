@@ -4,18 +4,18 @@ import (
 	"fmt"
 
 	badger "github.com/dgraph-io/badger/v4"
-	"github.com/ehsanranjbar/badgerutils"
+	"github.com/ehsanranjbar/kvutil"
 )
 
 // SeverIterator is an iterator that severs (stops) the iteration when the predicate is true.
 type SeverIterator[K, V any] struct {
-	base    badgerutils.Iterator[K, V]
+	base    kvutil.Iterator[K, V]
 	pred    func(k K, v V, item *badger.Item) bool
 	severed bool
 }
 
 // Sever creates a new sever iterator.
-func Sever[K, V any](base badgerutils.Iterator[K, V], f func(K, V, *badger.Item) bool) *SeverIterator[K, V] {
+func Sever[K, V any](base kvutil.Iterator[K, V], f func(K, V, *badger.Item) bool) *SeverIterator[K, V] {
 	return &SeverIterator[K, V]{base: base, pred: f}
 }
 

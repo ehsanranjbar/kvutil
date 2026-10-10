@@ -1,4 +1,4 @@
-package badgerutils
+package kvutil
 
 // RawKVPair is a key-value pair with both key and value as byte slices.
 type RawKVPair struct {

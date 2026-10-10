@@ -8,13 +8,13 @@ import (
 	"testing"
 
 	badger "github.com/dgraph-io/badger/v4"
-	"github.com/ehsanranjbar/badgerutils"
-	"github.com/ehsanranjbar/badgerutils/codec/lex"
-	"github.com/ehsanranjbar/badgerutils/expr"
-	"github.com/ehsanranjbar/badgerutils/indexing"
-	"github.com/ehsanranjbar/badgerutils/iters"
-	extstore "github.com/ehsanranjbar/badgerutils/store/ext"
-	"github.com/ehsanranjbar/badgerutils/testutil"
+	"github.com/ehsanranjbar/kvutil"
+	"github.com/ehsanranjbar/kvutil/codec/lex"
+	"github.com/ehsanranjbar/kvutil/expr"
+	"github.com/ehsanranjbar/kvutil/indexing"
+	"github.com/ehsanranjbar/kvutil/iters"
+	extstore "github.com/ehsanranjbar/kvutil/store/ext"
+	"github.com/ehsanranjbar/kvutil/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -33,18 +33,18 @@ func (t *TestStruct) UnmarshalBinary(data []byte) error {
 
 type TestIndexer struct{}
 
-func (i TestIndexer) Index(v *TestStruct, update bool) ([]badgerutils.RawKVPair, error) {
+func (i TestIndexer) Index(v *TestStruct, update bool) ([]kvutil.RawKVPair, error) {
 	if v == nil {
 		return nil, nil
 	}
 
-	return []badgerutils.RawKVPair{
-		badgerutils.NewRawKVPair(append([]byte("A_idx"), binary.BigEndian.AppendUint64(nil, uint64(-v.A))...), nil),
-		badgerutils.NewRawKVPair(append([]byte("B_idx"), []byte(v.B)...), nil),
+	return []kvutil.RawKVPair{
+		kvutil.NewRawKVPair(append([]byte("A_idx"), binary.BigEndian.AppendUint64(nil, uint64(-v.A))...), nil),
+		kvutil.NewRawKVPair(append([]byte("B_idx"), []byte(v.B)...), nil),
 	}, nil
 }
 
-func (i TestIndexer) Lookup(args ...any) (badgerutils.Iterator[[]byte, indexing.Chunk], error) {
+func (i TestIndexer) Lookup(args ...any) (kvutil.Iterator[[]byte, indexing.Chunk], error) {
 	if len(args) < 1 {
 		return nil, fmt.Errorf("no arguments")
 	}

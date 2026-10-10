@@ -5,13 +5,13 @@ import (
 	"fmt"
 
 	badger "github.com/dgraph-io/badger/v4"
-	"github.com/ehsanranjbar/badgerutils"
-	"github.com/ehsanranjbar/badgerutils/codec"
-	extstore "github.com/ehsanranjbar/badgerutils/store/ext"
-	pstore "github.com/ehsanranjbar/badgerutils/store/prefix"
-	recstore "github.com/ehsanranjbar/badgerutils/store/rec"
-	refstore "github.com/ehsanranjbar/badgerutils/store/ref"
-	sstore "github.com/ehsanranjbar/badgerutils/store/serialized"
+	"github.com/ehsanranjbar/kvutil"
+	"github.com/ehsanranjbar/kvutil/codec"
+	extstore "github.com/ehsanranjbar/kvutil/store/ext"
+	pstore "github.com/ehsanranjbar/kvutil/store/prefix"
+	recstore "github.com/ehsanranjbar/kvutil/store/rec"
+	refstore "github.com/ehsanranjbar/kvutil/store/ref"
+	sstore "github.com/ehsanranjbar/kvutil/store/serialized"
 )
 
 // Relation is a struct that represents a relation between two stores.
@@ -102,11 +102,11 @@ type RelationInstance[
 
 	leftStore     *recstore.Instance[LI, LT, LR]
 	leftIdCodec   codec.Codec[LI]
-	leftRawStore  badgerutils.BadgerStore
+	leftRawStore  kvutil.BadgerStore
 	l2r           *refstore.Instance
 	rightStore    *recstore.Instance[RI, RT, RR]
 	rightIdCodec  codec.Codec[RI]
-	rightRawStore badgerutils.BadgerStore
+	rightRawStore kvutil.BadgerStore
 	r2l           *refstore.Instance
 }
 
@@ -178,7 +178,7 @@ func (ri *RelationInstance[LI, LT, LR, RI, RT, RR, D, PD]) Get(key CompoundKey[L
 }
 
 // NewIterator creates a new iterator.
-func (ri *RelationInstance[LI, LT, LR, RI, RT, RR, D, PD]) NewIterator(opts badger.IteratorOptions) badgerutils.Iterator[CompoundKey[LI, RI], *D] {
+func (ri *RelationInstance[LI, LT, LR, RI, RT, RR, D, PD]) NewIterator(opts badger.IteratorOptions) kvutil.Iterator[CompoundKey[LI, RI], *D] {
 	return &relationIterator[LI, RI, D, PD]{
 		base:         ri.l2r.NewIterator(opts),
 		leftIdCodec:  ri.leftIdCodec,
@@ -188,7 +188,7 @@ func (ri *RelationInstance[LI, LT, LR, RI, RT, RR, D, PD]) NewIterator(opts badg
 }
 
 type relationIterator[LI comparable, RI any, D any, PD sstore.BSP[D]] struct {
-	base         badgerutils.Iterator[[]byte, []byte]
+	base         kvutil.Iterator[[]byte, []byte]
 	leftIdCodec  codec.Codec[LI]
 	rightIdCodec codec.Codec[RI]
 	swapKeys     bool
@@ -308,7 +308,7 @@ func (ri *RelationInstance[LI, LT, LR, RI, RT, RR, D, PD]) Set(key CompoundKey[L
 	return nil
 }
 
-func doesKeyExist(store badgerutils.BadgerStore, lk []byte) (bool, error) {
+func doesKeyExist(store kvutil.BadgerStore, lk []byte) (bool, error) {
 	_, err := store.Get(lk)
 	if err == badger.ErrKeyNotFound {
 		return false, nil
@@ -349,7 +349,7 @@ func (e *relExt[MI, MT, MR, CI, CT, CR, D, PD]) Instantiate(txn *badger.Txn) ext
 	}
 }
 
-func (e *relExt[MI, MT, MR, CI, CT, CR, D, PD]) RegisterStore(store badgerutils.Instantiator[badgerutils.BadgerStore]) {
+func (e *relExt[MI, MT, MR, CI, CT, CR, D, PD]) RegisterStore(store kvutil.Instantiator[kvutil.BadgerStore]) {
 	s := refstore.New(store)
 	*e.m2c = s
 }
@@ -369,7 +369,7 @@ type relExtInstance[
 	mainIdCodec          codec.Codec[MI]
 	m2c                  *refstore.Instance
 	counterpartyIdCodec  codec.Codec[CI]
-	counterpartyRawStore badgerutils.BadgerStore // To check for existence of counterparties without deserializing
+	counterpartyRawStore kvutil.BadgerStore // To check for existence of counterparties without deserializing
 	c2m                  *refstore.Instance
 }
 

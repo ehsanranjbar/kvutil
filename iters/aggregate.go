@@ -2,19 +2,19 @@ package iters
 
 import (
 	badger "github.com/dgraph-io/badger/v4"
-	"github.com/ehsanranjbar/badgerutils"
+	"github.com/ehsanranjbar/kvutil"
 )
 
 // AggregateIterator is an iterator that aggregates the values of base iterator as it iterates without
 // interfering with the base iterator.
 type AggregateIterator[K, V, S any] struct {
-	base  badgerutils.Iterator[K, V]
+	base  kvutil.Iterator[K, V]
 	state S
 	f     func(S, V, *badger.Item) S
 }
 
 // Aggregate creates a new aggregate iterator.
-func Aggregate[K, V, S any](base badgerutils.Iterator[K, V], f func(S, V, *badger.Item) S) *AggregateIterator[K, V, S] {
+func Aggregate[K, V, S any](base kvutil.Iterator[K, V], f func(S, V, *badger.Item) S) *AggregateIterator[K, V, S] {
 	return &AggregateIterator[K, V, S]{base: base, f: f}
 }
 

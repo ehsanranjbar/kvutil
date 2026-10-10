@@ -3,7 +3,7 @@ package expr_test
 import (
 	"testing"
 
-	"github.com/ehsanranjbar/badgerutils/expr"
+	"github.com/ehsanranjbar/kvutil/expr"
 	"github.com/stretchr/testify/require"
 )
 

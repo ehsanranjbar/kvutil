@@ -3,7 +3,7 @@ package ext
 import (
 	"context"
 
-	"github.com/ehsanranjbar/badgerutils/codec"
+	"github.com/ehsanranjbar/kvutil/codec"
 )
 
 type contextKey string

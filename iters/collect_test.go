@@ -3,7 +3,7 @@ package iters_test
 import (
 	"testing"
 
-	"github.com/ehsanranjbar/badgerutils/iters"
+	"github.com/ehsanranjbar/kvutil/iters"
 	"github.com/stretchr/testify/require"
 )
 

@@ -5,11 +5,11 @@ import (
 	"testing"
 
 	badger "github.com/dgraph-io/badger/v4"
-	"github.com/ehsanranjbar/badgerutils"
-	"github.com/ehsanranjbar/badgerutils/iters"
-	pstore "github.com/ehsanranjbar/badgerutils/store/prefix"
-	sstore "github.com/ehsanranjbar/badgerutils/store/serialized"
-	"github.com/ehsanranjbar/badgerutils/testutil"
+	"github.com/ehsanranjbar/kvutil"
+	"github.com/ehsanranjbar/kvutil/iters"
+	pstore "github.com/ehsanranjbar/kvutil/store/prefix"
+	sstore "github.com/ehsanranjbar/kvutil/store/serialized"
+	"github.com/ehsanranjbar/kvutil/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -17,7 +17,7 @@ import (
 func TestFlatten(t *testing.T) {
 	txn := testutil.PrepareTxn(t, true)
 
-	var its []badgerutils.Iterator[[]byte, *StructA]
+	var its []kvutil.Iterator[[]byte, *StructA]
 	for i := 0; i < 3; i++ {
 		store := sstore.New[[]byte, StructA](pstore.New(nil, []byte{byte(i)}))
 		ins := store.Instantiate(txn)

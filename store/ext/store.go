@@ -7,11 +7,11 @@ import (
 	"sync"
 
 	"github.com/dgraph-io/badger/v4"
-	"github.com/ehsanranjbar/badgerutils"
-	"github.com/ehsanranjbar/badgerutils/codec"
-	"github.com/ehsanranjbar/badgerutils/internal/ordmap"
-	pstore "github.com/ehsanranjbar/badgerutils/store/prefix"
-	sstore "github.com/ehsanranjbar/badgerutils/store/serialized"
+	"github.com/ehsanranjbar/kvutil"
+	"github.com/ehsanranjbar/kvutil/codec"
+	"github.com/ehsanranjbar/kvutil/internal/ordmap"
+	pstore "github.com/ehsanranjbar/kvutil/store/prefix"
+	sstore "github.com/ehsanranjbar/kvutil/store/serialized"
 )
 
 var (
@@ -34,7 +34,7 @@ type Store[K, V any, PV sstore.BSP[V]] struct {
 func New[
 	K, V any,
 	PV sstore.BSP[V],
-](base badgerutils.Instantiator[badgerutils.BadgerStore]) *Store[K, V, PV] {
+](base kvutil.Instantiator[kvutil.BadgerStore]) *Store[K, V, PV] {
 	var prefix []byte
 	if pfx, ok := base.(prefixed); ok {
 		prefix = pfx.Prefix()
@@ -111,7 +111,7 @@ func (s *Store[K, V, PV]) Prefix() []byte {
 
 // Instance is an instance of Store.
 type Instance[K, V any, PV sstore.BSP[V]] struct {
-	dataStore badgerutils.StoreInstance[K, *V, *V, badgerutils.Iterator[K, *V]]
+	dataStore kvutil.StoreInstance[K, *V, *V, kvutil.Iterator[K, *V]]
 	keyCodec  codec.Codec[K]
 	exts      *ordmap.Map[string, ExtensionInstance[K, V]]
 	prefix    []byte
@@ -122,7 +122,7 @@ func (s *Instance[K, V, PV]) Prefix() []byte {
 	return s.prefix
 }
 
-// Delete implements the badgerutils.StoreInstance interface.
+// Delete implements the kvutil.StoreInstance interface.
 func (s *Instance[K, V, PV]) Delete(key K) error {
 	err := s.onDelete(key)
 	if err != nil {
@@ -169,17 +169,17 @@ func (s *Instance[K, V, PV]) newContext(key K) context.Context {
 	return ctx
 }
 
-// Get implements the badgerutils.StoreInstance interface.
+// Get implements the kvutil.StoreInstance interface.
 func (s *Instance[K, V, PV]) Get(key K) (*V, error) {
 	return s.dataStore.Get(key)
 }
 
-// NewIterator implements the badgerutils.StoreInstance interface.
-func (s *Instance[K, V, PV]) NewIterator(opts badger.IteratorOptions) badgerutils.Iterator[K, *V] {
+// NewIterator implements the kvutil.StoreInstance interface.
+func (s *Instance[K, V, PV]) NewIterator(opts badger.IteratorOptions) kvutil.Iterator[K, *V] {
 	return s.dataStore.NewIterator(opts)
 }
 
-// Set implements the badgerutils.StoreInstance interface.
+// Set implements the kvutil.StoreInstance interface.
 func (s *Instance[K, V, PV]) Set(key K, v *V) error {
 	return s.SetWithOptions(key, v)
 }

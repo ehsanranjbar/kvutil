@@ -5,14 +5,14 @@ import (
 	"math"
 	"testing"
 
-	"github.com/ehsanranjbar/badgerutils"
-	"github.com/ehsanranjbar/badgerutils/codec/be"
-	"github.com/ehsanranjbar/badgerutils/codec/lex"
-	"github.com/ehsanranjbar/badgerutils/expr"
-	"github.com/ehsanranjbar/badgerutils/indexing"
-	"github.com/ehsanranjbar/badgerutils/indexing/concat"
-	"github.com/ehsanranjbar/badgerutils/iters"
-	"github.com/ehsanranjbar/badgerutils/schema"
+	"github.com/ehsanranjbar/kvutil"
+	"github.com/ehsanranjbar/kvutil/codec/be"
+	"github.com/ehsanranjbar/kvutil/codec/lex"
+	"github.com/ehsanranjbar/kvutil/expr"
+	"github.com/ehsanranjbar/kvutil/indexing"
+	"github.com/ehsanranjbar/kvutil/indexing/concat"
+	"github.com/ehsanranjbar/kvutil/iters"
+	"github.com/ehsanranjbar/kvutil/schema"
 	"github.com/stretchr/testify/require"
 )
 
@@ -37,14 +37,14 @@ func TestIndexer_Index(t *testing.T) {
 		name       string
 		components []concat.Component
 		input      *Foo
-		want       []badgerutils.RawKVPair
+		want       []kvutil.RawKVPair
 		wantErr    bool
 	}{
 		{
 			name:       "Single component",
 			components: []concat.Component{concat.NewComponent("Str1")},
 			input:      &Foo{Str1: "Alice"},
-			want: []badgerutils.RawKVPair{
+			want: []kvutil.RawKVPair{
 				{
 					Key: be.PadOrTruncRight([]byte("Alice"), concat.DefaultMaxComponentSize),
 				},
@@ -54,7 +54,7 @@ func TestIndexer_Index(t *testing.T) {
 			name:       "Multiple components",
 			components: []concat.Component{concat.NewComponent("Str2"), concat.NewComponent("Int").WithSize(8)},
 			input:      &Foo{Str2: "Male", Int: 30},
-			want: []badgerutils.RawKVPair{
+			want: []kvutil.RawKVPair{
 				{
 					Key: append(be.PadOrTruncRight([]byte("Male"), concat.DefaultMaxComponentSize), lex.EncodeInt64(30)...),
 				},
@@ -64,19 +64,19 @@ func TestIndexer_Index(t *testing.T) {
 			name:       "Nested struct",
 			components: []concat.Component{concat.NewComponent("Struct.Test").WithSize(8)},
 			input:      &Foo{Struct: Bar{Test: 42}},
-			want:       []badgerutils.RawKVPair{{Key: lex.EncodeInt64(42)}},
+			want:       []kvutil.RawKVPair{{Key: lex.EncodeInt64(42)}},
 		},
 		{
 			name:       "Pointer to struct",
 			components: []concat.Component{concat.NewComponent("Pointer.Test").WithSize(8)},
 			input:      &Foo{Pointer: &Bar{Test: 42}},
-			want:       []badgerutils.RawKVPair{{Key: lex.EncodeInt64(42)}},
+			want:       []kvutil.RawKVPair{{Key: lex.EncodeInt64(42)}},
 		},
 		{
 			name:       "Bytes",
 			components: []concat.Component{concat.NewComponent("Bytes")},
 			input:      &Foo{Bytes: []byte{1, 2, 3}},
-			want: []badgerutils.RawKVPair{
+			want: []kvutil.RawKVPair{
 				{Key: be.PadOrTruncRight([]byte{1, 2, 3}, concat.DefaultMaxComponentSize)},
 			},
 		},
@@ -84,7 +84,7 @@ func TestIndexer_Index(t *testing.T) {
 			name:       "Array",
 			components: []concat.Component{concat.NewComponent("Array").WithSize(8)},
 			input:      &Foo{Array: [3]int{1, 2, 3}},
-			want: []badgerutils.RawKVPair{
+			want: []kvutil.RawKVPair{
 				{Key: lex.EncodeInt64(1)},
 				{Key: lex.EncodeInt64(2)},
 				{Key: lex.EncodeInt64(3)},
@@ -94,7 +94,7 @@ func TestIndexer_Index(t *testing.T) {
 			name:       "Slice",
 			components: []concat.Component{concat.NewComponent("StrSlice")},
 			input:      &Foo{StrSlice: []string{"Alice", "Bob"}},
-			want: []badgerutils.RawKVPair{
+			want: []kvutil.RawKVPair{
 				{Key: be.PadOrTruncRight([]byte("Alice"), concat.DefaultMaxComponentSize)},
 				{Key: be.PadOrTruncRight([]byte("Bob"), concat.DefaultMaxComponentSize)},
 			},
@@ -103,7 +103,7 @@ func TestIndexer_Index(t *testing.T) {
 			name:       "Array x Slice",
 			components: []concat.Component{concat.NewComponent("Array").WithSize(8), concat.NewComponent("StrSlice")},
 			input:      &Foo{Array: [3]int{1, 2, 3}, StrSlice: []string{"Alice", "Bob"}},
-			want: []badgerutils.RawKVPair{
+			want: []kvutil.RawKVPair{
 				{Key: append(lex.EncodeInt64(1), be.PadOrTruncRight([]byte("Alice"), concat.DefaultMaxComponentSize)...)},
 				{Key: append(lex.EncodeInt64(1), be.PadOrTruncRight([]byte("Bob"), concat.DefaultMaxComponentSize)...)},
 				{Key: append(lex.EncodeInt64(2), be.PadOrTruncRight([]byte("Alice"), concat.DefaultMaxComponentSize)...)},
@@ -116,13 +116,13 @@ func TestIndexer_Index(t *testing.T) {
 			name:       "Descending order",
 			components: []concat.Component{concat.NewComponent("Int").WithSize(8).Desc()},
 			input:      &Foo{Int: 30},
-			want:       []badgerutils.RawKVPair{{Key: lex.Invert(lex.EncodeInt64(30))}},
+			want:       []kvutil.RawKVPair{{Key: lex.Invert(lex.EncodeInt64(30))}},
 		},
 		{
 			name:       "Custom size",
 			components: []concat.Component{concat.NewComponent("Str1").WithSize(10)},
 			input:      &Foo{Str1: "Alice"},
-			want: []badgerutils.RawKVPair{
+			want: []kvutil.RawKVPair{
 				{Key: be.PadOrTruncRight([]byte("Alice"), 10)},
 			},
 		},

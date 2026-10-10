@@ -2,17 +2,17 @@ package iters
 
 import (
 	badger "github.com/dgraph-io/badger/v4"
-	"github.com/ehsanranjbar/badgerutils"
+	"github.com/ehsanranjbar/kvutil"
 )
 
 // MapIterator is an iterator that maps the value from T to U.
 type MapIterator[K, V, U any] struct {
-	base badgerutils.Iterator[K, V]
+	base kvutil.Iterator[K, V]
 	f    func(V, *badger.Item) (U, error)
 }
 
 // Map creates a new map iterator.
-func Map[K, V, U any](base badgerutils.Iterator[K, V], f func(V, *badger.Item) (U, error)) *MapIterator[K, V, U] {
+func Map[K, V, U any](base kvutil.Iterator[K, V], f func(V, *badger.Item) (U, error)) *MapIterator[K, V, U] {
 	return &MapIterator[K, V, U]{base: base, f: f}
 }
 

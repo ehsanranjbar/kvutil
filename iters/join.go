@@ -2,22 +2,22 @@ package iters
 
 import (
 	badger "github.com/dgraph-io/badger/v4"
-	"github.com/ehsanranjbar/badgerutils"
+	"github.com/ehsanranjbar/kvutil"
 )
 
 // JoinIterator is an iterator that joins two iterators by
 // pairing the respective items and values and mapping them to a new type using the given custom function.
 // Note that Item() will return nil and Seek() is not implemented for this iterator because of nature of the join operation.
 type JoinIterator[K, A, B, C any] struct {
-	iterA badgerutils.Iterator[K, A]
-	iterB badgerutils.Iterator[K, B]
+	iterA kvutil.Iterator[K, A]
+	iterB kvutil.Iterator[K, B]
 	f     func(A, *badger.Item, B, *badger.Item) (C, bool)
 	value C
 	err   error
 }
 
 // Join creates a new JoinIterator.
-func Join[K, A, B, C any](iterA badgerutils.Iterator[K, A], iterB badgerutils.Iterator[K, B], f func(A, *badger.Item, B, *badger.Item) (C, bool)) *JoinIterator[K, A, B, C] {
+func Join[K, A, B, C any](iterA kvutil.Iterator[K, A], iterB kvutil.Iterator[K, B], f func(A, *badger.Item, B, *badger.Item) (C, bool)) *JoinIterator[K, A, B, C] {
 	return &JoinIterator[K, A, B, C]{iterA: iterA, iterB: iterB, f: f}
 }
 
@@ -34,8 +34,13 @@ func (it *JoinIterator[K, A, B, C]) Item() *badger.Item {
 
 // Next implements the Iterator interface.
 func (it *JoinIterator[K, A, B, C]) Next() {
-	it.iterA.Next()
-	it.iterB.Next()
+	// An exhausted badger iterator must not be advanced any further.
+	if it.iterA.Valid() {
+		it.iterA.Next()
+	}
+	if it.iterB.Valid() {
+		it.iterB.Next()
+	}
 }
 
 // Rewind implements the Iterator interface.

@@ -2,9 +2,10 @@ package codec
 
 import (
 	"encoding"
+	"fmt"
 	"reflect"
 
-	"github.com/ehsanranjbar/badgerutils/codec/lex"
+	"github.com/ehsanranjbar/kvutil/codec/lex"
 )
 
 // Codec is an interface for encoding and decoding values.
@@ -23,32 +24,62 @@ type Decoder[T any] interface {
 	Decode(bz []byte) (T, error)
 }
 
-// CodecFor returns the codec for the given type.
-func CodecFor[T any]() Codec[T] {
-	rt := reflect.TypeFor[T]()
-	switch rt.Kind() {
-	case reflect.String:
-		return any(stringCodec{}).(Codec[T])
-	case reflect.Int:
-		return any(intCodec{}).(Codec[T])
-	case reflect.Int64:
-		return any(int64Codec{}).(Codec[T])
-	case reflect.Uint:
-		return any(uintCodec{}).(Codec[T])
-	case reflect.Uint64:
-		return any(uint64Codec{}).(Codec[T])
-	case reflect.Slice:
-		if rt.Elem().Kind() == reflect.Uint8 {
-			return any(bytesCodec{}).(Codec[T])
+// CodecFor returns the codec for the given type, or an error if the type has none.
+// Integers are encoded in lexicographical order with a fixed width.
+func CodecFor[T any]() (Codec[T], error) {
+	var (
+		zero T
+		c    any
+	)
+	switch any(zero).(type) {
+	case string:
+		c = stringCodec{}
+	case []byte:
+		c = bytesCodec{}
+	case int:
+		c = fixedCodec[int]{
+			size:   8,
+			encode: func(v int) []byte { return lex.EncodeInt64(int64(v)) },
+			decode: func(bz []byte) int { return int(lex.DecodeInt64(bz)) },
 		}
+	case int8:
+		c = fixedCodec[int8]{size: 1, encode: lex.EncodeInt8, decode: lex.DecodeInt8}
+	case int16:
+		c = fixedCodec[int16]{size: 2, encode: lex.EncodeInt16, decode: lex.DecodeInt16}
+	case int32:
+		c = fixedCodec[int32]{size: 4, encode: lex.EncodeInt32, decode: lex.DecodeInt32}
+	case int64:
+		c = fixedCodec[int64]{size: 8, encode: lex.EncodeInt64, decode: lex.DecodeInt64}
+	case uint:
+		c = fixedCodec[uint]{
+			size:   8,
+			encode: func(v uint) []byte { return lex.EncodeUint64(uint64(v)) },
+			decode: func(bz []byte) uint { return uint(lex.DecodeUint64(bz)) },
+		}
+	case uint8:
+		c = fixedCodec[uint8]{
+			size:   1,
+			encode: func(v uint8) []byte { return []byte{v} },
+			decode: func(bz []byte) uint8 { return bz[0] },
+		}
+	case uint16:
+		c = fixedCodec[uint16]{size: 2, encode: lex.EncodeUint16, decode: lex.DecodeUint16}
+	case uint32:
+		c = fixedCodec[uint32]{size: 4, encode: lex.EncodeUint32, decode: lex.DecodeUint32}
+	case uint64:
+		c = fixedCodec[uint64]{size: 8, encode: lex.EncodeUint64, decode: lex.DecodeUint64}
+	}
+	if c != nil {
+		return c.(Codec[T]), nil
 	}
 
+	rt := reflect.TypeFor[T]()
 	if rt.Implements(reflect.TypeFor[encoding.BinaryMarshaler]()) &&
 		reflect.TypeFor[*T]().Implements(reflect.TypeFor[encoding.BinaryUnmarshaler]()) {
-		return binaryCodec[T]{}
+		return binaryCodec[T]{}, nil
 	}
 
-	return nil
+	return nil, fmt.Errorf("no codec for type %s", rt)
 }
 
 type stringCodec struct{}
@@ -63,52 +94,25 @@ func (stringCodec) Decode(bz []byte) (string, error) {
 	return string(bz), nil
 }
 
-type intCodec struct{}
+// fixedCodec is a codec for values that are always encoded to the same number of bytes.
+type fixedCodec[T any] struct {
+	size   int
+	encode func(T) []byte
+	decode func([]byte) T
+}
 
 // Encode implements the Codec interface.
-func (intCodec) Encode(v int) ([]byte, error) {
-	return lex.EncodeInt64(int64(v)), nil
+func (c fixedCodec[T]) Encode(v T) ([]byte, error) {
+	return c.encode(v), nil
 }
 
 // Decode implements the Codec interface.
-func (intCodec) Decode(bz []byte) (int, error) {
-	return int(lex.DecodeInt64(bz)), nil
-}
-
-type int64Codec struct{}
-
-// Encode implements the Codec interface.
-func (int64Codec) Encode(v int64) ([]byte, error) {
-	return lex.EncodeInt64(v), nil
-}
-
-// Decode implements the Codec interface.
-func (int64Codec) Decode(bz []byte) (int64, error) {
-	return lex.DecodeInt64(bz), nil
-}
-
-type uintCodec struct{}
-
-// Encode implements the Codec interface.
-func (uintCodec) Encode(v uint) ([]byte, error) {
-	return lex.EncodeUint64(uint64(v)), nil
-}
-
-// Decode implements the Codec interface.
-func (uintCodec) Decode(bz []byte) (uint, error) {
-	return uint(lex.DecodeUint64(bz)), nil
-}
-
-type uint64Codec struct{}
-
-// Encode implements the Codec interface.
-func (uint64Codec) Encode(v uint64) ([]byte, error) {
-	return lex.EncodeUint64(v), nil
-}
-
-// Decode implements the Codec interface.
-func (uint64Codec) Decode(bz []byte) (uint64, error) {
-	return uint64(lex.DecodeUint64(bz)), nil
+func (c fixedCodec[T]) Decode(bz []byte) (T, error) {
+	if len(bz) != c.size {
+		var zero T
+		return zero, fmt.Errorf("invalid length %d for %T, expected %d", len(bz), zero, c.size)
+	}
+	return c.decode(bz), nil
 }
 
 type bytesCodec struct{}

@@ -1,11 +1,11 @@
-package badgerutils_test
+package kvutil_test
 
 import (
 	"testing"
 
 	badger "github.com/dgraph-io/badger/v4"
-	"github.com/ehsanranjbar/badgerutils"
-	biters "github.com/ehsanranjbar/badgerutils/iters/bare"
+	"github.com/ehsanranjbar/kvutil"
+	biters "github.com/ehsanranjbar/kvutil/iters/bare"
 	"github.com/stretchr/testify/require"
 )
 
@@ -14,7 +14,7 @@ func TestNameRegistry(t *testing.T) {
 	require.NoError(t, err)
 	defer db.Close()
 
-	nreg, err := badgerutils.NewNameRegistry(db)
+	nreg, err := kvutil.NewNameRegistry(db)
 	t.Run("Init", func(t *testing.T) {
 		require.NoError(t, err)
 
@@ -27,7 +27,7 @@ func TestNameRegistry(t *testing.T) {
 	})
 
 	t.Run("Reload", func(t *testing.T) {
-		nreg2, err := badgerutils.NewNameRegistry(db)
+		nreg2, err := kvutil.NewNameRegistry(db)
 		require.NoError(t, err)
 
 		prefix, err := nreg2.Name("bar")
@@ -36,7 +36,7 @@ func TestNameRegistry(t *testing.T) {
 	})
 
 	t.Run("SubRegistry", func(t *testing.T) {
-		nreg2, err := badgerutils.NewNameRegistry(db, badgerutils.WithRegistryPrefix(nreg.MustName("branch")))
+		nreg2, err := kvutil.NewNameRegistry(db, kvutil.WithRegistryPrefix(nreg.MustName("branch")))
 		require.NoError(t, err)
 
 		prefix, err := nreg2.Name("foo")
@@ -57,9 +57,30 @@ func TestNameRegistry(t *testing.T) {
 			return nil
 		})
 		require.NoError(t, err)
-		require.Equal(t,[][]byte{
+		require.Equal(t, [][]byte{
 			{0x00},
 			{0x03},
 		}, keys)
 	})
+}
+
+func TestNameRegistryFailedPersist(t *testing.T) {
+	dir := t.TempDir()
+	db, err := badger.Open(badger.DefaultOptions(dir).WithLoggingLevel(badger.ERROR))
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	// Writes fail on a read-only database.
+	db, err = badger.Open(badger.DefaultOptions(dir).WithReadOnly(true).WithLoggingLevel(badger.ERROR))
+	require.NoError(t, err)
+	defer db.Close()
+
+	nreg, err := kvutil.NewNameRegistry(db)
+	require.NoError(t, err)
+
+	// A name that could not be persisted must not be handed out from memory afterwards.
+	for range 2 {
+		_, err = nreg.Name("foo")
+		require.Error(t, err)
+	}
 }

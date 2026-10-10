@@ -4,9 +4,9 @@ import (
 	"context"
 
 	badger "github.com/dgraph-io/badger/v4"
-	"github.com/ehsanranjbar/badgerutils"
-	extstore "github.com/ehsanranjbar/badgerutils/store/ext"
-	refstore "github.com/ehsanranjbar/badgerutils/store/ref"
+	"github.com/ehsanranjbar/kvutil"
+	extstore "github.com/ehsanranjbar/kvutil/store/ext"
+	refstore "github.com/ehsanranjbar/kvutil/store/ref"
 )
 
 // Extension is an extension for extensible stores that indexes the data with a given indexer.
@@ -26,7 +26,7 @@ func NewExtension[K, V any](indexer Indexer[V]) extstore.Extension[K, V] {
 }
 
 // Init implements the extensible.Extension interface.
-func (e *Extension[K, V]) RegisterStore(store badgerutils.Instantiator[badgerutils.BadgerStore]) {
+func (e *Extension[K, V]) RegisterStore(store kvutil.Instantiator[kvutil.BadgerStore]) {
 	e.store = refstore.New(store)
 }
 
@@ -84,7 +84,7 @@ func (e *ExtensionInstance[K, V]) OnSet(ctx context.Context, key K, old, new *V,
 }
 
 // Lookup queries the index with the given arguments and returns an iterator of keys.
-func (e *ExtensionInstance[K, V]) Lookup(opts badger.IteratorOptions, args ...any) (badgerutils.Iterator[[]byte, []byte], error) {
+func (e *ExtensionInstance[K, V]) Lookup(opts badger.IteratorOptions, args ...any) (kvutil.Iterator[[]byte, []byte], error) {
 	iter, err := e.ext.indexer.Lookup(args...)
 	if err != nil {
 		return nil, err

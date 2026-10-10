@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	badger "github.com/dgraph-io/badger/v4"
-	"github.com/ehsanranjbar/badgerutils/iters"
+	"github.com/ehsanranjbar/kvutil/iters"
 	"github.com/stretchr/testify/require"
 )
 

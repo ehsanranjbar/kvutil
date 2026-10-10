@@ -8,14 +8,14 @@ import (
 	"github.com/araddon/qlbridge/expr"
 	qlvm "github.com/araddon/qlbridge/vm"
 	badger "github.com/dgraph-io/badger/v4"
-	"github.com/ehsanranjbar/badgerutils"
-	"github.com/ehsanranjbar/badgerutils/codec"
-	"github.com/ehsanranjbar/badgerutils/indexing"
-	"github.com/ehsanranjbar/badgerutils/internal/qlutil"
-	"github.com/ehsanranjbar/badgerutils/iters"
-	"github.com/ehsanranjbar/badgerutils/schema"
-	extstore "github.com/ehsanranjbar/badgerutils/store/ext"
-	"golang.org/x/exp/constraints"
+	"github.com/ehsanranjbar/kvutil"
+	"github.com/ehsanranjbar/kvutil/codec"
+	"github.com/ehsanranjbar/kvutil/indexing"
+	"github.com/ehsanranjbar/kvutil/internal/constraints"
+	"github.com/ehsanranjbar/kvutil/internal/qlutil"
+	"github.com/ehsanranjbar/kvutil/iters"
+	"github.com/ehsanranjbar/kvutil/schema"
+	extstore "github.com/ehsanranjbar/kvutil/store/ext"
 )
 
 // Record is a model for something that is serializable and has an unique id assigned to it.
@@ -51,11 +51,14 @@ func New[
 	T any,
 	PT Record[I, T],
 ](
-	base badgerutils.Instantiator[badgerutils.BadgerStore],
+	base kvutil.Instantiator[kvutil.BadgerStore],
 ) *Store[I, T, PT] {
+	// A missing id codec is reported on first instantiation, unless WithIdCodec sets one.
+	idCodec, _ := codec.CodecFor[I]()
+
 	return &Store[I, T, PT]{
 		base:      extstore.New[I, T, PT](base),
-		idCodec:   codec.CodecFor[I](),
+		idCodec:   idCodec,
 		indexers:  map[string]*indexing.Extension[I, T]{},
 		extractor: schema.NewReflectPathExtractor[*T](true),
 	}
@@ -149,7 +152,7 @@ func (s *Store[I, T, PT]) Prefix() []byte {
 	return s.base.Prefix()
 }
 
-// Instantiate implements the badgerutils.Instantiator interface.
+// Instantiate implements the kvutil.Instantiator interface.
 func (s *Store[I, T, PT]) Instantiate(txn *badger.Txn) *Instance[I, T, PT] {
 	// Locking any changes to the store's configuration on first instantiation.
 	s.init.Do(func() {
@@ -199,12 +202,12 @@ type Instance[
 	extractor schema.PathExtractor[*T]
 }
 
-// Delete implements the badgerutils.StoreInstance interface.
+// Delete implements the kvutil.StoreInstance interface.
 func (s *Instance[I, T, PT]) Delete(id I) error {
 	return s.base.Delete(id)
 }
 
-// Get implements the badgerutils.StoreInstance interface.
+// Get implements the kvutil.StoreInstance interface.
 func (s *Instance[I, T, PT]) Get(id I) (*T, error) {
 	r, err := s.base.Get(id)
 	if err != nil {
@@ -214,12 +217,12 @@ func (s *Instance[I, T, PT]) Get(id I) (*T, error) {
 	return r, nil
 }
 
-// NewIterator implements the badgerutils.StoreInstance interface.
+// NewIterator implements the kvutil.StoreInstance interface.
 func (s *Instance[I, T, PT]) NewIterator(opts badger.IteratorOptions) *Iterator[I, T] {
 	return newIterator(s.base.NewIterator(opts), s.idCodec)
 }
 
-// Set implements the badgerutils.StoreInstance interface.
+// Set implements the kvutil.StoreInstance interface.
 func (s *Instance[I, T, PT]) Set(v *T, opts ...any) error {
 	var zero I
 	if PT(v).GetId() == zero {
@@ -239,7 +242,7 @@ func (s *Instance[I, T, PT]) Set(v *T, opts ...any) error {
 }
 
 // Query returns the query for the store.
-func (s *Instance[I, T, PT]) Query(q string) (badgerutils.Iterator[I, *T], error) {
+func (s *Instance[I, T, PT]) Query(q string) (kvutil.Iterator[I, *T], error) {
 	qe, err := expr.ParseExpression(q)
 	if err != nil {
 		return nil, err

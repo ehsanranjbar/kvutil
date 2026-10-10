@@ -8,7 +8,7 @@ import (
 	"strconv"
 
 	badger "github.com/dgraph-io/badger/v4"
-	"github.com/ehsanranjbar/badgerutils/examples/petstore/types"
+	"github.com/ehsanranjbar/kvutil/examples/petstore/types"
 	"github.com/google/uuid"
 	echo "github.com/labstack/echo/v4"
 )

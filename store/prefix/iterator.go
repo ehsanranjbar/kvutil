@@ -2,17 +2,17 @@ package prefix
 
 import (
 	badger "github.com/dgraph-io/badger/v4"
-	"github.com/ehsanranjbar/badgerutils"
+	"github.com/ehsanranjbar/kvutil"
 )
 
 // Iterator is an iterator trims the prefix from the key.
 type Iterator struct {
-	base   badgerutils.BadgerIterator
+	base   kvutil.BadgerIterator
 	prefix []byte
 }
 
 // NewIterator creates a new iterator.
-func NewIterator(base badgerutils.BadgerIterator, prefix []byte) *Iterator {
+func NewIterator(base kvutil.BadgerIterator, prefix []byte) *Iterator {
 	return &Iterator{
 		base:   base,
 		prefix: prefix,
@@ -20,7 +20,7 @@ func NewIterator(base badgerutils.BadgerIterator, prefix []byte) *Iterator {
 }
 
 // NewIteratorFromStore creates a new iterator from a prefix store.
-func NewIteratorFromStore(store badgerutils.BadgerStore) *Iterator {
+func NewIteratorFromStore(store kvutil.BadgerStore) *Iterator {
 	var prefix []byte
 	if pfx, ok := store.(prefixed); ok {
 		prefix = pfx.Prefix()

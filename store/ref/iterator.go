@@ -4,11 +4,11 @@ import (
 	"bytes"
 
 	"github.com/dgraph-io/badger/v4"
-	"github.com/ehsanranjbar/badgerutils"
+	"github.com/ehsanranjbar/kvutil"
 )
 
 type iterator struct {
-	base        badgerutils.BadgerIterator
+	base        kvutil.BadgerIterator
 	keyProvider keyProvider
 }
 
@@ -16,7 +16,7 @@ type keyProvider interface {
 	Key() ([]byte, error)
 }
 
-func newIterator(base badgerutils.BadgerIterator) *iterator {
+func newIterator(base kvutil.BadgerIterator) *iterator {
 	kp, _ := base.(keyProvider)
 
 	return &iterator{

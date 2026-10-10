@@ -3,8 +3,8 @@ package indexing
 import (
 	"fmt"
 
-	"github.com/ehsanranjbar/badgerutils"
-	"github.com/ehsanranjbar/badgerutils/schema"
+	"github.com/ehsanranjbar/kvutil"
+	"github.com/ehsanranjbar/kvutil/schema"
 )
 
 // Indexer is a wrapper around an Indexer that injects custom values to the indexes.
@@ -35,7 +35,7 @@ func NewValueInjector[T any](
 }
 
 // Index implements the Indexer interface.
-func (i *ValueInjector[T]) Index(v *T, set bool) ([]badgerutils.RawKVPair, error) {
+func (i *ValueInjector[T]) Index(v *T, set bool) ([]kvutil.RawKVPair, error) {
 	if v == nil {
 		return nil, nil
 	}
@@ -60,7 +60,7 @@ func (i *ValueInjector[T]) Index(v *T, set bool) ([]badgerutils.RawKVPair, error
 }
 
 // Lookup implements the Indexer interface.
-func (i *ValueInjector[T]) Lookup(args ...any) (badgerutils.Iterator[[]byte, Chunk], error) {
+func (i *ValueInjector[T]) Lookup(args ...any) (kvutil.Iterator[[]byte, Chunk], error) {
 	return i.indexer.Lookup(args...)
 }
 

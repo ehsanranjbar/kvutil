@@ -5,12 +5,12 @@ import (
 
 	roaring "github.com/RoaringBitmap/roaring/v2"
 	"github.com/RoaringBitmap/roaring/v2/roaring64"
-	"github.com/ehsanranjbar/badgerutils"
-	"github.com/ehsanranjbar/badgerutils/codec/be"
+	"github.com/ehsanranjbar/kvutil"
+	"github.com/ehsanranjbar/kvutil/codec/be"
 )
 
 // PopulateRoaring32 populates a roaring bitmap with 32-bit integers from an iterator of byte slices.
-func PopulateRoaring32(bm *roaring.Bitmap, iter badgerutils.Iterator[[]byte, []byte]) error {
+func PopulateRoaring32(bm *roaring.Bitmap, iter kvutil.Iterator[[]byte, []byte]) error {
 	for iter.Rewind(); iter.Valid(); iter.Next() {
 		v, err := iter.Value()
 		if err != nil {
@@ -23,7 +23,7 @@ func PopulateRoaring32(bm *roaring.Bitmap, iter badgerutils.Iterator[[]byte, []b
 }
 
 // PopulateRoaring64 populates a roaring bitmap with 64-bit integers from an iterator of byte slices.
-func PopulateRoaring64(bm *roaring64.Bitmap, iter badgerutils.Iterator[[]byte, []byte]) error {
+func PopulateRoaring64(bm *roaring64.Bitmap, iter kvutil.Iterator[[]byte, []byte]) error {
 	for iter.Rewind(); iter.Valid(); iter.Next() {
 		v, err := iter.Value()
 		if err != nil {

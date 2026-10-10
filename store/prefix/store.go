@@ -2,17 +2,17 @@ package prefix
 
 import (
 	badger "github.com/dgraph-io/badger/v4"
-	badgerutils "github.com/ehsanranjbar/badgerutils"
+	"github.com/ehsanranjbar/kvutil"
 )
 
 type Store struct {
-	base       badgerutils.Instantiator[badgerutils.BadgerStore]
+	base       kvutil.Instantiator[kvutil.BadgerStore]
 	basePrefix []byte
 	prefix     []byte
 }
 
 // New creates a new Store.
-func New(base badgerutils.Instantiator[badgerutils.BadgerStore], prefix []byte) *Store {
+func New(base kvutil.Instantiator[kvutil.BadgerStore], prefix []byte) *Store {
 	var basePrefix []byte
 	if pfx, ok := base.(prefixed); ok {
 		basePrefix = pfx.Prefix()
@@ -35,8 +35,8 @@ func (s *Store) Prefix() []byte {
 }
 
 // Instantiate creates a new Instance.
-func (s *Store) Instantiate(txn *badger.Txn) badgerutils.BadgerStore {
-	var base badgerutils.BadgerStore = txn
+func (s *Store) Instantiate(txn *badger.Txn) kvutil.BadgerStore {
+	var base kvutil.BadgerStore = txn
 	if s.base != nil {
 		base = s.base.Instantiate(txn)
 	}
@@ -50,7 +50,7 @@ func (s *Store) Instantiate(txn *badger.Txn) badgerutils.BadgerStore {
 
 // Instance is a store that prefixes all keys with a given prefix.
 type Instance struct {
-	base       badgerutils.BadgerStore
+	base       kvutil.BadgerStore
 	basePrefix []byte
 	prefix     []byte
 }

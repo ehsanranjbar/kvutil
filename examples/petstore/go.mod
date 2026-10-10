@@ -1,13 +1,13 @@
-module github.com/ehsanranjbar/badgerutils/examples/petstore
+module github.com/ehsanranjbar/kvutil/examples/petstore
 
-go 1.24.0
+go 1.27
 
 require (
-	github.com/dgraph-io/badger/v4 v4.5.1
-	github.com/ehsanranjbar/badgerutils v0.0.0-20250224185346-67206ae1393d
-	github.com/google/uuid v1.1.2
+	github.com/dgraph-io/badger/v4 v4.9.6
+	github.com/ehsanranjbar/kvutil v0.0.0
+	github.com/google/uuid v1.6.0
 	github.com/labstack/echo/v4 v4.13.3
-	google.golang.org/protobuf v1.36.5
+	google.golang.org/protobuf v1.36.7
 )
 
 require (
@@ -17,10 +17,11 @@ require (
 	github.com/araddon/qlbridge v0.0.2 // indirect
 	github.com/bits-and-blooms/bitset v1.12.0 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
-	github.com/dgraph-io/ristretto/v2 v2.1.0 // indirect
+	github.com/dgraph-io/ristretto/v2 v2.2.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
+	github.com/go-logr/logr v1.4.3 // indirect
+	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
-	github.com/golang/groupcache v0.0.0-20241129210726-2c02b8208cf8 // indirect
 	github.com/golang/protobuf v1.5.4 // indirect
 	github.com/google/flatbuffers v25.2.10+incompatible // indirect
 	github.com/klauspost/compress v1.18.0 // indirect
@@ -30,16 +31,19 @@ require (
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/mb0/glob v0.0.0-20160210091149-1eb79d2de6c4 // indirect
 	github.com/mschoch/smat v0.2.0 // indirect
-	github.com/pkg/errors v0.9.1 // indirect
 	github.com/valyala/bytebufferpool v1.0.0 // indirect
 	github.com/valyala/fasttemplate v1.2.2 // indirect
 	github.com/vmihailenco/msgpack/v5 v5.4.1 // indirect
 	github.com/vmihailenco/tagparser/v2 v2.0.0 // indirect
-	go.opencensus.io v0.24.0 // indirect
+	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
+	go.opentelemetry.io/otel v1.41.0 // indirect
+	go.opentelemetry.io/otel/metric v1.41.0 // indirect
+	go.opentelemetry.io/otel/trace v1.41.0 // indirect
 	golang.org/x/crypto v0.33.0 // indirect
-	golang.org/x/exp v0.0.0-20250210185358-939b2ce775ac // indirect
 	golang.org/x/net v0.35.0 // indirect
-	golang.org/x/sys v0.30.0 // indirect
+	golang.org/x/sys v0.41.0 // indirect
 	golang.org/x/text v0.22.0 // indirect
 	golang.org/x/time v0.8.0 // indirect
 )
+
+replace github.com/ehsanranjbar/kvutil => ../..

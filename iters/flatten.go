@@ -2,17 +2,17 @@ package iters
 
 import (
 	badger "github.com/dgraph-io/badger/v4"
-	"github.com/ehsanranjbar/badgerutils"
+	"github.com/ehsanranjbar/kvutil"
 )
 
 // FlattenIterator is an iterator that flattens a set of iterators into a single iterator.
 type FlattenIterator[K1, K2, V any] struct {
-	base    badgerutils.Iterator[K1, badgerutils.Iterator[K2, V]]
-	current badgerutils.Iterator[K2, V]
+	base    kvutil.Iterator[K1, kvutil.Iterator[K2, V]]
+	current kvutil.Iterator[K2, V]
 }
 
 // Flatten creates a new flatten iterator.
-func Flatten[K1, K2, V any](base badgerutils.Iterator[K1, badgerutils.Iterator[K2, V]]) *FlattenIterator[K1, K2, V] {
+func Flatten[K1, K2, V any](base kvutil.Iterator[K1, kvutil.Iterator[K2, V]]) *FlattenIterator[K1, K2, V] {
 	return &FlattenIterator[K1, K2, V]{base: base}
 }
 

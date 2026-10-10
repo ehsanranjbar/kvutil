@@ -1,4 +1,4 @@
-package badgerutils
+package kvutil
 
 import (
 	badger "github.com/dgraph-io/badger/v4"

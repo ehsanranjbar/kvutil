@@ -12,8 +12,10 @@ import (
 type Doc[I comparable] map[string]any
 
 // GetId implements the Record interface.
+// It returns the zero value if the document has no id yet.
 func (doc Doc[I]) GetId() I {
-	return doc["_id"].(I)
+	id, _ := doc["_id"].(I)
+	return id
 }
 
 // SetId implements the Record interface.
@@ -41,7 +43,12 @@ func (doc Doc[I]) encode(enc *msgpack.Encoder) error {
 	if doc == nil {
 		return enc.EncodeNil()
 	}
-	if err := enc.EncodeMapLen(len(doc)); err != nil {
+	// The id is serialized as the key of the record, so it is left out of the value.
+	n := len(doc)
+	if _, ok := doc["_id"]; ok {
+		n--
+	}
+	if err := enc.EncodeMapLen(n); err != nil {
 		return err
 	}
 	for k, v := range doc {
@@ -65,5 +72,11 @@ func (doc *Doc[I]) UnmarshalBinary(data []byte) error {
 	dec.Reset(bytes.NewReader(data))
 	defer msgpack.PutDecoder(dec)
 
-	return dec.Decode(doc)
+	// Decoding into doc itself would make msgpack call UnmarshalBinary again.
+	m, err := dec.DecodeMap()
+	if err != nil {
+		return err
+	}
+	*doc = m
+	return nil
 }

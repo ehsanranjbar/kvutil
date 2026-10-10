@@ -2,25 +2,25 @@ package iters
 
 import (
 	badger "github.com/dgraph-io/badger/v4"
-	"github.com/ehsanranjbar/badgerutils"
+	"github.com/ehsanranjbar/kvutil"
 )
 
 // SkipIterator is an iterator that skips first items that doesn't satisfy the condition.
 type SkipIterator[K, V, S any] struct {
-	base  badgerutils.Iterator[K, V]
+	base  kvutil.Iterator[K, V]
 	state S
 	f     func(S, K, V, *badger.Item) (S, bool)
 }
 
 // SkipN creates a new skip iterator that skips the first n items.
-func SkipN[K, V any](base badgerutils.Iterator[K, V], n int) *SkipIterator[K, V, int] {
+func SkipN[K, V any](base kvutil.Iterator[K, V], n int) *SkipIterator[K, V, int] {
 	return Skip[K, V, int](base, func(s int, k K, v V, item *badger.Item) (int, bool) {
 		return s + 1, s < n
 	})
 }
 
 // Skip creates a new skip iterator.
-func Skip[K, V any, S any](base badgerutils.Iterator[K, V], f func(S, K, V, *badger.Item) (S, bool)) *SkipIterator[K, V, S] {
+func Skip[K, V any, S any](base kvutil.Iterator[K, V], f func(S, K, V, *badger.Item) (S, bool)) *SkipIterator[K, V, S] {
 	return &SkipIterator[K, V, S]{base: base, f: f}
 }
 

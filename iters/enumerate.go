@@ -2,18 +2,18 @@ package iters
 
 import (
 	badger "github.com/dgraph-io/badger/v4"
-	"github.com/ehsanranjbar/badgerutils"
-	"golang.org/x/exp/constraints"
+	"github.com/ehsanranjbar/kvutil"
+	"github.com/ehsanranjbar/kvutil/internal/constraints"
 )
 
 // Enumerator is an iterator that enumerates a counter as the keys for the base value iterator.
 type Enumerator[K constraints.Integer, V any] struct {
-	it      badgerutils.ValueIterator[V]
+	it      kvutil.ValueIterator[V]
 	counter K
 }
 
 // Enumerate creates a new enumerator.
-func Enumerate[K constraints.Integer, V any](it badgerutils.ValueIterator[V]) *Enumerator[K, V] {
+func Enumerate[K constraints.Integer, V any](it kvutil.ValueIterator[V]) *Enumerator[K, V] {
 	return &Enumerator[K, V]{
 		it:      it,
 		counter: 0,

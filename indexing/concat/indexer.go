@@ -7,13 +7,13 @@ import (
 	"reflect"
 	"strings"
 
-	"github.com/ehsanranjbar/badgerutils"
-	"github.com/ehsanranjbar/badgerutils/codec"
-	"github.com/ehsanranjbar/badgerutils/codec/be"
-	"github.com/ehsanranjbar/badgerutils/codec/lex"
-	"github.com/ehsanranjbar/badgerutils/expr"
-	"github.com/ehsanranjbar/badgerutils/iters"
-	"github.com/ehsanranjbar/badgerutils/schema"
+	"github.com/ehsanranjbar/kvutil"
+	"github.com/ehsanranjbar/kvutil/codec"
+	"github.com/ehsanranjbar/kvutil/codec/be"
+	"github.com/ehsanranjbar/kvutil/codec/lex"
+	"github.com/ehsanranjbar/kvutil/expr"
+	"github.com/ehsanranjbar/kvutil/iters"
+	"github.com/ehsanranjbar/kvutil/schema"
 )
 
 // Indexer is an indexer for a struct type that generates keys base on struct fields for a btree index.
@@ -57,7 +57,7 @@ func calculateQueries(comps []Component) []string {
 }
 
 // Index implements the Indexer interface.
-func (si *Indexer[T]) Index(v *T, set bool) ([]badgerutils.RawKVPair, error) {
+func (si *Indexer[T]) Index(v *T, set bool) ([]kvutil.RawKVPair, error) {
 	if v == nil {
 		return nil, nil
 	}
@@ -67,9 +67,9 @@ func (si *Indexer[T]) Index(v *T, set bool) ([]badgerutils.RawKVPair, error) {
 		return nil, err
 	}
 
-	pairs := make([]badgerutils.RawKVPair, 0, len(keys))
+	pairs := make([]kvutil.RawKVPair, 0, len(keys))
 	for _, key := range keys {
-		pairs = append(pairs, badgerutils.RawKVPair{Key: key, Value: nil})
+		pairs = append(pairs, kvutil.RawKVPair{Key: key, Value: nil})
 	}
 	return pairs, nil
 }
@@ -184,7 +184,7 @@ func propagateKeys(keys [][]byte, suffixes [][]byte) [][]byte {
 }
 
 // Lookup implements the Indexer interface.
-func (si *Indexer[T]) Lookup(args ...any) (badgerutils.Iterator[[]byte, expr.Range[[]byte]], error) {
+func (si *Indexer[T]) Lookup(args ...any) (kvutil.Iterator[[]byte, expr.Range[[]byte]], error) {
 	exs, err := si.verifyExprs(args)
 	if err != nil {
 		return nil, fmt.Errorf("invalid lookup arguments: %w", err)

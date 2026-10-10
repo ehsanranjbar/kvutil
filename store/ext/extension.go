@@ -3,7 +3,7 @@ package ext
 import (
 	"context"
 
-	"github.com/ehsanranjbar/badgerutils"
+	"github.com/ehsanranjbar/kvutil"
 )
 
 // Extension is an extension to the Store.
@@ -11,11 +11,11 @@ import (
 // if the extension needs to access it's own store.
 // Some extensions may need to manage records of database outside the current transaction.
 // In that case, the extension can get *badger.DB in initialization and use it to manage records off tx.
-type Extension[K, V any] = badgerutils.Instantiator[ExtensionInstance[K, V]]
+type Extension[K, V any] = kvutil.Instantiator[ExtensionInstance[K, V]]
 
 // StoreRegistry determines if an extension needs a private store.
 type StoreRegistry interface {
-	RegisterStore(badgerutils.Instantiator[badgerutils.BadgerStore])
+	RegisterStore(kvutil.Instantiator[kvutil.BadgerStore])
 }
 
 // ExtensionInstance is an instance of an extension.

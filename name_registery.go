@@ -1,4 +1,4 @@
-package badgerutils
+package kvutil
 
 import (
 	"bytes"
@@ -6,7 +6,7 @@ import (
 	"sync"
 
 	badger "github.com/dgraph-io/badger/v4"
-	"github.com/ehsanranjbar/badgerutils/codec/lex"
+	"github.com/ehsanranjbar/kvutil/codec/lex"
 	msgpack "github.com/vmihailenco/msgpack/v5"
 )
 
@@ -118,25 +118,28 @@ func (nreg *NameRegistry) Name(name string) ([]byte, error) {
 	}
 
 	key := bytes.Clone(nreg.nextKey)
+	nextKey := lex.Increment(bytes.Clone(nreg.nextKey))
 	nreg.m[name] = key
-	nreg.nextKey = lex.Increment(nreg.nextKey)
 
-	err := nreg.update()
+	// The registry in memory must not get ahead of what is persisted.
+	err := nreg.update(nextKey)
 	if err != nil {
+		delete(nreg.m, name)
 		return nil, fmt.Errorf("failed to update name registry: %w", err)
 	}
+	nreg.nextKey = nextKey
 
 	return key, nil
 }
 
-func (nreg *NameRegistry) update() error {
+func (nreg *NameRegistry) update(nextKey []byte) error {
 	err := nreg.db.Update(func(txn *badger.Txn) error {
 		enc := msgpack.GetEncoder()
 		var buf bytes.Buffer
 		enc.Reset(&buf)
 		defer msgpack.PutEncoder(enc)
 
-		err := enc.EncodeMulti(nreg.m, nreg.nextKey)
+		err := enc.EncodeMulti(nreg.m, nextKey)
 		if err != nil {
 			return fmt.Errorf("failed to encode config: %w", err)
 		}

@@ -2,18 +2,18 @@ package iters
 
 import (
 	badger "github.com/dgraph-io/badger/v4"
-	"github.com/ehsanranjbar/badgerutils"
+	"github.com/ehsanranjbar/kvutil"
 )
 
 // LimitIterator is an iterator that limits the number of items when calling Next.
 type LimitIterator[K, V any] struct {
-	base badgerutils.Iterator[K, V]
+	base kvutil.Iterator[K, V]
 	n    int
 	i    int
 }
 
 // Limit creates a new limit iterator.
-func Limit[K, V any](base badgerutils.Iterator[K, V], n int) *LimitIterator[K, V] {
+func Limit[K, V any](base kvutil.Iterator[K, V], n int) *LimitIterator[K, V] {
 	return &LimitIterator[K, V]{base: base, n: n}
 }
 

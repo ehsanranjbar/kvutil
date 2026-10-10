@@ -5,7 +5,7 @@ package mocks
 
 import (
 	"github.com/dgraph-io/badger/v4"
-	"github.com/ehsanranjbar/badgerutils/store/ext"
+	"github.com/ehsanranjbar/kvutil/store/ext"
 	mock "github.com/stretchr/testify/mock"
 )
 

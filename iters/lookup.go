@@ -2,12 +2,12 @@ package iters
 
 import (
 	badger "github.com/dgraph-io/badger/v4"
-	"github.com/ehsanranjbar/badgerutils"
+	"github.com/ehsanranjbar/kvutil"
 )
 
 // LookupIterator is an iterator that looks up the value from a store.
 type LookupIterator[IK, K, V any] struct {
-	base   badgerutils.Iterator[IK, K]
+	base   kvutil.Iterator[IK, K]
 	getter Getter[K, V]
 	// TODO: Checkout if caching the key and value is a good idea.
 	cacheKey   *K
@@ -22,7 +22,7 @@ type Getter[K, V any] interface {
 // Lookup creates a new lookup iterator.
 func Lookup[IK, K, V any](
 	store Getter[K, V],
-	iter badgerutils.Iterator[IK, K],
+	iter kvutil.Iterator[IK, K],
 ) *LookupIterator[IK, K, V] {
 	return &LookupIterator[IK, K, V]{
 		base:       iter,
@@ -65,7 +65,7 @@ func (it *LookupIterator[IK, K, V]) Valid() bool {
 }
 
 // Key implements the Iterator interface.
-func (it *LookupIterator[IK, K, V]) Key() (k K,err error) {
+func (it *LookupIterator[IK, K, V]) Key() (k K, err error) {
 	if it.cacheKey != nil {
 		return *it.cacheKey, nil
 	}

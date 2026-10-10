@@ -6,17 +6,17 @@ import (
 	"math"
 
 	"github.com/dgraph-io/badger/v4"
-	"github.com/ehsanranjbar/badgerutils"
-	"github.com/ehsanranjbar/badgerutils/iters"
-	pstore "github.com/ehsanranjbar/badgerutils/store/prefix"
+	"github.com/ehsanranjbar/kvutil"
+	"github.com/ehsanranjbar/kvutil/iters"
+	pstore "github.com/ehsanranjbar/kvutil/store/prefix"
 )
 
 type Store struct {
-	base   badgerutils.Instantiator[badgerutils.BadgerStore]
+	base   kvutil.Instantiator[kvutil.BadgerStore]
 	prefix []byte
 }
 
-func New(base badgerutils.Instantiator[badgerutils.BadgerStore]) *Store {
+func New(base kvutil.Instantiator[kvutil.BadgerStore]) *Store {
 	var prefix []byte
 	if pfx, ok := base.(prefixed); ok {
 		prefix = pfx.Prefix()
@@ -36,13 +36,13 @@ func (s *Store) Prefix() []byte {
 	return s.prefix
 }
 
-func (s *Store) Instantiate(txn *badger.Txn) badgerutils.StoreInstance[
+func (s *Store) Instantiate(txn *badger.Txn) kvutil.StoreInstance[
 	[]byte,
 	[]byte,
 	RefEntry,
-	badgerutils.Iterator[[]byte, []byte],
+	kvutil.Iterator[[]byte, []byte],
 ] {
-	var base badgerutils.BadgerStore = txn
+	var base kvutil.BadgerStore = txn
 	if s.base != nil {
 		base = s.base.Instantiate(txn)
 	}
@@ -74,7 +74,7 @@ func (e RefEntry) WithValue(value []byte) RefEntry {
 
 // Instance is a store that works with serialized values and also keeps track of multiple secondary indexes.
 type Instance struct {
-	base   badgerutils.BadgerStore
+	base   kvutil.BadgerStore
 	prefix []byte
 }
 
@@ -138,8 +138,8 @@ func (s *Instance) Set(key []byte, e RefEntry) error {
 }
 
 // NewIterator creates a new reference iterator
-func (s *Instance) NewIterator(opts badger.IteratorOptions) badgerutils.Iterator[[]byte, []byte] {
-	var iter badgerutils.BadgerIterator = s.base.NewIterator(opts)
+func (s *Instance) NewIterator(opts badger.IteratorOptions) kvutil.Iterator[[]byte, []byte] {
+	var iter kvutil.BadgerIterator = s.base.NewIterator(opts)
 	if s.prefix != nil {
 		iter = pstore.NewIterator(iter, s.prefix)
 	}

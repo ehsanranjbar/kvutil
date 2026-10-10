@@ -4,11 +4,11 @@ import (
 	"encoding/binary"
 
 	badger "github.com/dgraph-io/badger/v4"
-	"github.com/ehsanranjbar/badgerutils"
-	"github.com/ehsanranjbar/badgerutils/codec/lex"
+	"github.com/ehsanranjbar/kvutil"
+	"github.com/ehsanranjbar/kvutil/codec/lex"
 )
 
-func Slice[T any](s []T) badgerutils.Iterator[[]byte, T] {
+func Slice[T any](s []T) kvutil.Iterator[[]byte, T] {
 	return &sliceIterator[T]{s: s}
 }
 

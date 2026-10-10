@@ -1,16 +1,15 @@
-with-expecter: true
+template: testify
 filename: "mock_{{.InterfaceName | snakecase}}.go"
-mockname: "Mock{{.InterfaceName}}"
-outpkg: "mocks"
+structname: "Mock{{.InterfaceName}}"
+pkgname: "mocks"
 dir: "testutil/mocks"
 packages:
-  github.com/ehsanranjbar/badgerutils/indexing:
+  github.com/ehsanranjbar/kvutil/indexing:
     interfaces:
       Indexer:
       ValueRetriever:
-  github.com/ehsanranjbar/badgerutils/schema:
+  github.com/ehsanranjbar/kvutil/schema:
     interfaces:
       PathExtractor:
-  github.com/ehsanranjbar/badgerutils/store/ext:
-    interfaces:
-      Extension:
+  # ext.Extension is a generic type alias, which mockery v3.8.0 generates without its type
+  # parameters. testutil/mocks/mock_extension.go is kept as it was generated before.

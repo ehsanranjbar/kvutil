@@ -4,11 +4,11 @@ import (
 	"bytes"
 
 	badger "github.com/dgraph-io/badger/v4"
-	"github.com/ehsanranjbar/badgerutils"
-	"github.com/ehsanranjbar/badgerutils/codec/lex"
-	"github.com/ehsanranjbar/badgerutils/expr"
-	"github.com/ehsanranjbar/badgerutils/iters"
-	refstore "github.com/ehsanranjbar/badgerutils/store/ref"
+	"github.com/ehsanranjbar/kvutil"
+	"github.com/ehsanranjbar/kvutil/codec/lex"
+	"github.com/ehsanranjbar/kvutil/expr"
+	"github.com/ehsanranjbar/kvutil/iters"
+	refstore "github.com/ehsanranjbar/kvutil/store/ref"
 )
 
 // Chunk represents a range of keys from low to high with optional exclusivity on both ends.
@@ -22,11 +22,11 @@ func NewChunk(low, high *expr.Bound[[]byte]) Chunk {
 // LookupChunks returns an iterator that iterates over the keys in the given chunk iterator.
 func LookupChunks(
 	store *refstore.Instance,
-	parts badgerutils.Iterator[[]byte, Chunk],
+	parts kvutil.Iterator[[]byte, Chunk],
 	opts badger.IteratorOptions,
-) badgerutils.Iterator[[]byte, []byte] {
+) kvutil.Iterator[[]byte, []byte] {
 	return iters.Flatten(
-		iters.Map(parts, func(c Chunk, _ *badger.Item) (badgerutils.Iterator[[]byte, []byte], error) {
+		iters.Map(parts, func(c Chunk, _ *badger.Item) (kvutil.Iterator[[]byte, []byte], error) {
 			// Omitting the prefix option.
 			iter := store.NewIterator(badger.IteratorOptions{
 				PrefetchSize:   opts.PrefetchSize,

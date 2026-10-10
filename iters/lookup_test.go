@@ -4,22 +4,22 @@ import (
 	"encoding/binary"
 	"testing"
 
-	"github.com/ehsanranjbar/badgerutils"
-	"github.com/ehsanranjbar/badgerutils/iters"
-	sstore "github.com/ehsanranjbar/badgerutils/store/serialized"
-	"github.com/ehsanranjbar/badgerutils/testutil"
+	"github.com/ehsanranjbar/kvutil"
+	"github.com/ehsanranjbar/kvutil/iters"
+	sstore "github.com/ehsanranjbar/kvutil/store/serialized"
+	"github.com/ehsanranjbar/kvutil/testutil"
 	"github.com/stretchr/testify/require"
 )
 
 type TestIndexer struct{}
 
-func (i TestIndexer) Index(v *StructA, update bool) []badgerutils.RawKVPair {
+func (i TestIndexer) Index(v *StructA, update bool) []kvutil.RawKVPair {
 	if v == nil {
 		return nil
 	}
 
-	return []badgerutils.RawKVPair{
-		badgerutils.NewRawKVPair(append([]byte("A_idx"), binary.BigEndian.AppendUint64(nil, uint64(v.A))...), nil),
+	return []kvutil.RawKVPair{
+		kvutil.NewRawKVPair(append([]byte("A_idx"), binary.BigEndian.AppendUint64(nil, uint64(v.A))...), nil),
 	}
 }
 

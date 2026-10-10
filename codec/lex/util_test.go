@@ -3,7 +3,7 @@ package lex_test
 import (
 	"testing"
 
-	"github.com/ehsanranjbar/badgerutils/codec/lex"
+	"github.com/ehsanranjbar/kvutil/codec/lex"
 	"github.com/stretchr/testify/require"
 )
 
