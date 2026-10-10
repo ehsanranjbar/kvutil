@@ -11,5 +11,6 @@ packages:
   github.com/ehsanranjbar/kvutil/schema:
     interfaces:
       PathExtractor:
-  # ext.Extension is a generic type alias, which mockery v3.8.0 generates without its type
-  # parameters. testutil/mocks/mock_extension.go is kept as it was generated before.
+  github.com/ehsanranjbar/kvutil/store/ext:
+    interfaces:
+      Extension:

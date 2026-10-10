@@ -3,6 +3,7 @@ package ext
 import (
 	"context"
 
+	badger "github.com/dgraph-io/badger/v4"
 	"github.com/ehsanranjbar/kvutil"
 )
 
@@ -11,7 +12,9 @@ import (
 // if the extension needs to access it's own store.
 // Some extensions may need to manage records of database outside the current transaction.
 // In that case, the extension can get *badger.DB in initialization and use it to manage records off tx.
-type Extension[K, V any] = kvutil.Instantiator[ExtensionInstance[K, V]]
+type Extension[K, V any] interface {
+	Instantiate(txn *badger.Txn) ExtensionInstance[K, V]
+}
 
 // StoreRegistry determines if an extension needs a private store.
 type StoreRegistry interface {
