@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
-	"sync"
 	"time"
 
 	"github.com/ehsanranjbar/kvutil/catalog"
@@ -21,74 +20,53 @@ var ErrNilValue = errors.New("serialized: value is nil")
 // Store is the definition of a store that encodes its keys and values with codecs.
 // It is defined once and is instantiated for each transaction.
 type Store[K, V any] struct {
-	ns          *catalog.Namespace
-	keyCodec    codec.KeyCodec[K]
-	valueCodec  codec.ValueCodec[V]
-	initialized bool
-	init        sync.Once
-	err         error
+	ns         *catalog.Namespace
+	keyCodec   codec.KeyCodec[K]
+	valueCodec codec.ValueCodec[V]
 }
 
-// New defines a new Store in the given namespace.
+// New defines a new Store in the given namespace, with the codecs that its types have by default.
 // The key codec is derived from the type of the keys. The value codec is the type's own
 // MarshalBinary and UnmarshalBinary if it has them, and the format of the schema otherwise.
+// It panics if the type of the keys has no key codec, in which case the store must be defined
+// with NewWithCodecs.
 func New[K, V any](ns *catalog.Namespace) *Store[K, V] {
-	s := &Store[K, V]{ns: ns}
+	return NewWithCodecs[K, V](ns, nil, nil)
+}
+
+// NewWithCodecs defines a new Store in the given namespace with the given codecs.
+// A codec that is nil is the one that New would use.
+func NewWithCodecs[K, V any](
+	ns *catalog.Namespace,
+	keyCodec codec.KeyCodec[K],
+	valueCodec codec.ValueCodec[V],
+) *Store[K, V] {
+	if keyCodec == nil {
+		var err error
+		keyCodec, err = codec.KeyFor[K]()
+		if err != nil {
+			// A mistake in the definition, which is made in code when the program starts.
+			panic(fmt.Sprintf("store %q: %v; define the store with NewWithCodecs and give it one", ns.Path(), err))
+		}
+	}
+	if valueCodec == nil {
+		valueCodec = codec.ValueFor[V](ns.Schema().Format())
+	}
+
 	ns.Define(catalog.Definition{
 		Kind:      "serialized",
 		Keys:      true,
 		KeyType:   reflect.TypeFor[K]().String(),
 		ValueType: reflect.TypeFor[V]().String(),
-		Validate:  s.Validate,
 		Attributes: func() map[string]string {
-			if s.Validate() != nil {
-				return nil
-			}
-			return map[string]string{"key": s.keyCodec.Name(), "value": s.valueCodec.Name()}
+			return map[string]string{"key": keyCodec.Name(), "value": valueCodec.Name()}
 		},
 	})
-	return s
-}
-
-// WithKeyCodec sets the key codec of the store.
-func (s *Store[K, V]) WithKeyCodec(c codec.KeyCodec[K]) *Store[K, V] {
-	if s.initialized {
-		panic("store is already initialized")
+	return &Store[K, V]{
+		ns:         ns,
+		keyCodec:   keyCodec,
+		valueCodec: valueCodec,
 	}
-
-	s.keyCodec = c
-	return s
-}
-
-// WithValueCodec sets the value codec of the store.
-func (s *Store[K, V]) WithValueCodec(c codec.ValueCodec[V]) *Store[K, V] {
-	if s.initialized {
-		panic("store is already initialized")
-	}
-
-	s.valueCodec = c
-	return s
-}
-
-// Validate resolves the codecs of the store and reports if it has no key codec.
-// The store cannot be configured any further afterwards.
-func (s *Store[K, V]) Validate() error {
-	s.init.Do(func() {
-		s.initialized = true
-
-		if s.keyCodec == nil {
-			kc, err := codec.KeyFor[K]()
-			if err != nil {
-				s.err = fmt.Errorf("store %q: %w", s.ns.Path(), err)
-				return
-			}
-			s.keyCodec = kc
-		}
-		if s.valueCodec == nil {
-			s.valueCodec = codec.ValueFor[V](s.ns.Schema().Format())
-		}
-	})
-	return s.err
 }
 
 // Namespace returns the namespace of the store.
@@ -96,25 +74,21 @@ func (s *Store[K, V]) Namespace() *catalog.Namespace {
 	return s.ns
 }
 
-// KeyCodec returns the key codec of the store, or nil if it has none.
+// KeyCodec returns the key codec of the store.
 func (s *Store[K, V]) KeyCodec() codec.KeyCodec[K] {
-	s.Validate()
 	return s.keyCodec
 }
 
 // ValueCodec returns the value codec of the store.
 func (s *Store[K, V]) ValueCodec() codec.ValueCodec[V] {
-	s.Validate()
 	return s.valueCodec
 }
 
 // Instantiate creates the instance of the store for a transaction.
-// A problem with the definition of the store is returned by every operation of the instance.
 func (s *Store[K, V]) Instantiate(tx kv.Tx) *Instance[K, V] {
 	return &Instance[K, V]{
 		store: s,
 		tx:    s.ns.Open(tx),
-		err:   s.Validate(),
 	}
 }
 
@@ -122,7 +96,6 @@ func (s *Store[K, V]) Instantiate(tx kv.Tx) *Instance[K, V] {
 type Instance[K, V any] struct {
 	store *Store[K, V]
 	tx    *prefix.Tx
-	err   error
 }
 
 // Writable reports whether the transaction of the instance accepts writes.
@@ -132,10 +105,6 @@ func (s *Instance[K, V]) Writable() bool {
 
 // EncodeKey returns the key as it is stored in the namespace of the store.
 func (s *Instance[K, V]) EncodeKey(key K) ([]byte, error) {
-	if s.err != nil {
-		return nil, s.err
-	}
-
 	kbz, err := s.store.keyCodec.Encode(key)
 	if err != nil {
 		return nil, fmt.Errorf("failed to encode key %v: %w", key, err)
@@ -251,10 +220,6 @@ func (s *Instance[K, V]) iterator(r expr.Range[K], reverse bool) (*Iterator[K, V
 
 // bounds returns the range of encoded keys that corresponds to a range of keys.
 func (s *Instance[K, V]) bounds(r expr.Range[K]) (start, end []byte, err error) {
-	if s.err != nil {
-		return nil, nil, s.err
-	}
-
 	if low := r.Low(); !low.IsEmpty() {
 		start, err = s.EncodeKey(low.Value())
 		if err != nil {

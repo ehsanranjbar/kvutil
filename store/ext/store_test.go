@@ -393,25 +393,13 @@ func TestDefinitionProblems(t *testing.T) {
 	t.Run("MissingKeyCodec", func(t *testing.T) {
 		type point struct{ X, Y int }
 
-		schema := catalog.NewSchema()
-		store := extstore.New[point, pet](schema.Namespace("points"))
-		require.Error(t, schema.Validate())
-		require.Error(t, store.Validate())
-
-		err := memkv.New().Update(func(tx kv.Tx) error {
-			ins := store.Instantiate(tx)
-			require.Error(t, ins.Set(point{}, &pet{}))
-			require.Error(t, ins.Delete(point{}))
-			return nil
-		})
-		require.NoError(t, err)
+		require.Panics(t, func() { extstore.New[point, pet](catalog.NewSchema().Namespace("points")) })
 	})
 
 	t.Run("Codecs", func(t *testing.T) {
 		schema := catalog.NewSchema()
-		store := extstore.New[string, pet](schema.Namespace("pets")).
-			WithKeyCodec(codec.StringKey[string]()).
-			WithValueCodec(codec.From[pet](codec.JSON))
+		store := extstore.NewWithCodecs(schema.Namespace("pets"),
+			codec.StringKey[string](), codec.From[pet](codec.JSON))
 		require.NoError(t, schema.Validate())
 		require.Equal(t, "string", store.KeyCodec().Name())
 		require.Equal(t, "json", store.ValueCodec().Name())

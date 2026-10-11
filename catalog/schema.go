@@ -112,8 +112,7 @@ func (s *Schema) fail(format string, args ...any) {
 }
 
 // Validate reports the problems of the schema that can be found without a database:
-// namespaces that collide and definitions that are not complete, such as a store whose key type
-// has no codec.
+// namespaces that collide and definitions that say that they are not complete.
 func (s *Schema) Validate() error {
 	s.mu.Lock()
 	errs := append([]error(nil), s.errs...)

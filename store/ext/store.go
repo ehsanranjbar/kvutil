@@ -35,8 +35,20 @@ type Store[K, V any] struct {
 	deleteHooks *ordmap.Map[string, DeleteHook[K]]
 }
 
-// New defines a new Store in the given namespace.
+// New defines a new Store in the given namespace, with the codecs that its types have by default.
+// It panics if the type of the keys has no key codec, in which case the store must be defined
+// with NewWithCodecs.
 func New[K, V any](ns *catalog.Namespace) *Store[K, V] {
+	return NewWithCodecs[K, V](ns, nil, nil)
+}
+
+// NewWithCodecs defines a new Store in the given namespace with the given codecs.
+// A codec that is nil is the one that New would use.
+func NewWithCodecs[K, V any](
+	ns *catalog.Namespace,
+	keyCodec codec.KeyCodec[K],
+	valueCodec codec.ValueCodec[V],
+) *Store[K, V] {
 	s := &Store[K, V]{
 		ns:          ns,
 		exts:        ordmap.New[string, Extension[K, V]](),
@@ -47,20 +59,8 @@ func New[K, V any](ns *catalog.Namespace) *Store[K, V] {
 		KeyType:   reflect.TypeFor[K]().String(),
 		ValueType: reflect.TypeFor[V]().String(),
 	})
-	s.data = sstore.New[K, V](ns.Sub("data", catalog.WithPrefix(dataPrefix)))
+	s.data = sstore.NewWithCodecs(ns.Sub("data", catalog.WithPrefix(dataPrefix)), keyCodec, valueCodec)
 	s.extNS = ns.Sub("ext", catalog.WithPrefix(extPrefix))
-	return s
-}
-
-// WithKeyCodec sets the key codec of the store.
-func (s *Store[K, V]) WithKeyCodec(c codec.KeyCodec[K]) *Store[K, V] {
-	s.data.WithKeyCodec(c)
-	return s
-}
-
-// WithValueCodec sets the value codec of the store.
-func (s *Store[K, V]) WithValueCodec(c codec.ValueCodec[V]) *Store[K, V] {
-	s.data.WithValueCodec(c)
 	return s
 }
 
@@ -84,11 +84,6 @@ func (s *Store[K, V]) AddDeleteHook(name string, hook DeleteHook[K]) {
 	s.deleteHooks.Add(name, hook)
 }
 
-// Validate reports whether the definition of the store is complete.
-func (s *Store[K, V]) Validate() error {
-	return s.data.Validate()
-}
-
 // Namespace returns the namespace of the store.
 func (s *Store[K, V]) Namespace() *catalog.Namespace {
 	return s.ns
@@ -99,7 +94,7 @@ func (s *Store[K, V]) Data() *sstore.Store[K, V] {
 	return s.data
 }
 
-// KeyCodec returns the key codec of the store, or nil if it has none.
+// KeyCodec returns the key codec of the store.
 func (s *Store[K, V]) KeyCodec() codec.KeyCodec[K] {
 	return s.data.KeyCodec()
 }

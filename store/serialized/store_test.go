@@ -287,21 +287,19 @@ func TestCodecs(t *testing.T) {
 	})
 
 	t.Run("Explicit", func(t *testing.T) {
-		store := sstore.New[string, tagged](catalog.NewSchema().Namespace("explicit")).
-			WithKeyCodec(codec.StringKey[string]()).
-			WithValueCodec(codec.From[tagged](codec.JSON))
+		store := sstore.NewWithCodecs(catalog.NewSchema().Namespace("explicit"),
+			codec.StringKey[string](), codec.From[tagged](codec.JSON))
 		set(t, func(tx kv.Tx) error { return store.Instantiate(tx).Set("a", &tagged{Tag: "x"}) })
 
 		_, value := stored(t, store.Namespace())
 		require.JSONEq(t, `{"Tag":"x"}`, string(value))
 	})
 
-	t.Run("ConfiguredAfterUse", func(t *testing.T) {
-		store := sstore.New[string, pet](catalog.NewSchema().Namespace("late"))
-		set(t, func(tx kv.Tx) error { return store.Instantiate(tx).Set("a", &pet{}) })
-
-		require.Panics(t, func() { store.WithKeyCodec(codec.StringKey[string]()) })
-		require.Panics(t, func() { store.WithValueCodec(codec.From[pet](codec.JSON)) })
+	t.Run("ExplicitValueOnly", func(t *testing.T) {
+		store := sstore.NewWithCodecs[int64, tagged](catalog.NewSchema().Namespace("value"),
+			nil, codec.From[tagged](codec.JSON))
+		require.Equal(t, "int64", store.KeyCodec().Name())
+		require.Equal(t, "json", store.ValueCodec().Name())
 	})
 
 	t.Run("UndecodableValue", func(t *testing.T) {
@@ -318,39 +316,21 @@ func TestCodecs(t *testing.T) {
 }
 
 func TestMissingKeyCodec(t *testing.T) {
+	// A key type that has no codec is a mistake in the definition, which panics right there.
+	require.PanicsWithValue(t,
+		`store "points": no key codec for type serialized_test.point; define the store with NewWithCodecs and give it one`,
+		func() { sstore.New[point, pet](catalog.NewSchema().Namespace("points")) })
+
+	// A key codec that is given makes the definition complete.
 	db := memkv.New()
 	schema := catalog.NewSchema()
-	store := sstore.New[point, pet](schema.Namespace("points"))
-
-	// The problem is reported once by the schema, and nothing panics.
-	require.ErrorContains(t, schema.Validate(), `store "points"`)
-	require.Error(t, schema.Check(db))
-	require.Error(t, store.Validate())
-	require.Nil(t, store.KeyCodec())
+	store := sstore.NewWithCodecs[point, pet](schema.Namespace("points"),
+		pointKey{base: codec.PairKey(codec.IntKey[int](), codec.IntKey[int]())}, nil)
+	require.NoError(t, schema.Check(db))
+	require.Equal(t, "point", store.KeyCodec().Name())
+	require.Equal(t, "msgpack", store.ValueCodec().Name())
 
 	err := db.Update(func(tx kv.Tx) error {
-		ins := store.Instantiate(tx)
-		require.Error(t, ins.Set(point{}, &pet{}))
-		_, err := ins.Get(point{})
-		require.Error(t, err)
-		_, err = ins.Has(point{})
-		require.Error(t, err)
-		require.Error(t, ins.Delete(point{}))
-		_, err = ins.Iterator(expr.Range[point]{})
-		require.Error(t, err)
-		_, err = ins.ReverseIterator(expr.NewRange(expr.NewBound(point{}, false), nil))
-		require.Error(t, err)
-		return nil
-	})
-	require.NoError(t, err)
-
-	// A key codec that is given makes the store complete.
-	schema = catalog.NewSchema()
-	store = sstore.New[point, pet](schema.Namespace("points")).
-		WithKeyCodec(pointKey{base: codec.PairKey(codec.IntKey[int](), codec.IntKey[int]())})
-	require.NoError(t, schema.Check(db))
-
-	err = db.Update(func(tx kv.Tx) error {
 		ins := store.Instantiate(tx)
 		for _, p := range []point{{1, 2}, {1, -1}, {-1, 5}} {
 			require.NoError(t, ins.Set(p, &pet{}))
