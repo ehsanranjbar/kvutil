@@ -1,4 +1,4 @@
-package serialized_test
+package typed_test
 
 import (
 	"errors"
@@ -6,12 +6,13 @@ import (
 	"time"
 
 	"github.com/ehsanranjbar/kvutil"
-	"github.com/ehsanranjbar/kvutil/catalog"
 	"github.com/ehsanranjbar/kvutil/codec"
 	"github.com/ehsanranjbar/kvutil/internal/testkv"
+	"github.com/ehsanranjbar/kvutil/iterutil"
 	"github.com/ehsanranjbar/kvutil/kv"
 	"github.com/ehsanranjbar/kvutil/kv/memkv"
-	sstore "github.com/ehsanranjbar/kvutil/store/serialized"
+	"github.com/ehsanranjbar/kvutil/schema"
+	"github.com/ehsanranjbar/kvutil/store/typed"
 	"github.com/stretchr/testify/require"
 )
 
@@ -38,12 +39,12 @@ func (v *tagged) UnmarshalBinary(data []byte) error {
 }
 
 var (
-	_ kvutil.Instantiator[*sstore.Instance[int64, pet]] = (*sstore.Store[int64, pet])(nil)
-	_ kvutil.Iterator[int64, *pet]                      = (*sstore.Iterator[int64, pet])(nil)
+	_ kvutil.Instantiator[*typed.Instance[int64, pet]] = (*typed.Store[int64, pet])(nil)
+	_ iterutil.Iterator[int64, *pet]                   = (*typed.Iterator[int64, pet])(nil)
 )
 
 // scan collects the keys of a range of a store.
-func scan[K, V any](t *testing.T, ins *sstore.Instance[K, V], r kvutil.Range[K], reverse bool) []K {
+func scan[K, V any](t *testing.T, ins *typed.Instance[K, V], r kvutil.Range[K], reverse bool) []K {
 	t.Helper()
 
 	iterate := ins.Iterator
@@ -92,9 +93,9 @@ func (c pointKey) Read(bz []byte) (point, int, error) {
 
 func TestStore(t *testing.T) {
 	testkv.Each(t, func(t *testing.T, db kv.DB) {
-		schema := catalog.NewSchema()
-		store := sstore.New[int64, pet](schema.Namespace("pets"))
-		require.NoError(t, schema.Check(db))
+		sch := schema.New()
+		store := typed.New[int64, pet](sch.Namespace("pets"))
+		require.NoError(t, sch.Check(db))
 		require.Equal(t, "int64", store.KeyCodec().Name())
 		require.Equal(t, "msgpack", store.ValueCodec().Name())
 
@@ -111,7 +112,7 @@ func TestStore(t *testing.T) {
 			require.NoError(t, ins.Set(1, &pet{Name: "rex", Age: 3}))
 			require.NoError(t, ins.Set(2, &pet{Name: "tom"}))
 			require.NoError(t, ins.Set(-1, &pet{Name: "old"}))
-			require.ErrorIs(t, ins.Set(3, nil), sstore.ErrNilValue)
+			require.ErrorIs(t, ins.Set(3, nil), typed.ErrNilValue)
 
 			got, err := ins.Get(1)
 			require.NoError(t, err)
@@ -137,7 +138,7 @@ func TestStore(t *testing.T) {
 			require.Equal(t, []int64{-1, 1}, scan(t, ins, kvutil.All[int64](), false))
 
 			// The store keeps its keys in its own namespace.
-			raw, err := schema.Namespace("other").Open(tx).Iterator(nil, nil)
+			raw, err := sch.Namespace("other").Open(tx).Iterator(nil, nil)
 			require.NoError(t, err)
 			defer raw.Close()
 			require.False(t, raw.Valid())
@@ -149,7 +150,7 @@ func TestStore(t *testing.T) {
 
 func TestIterator(t *testing.T) {
 	testkv.Each(t, func(t *testing.T, db kv.DB) {
-		store := sstore.New[int64, pet](catalog.NewSchema().Namespace("pets"))
+		store := typed.New[int64, pet](schema.New().Namespace("pets"))
 
 		err := db.Update(func(tx kv.Tx) error {
 			ins := store.Instantiate(tx)
@@ -216,7 +217,7 @@ func TestIterator(t *testing.T) {
 
 func TestEmptyStringKey(t *testing.T) {
 	db := memkv.New()
-	store := sstore.New[string, pet](catalog.NewSchema().Namespace("pets"))
+	store := typed.New[string, pet](schema.New().Namespace("pets"))
 
 	err := db.Update(func(tx kv.Tx) error {
 		ins := store.Instantiate(tx)
@@ -237,7 +238,7 @@ func TestEmptyStringKey(t *testing.T) {
 
 func TestCodecs(t *testing.T) {
 	db := memkv.New()
-	stored := func(t *testing.T, ns *catalog.Namespace) (key, value []byte) {
+	stored := func(t *testing.T, ns *schema.Namespace) (key, value []byte) {
 		err := db.View(func(tx kv.Tx) error {
 			it, err := ns.Open(tx).Iterator(nil, nil)
 			require.NoError(t, err)
@@ -258,8 +259,8 @@ func TestCodecs(t *testing.T) {
 	}
 
 	t.Run("SchemaFormat", func(t *testing.T) {
-		schema := catalog.NewSchema(catalog.WithFormat(codec.JSON))
-		store := sstore.New[string, pet](schema.Namespace("json"))
+		sch := schema.New(schema.WithFormat(codec.JSON))
+		store := typed.New[string, pet](sch.Namespace("json"))
 		set(t, func(tx kv.Tx) error { return store.Instantiate(tx).Set("rex", &pet{Name: "rex", Age: 3}) })
 
 		key, value := stored(t, store.Namespace())
@@ -268,8 +269,8 @@ func TestCodecs(t *testing.T) {
 	})
 
 	t.Run("SelfEncodingValue", func(t *testing.T) {
-		schema := catalog.NewSchema(catalog.WithFormat(codec.JSON))
-		store := sstore.New[string, tagged](schema.Namespace("tagged"))
+		sch := schema.New(schema.WithFormat(codec.JSON))
+		store := typed.New[string, tagged](sch.Namespace("tagged"))
 		require.Equal(t, "binary", store.ValueCodec().Name())
 		set(t, func(tx kv.Tx) error { return store.Instantiate(tx).Set("a", &tagged{Tag: "x"}) })
 
@@ -286,8 +287,8 @@ func TestCodecs(t *testing.T) {
 	})
 
 	t.Run("Explicit", func(t *testing.T) {
-		store := sstore.NewWithCodecs(catalog.NewSchema().Namespace("explicit"),
-			codec.StringKey[string](), codec.From[tagged](codec.JSON))
+		store := typed.NewWithCodecs(schema.New().Namespace("explicit"),
+			codec.StringKey[string](), codec.Formatted[tagged](codec.JSON))
 		set(t, func(tx kv.Tx) error { return store.Instantiate(tx).Set("a", &tagged{Tag: "x"}) })
 
 		_, value := stored(t, store.Namespace())
@@ -295,14 +296,14 @@ func TestCodecs(t *testing.T) {
 	})
 
 	t.Run("ExplicitValueOnly", func(t *testing.T) {
-		store := sstore.NewWithCodecs[int64, tagged](catalog.NewSchema().Namespace("value"),
-			nil, codec.From[tagged](codec.JSON))
+		store := typed.NewWithCodecs[int64, tagged](schema.New().Namespace("value"),
+			nil, codec.Formatted[tagged](codec.JSON))
 		require.Equal(t, "int64", store.KeyCodec().Name())
 		require.Equal(t, "json", store.ValueCodec().Name())
 	})
 
 	t.Run("UndecodableValue", func(t *testing.T) {
-		store := sstore.New[string, pet](catalog.NewSchema(catalog.WithFormat(codec.JSON)).Namespace("broken"))
+		store := typed.New[string, pet](schema.New(schema.WithFormat(codec.JSON)).Namespace("broken"))
 		set(t, func(tx kv.Tx) error {
 			require.NoError(t, store.Namespace().Open(tx).Set([]byte("a"), []byte("not json")))
 
@@ -317,15 +318,15 @@ func TestCodecs(t *testing.T) {
 func TestMissingKeyCodec(t *testing.T) {
 	// A key type that has no codec is a mistake in the definition, which panics right there.
 	require.PanicsWithValue(t,
-		`store "points": no key codec for type serialized_test.point; define the store with NewWithCodecs and give it one`,
-		func() { sstore.New[point, pet](catalog.NewSchema().Namespace("points")) })
+		`store "points": no key codec for type typed_test.point; define the store with NewWithCodecs and give it one`,
+		func() { typed.New[point, pet](schema.New().Namespace("points")) })
 
 	// A key codec that is given makes the definition complete.
 	db := memkv.New()
-	schema := catalog.NewSchema()
-	store := sstore.NewWithCodecs[point, pet](schema.Namespace("points"),
+	sch := schema.New()
+	store := typed.NewWithCodecs[point, pet](sch.Namespace("points"),
 		pointKey{base: codec.PairKey(codec.IntKey[int](), codec.IntKey[int]())}, nil)
-	require.NoError(t, schema.Check(db))
+	require.NoError(t, sch.Check(db))
 	require.Equal(t, "point", store.KeyCodec().Name())
 	require.Equal(t, "msgpack", store.ValueCodec().Name())
 
@@ -342,32 +343,32 @@ func TestMissingKeyCodec(t *testing.T) {
 
 func TestCheckDetectsCodecChange(t *testing.T) {
 	testkv.Each(t, func(t *testing.T, db kv.DB) {
-		schema := catalog.NewSchema()
-		sstore.New[int64, pet](schema.Namespace("pets"))
-		require.NoError(t, schema.Check(db))
+		sch := schema.New()
+		typed.New[int64, pet](sch.Namespace("pets"))
+		require.NoError(t, sch.Check(db))
 
-		same := catalog.NewSchema()
-		sstore.New[int64, pet](same.Namespace("pets"))
+		same := schema.New()
+		typed.New[int64, pet](same.Namespace("pets"))
 		require.NoError(t, same.Check(db))
 
-		otherFormat := catalog.NewSchema(catalog.WithFormat(codec.JSON))
-		sstore.New[int64, pet](otherFormat.Namespace("pets"))
-		require.ErrorIs(t, otherFormat.Check(db), catalog.ErrChanged)
+		otherFormat := schema.New(schema.WithFormat(codec.JSON))
+		typed.New[int64, pet](otherFormat.Namespace("pets"))
+		require.ErrorIs(t, otherFormat.Check(db), schema.ErrChanged)
 
-		otherKey := catalog.NewSchema()
-		sstore.New[int32, pet](otherKey.Namespace("pets"))
-		require.ErrorIs(t, otherKey.Check(db), catalog.ErrChanged)
+		otherKey := schema.New()
+		typed.New[int32, pet](otherKey.Namespace("pets"))
+		require.ErrorIs(t, otherKey.Check(db), schema.ErrChanged)
 
 		// A type that is renamed is the same store.
 		type id int64
-		renamed := catalog.NewSchema()
-		sstore.New[id, pet](renamed.Namespace("pets"))
+		renamed := schema.New()
+		typed.New[id, pet](renamed.Namespace("pets"))
 		require.NoError(t, renamed.Check(db))
 	})
 }
 
 func TestTTL(t *testing.T) {
-	store := sstore.New[string, pet](catalog.NewSchema().Namespace("pets"))
+	store := typed.New[string, pet](schema.New().Namespace("pets"))
 
 	t.Run("Unsupported", func(t *testing.T) {
 		err := testkv.NewMem(t).Update(func(tx kv.Tx) error {
@@ -380,7 +381,7 @@ func TestTTL(t *testing.T) {
 		db := testkv.NewBadger(t)
 		err := db.Update(func(tx kv.Tx) error {
 			ins := store.Instantiate(tx)
-			require.ErrorIs(t, ins.SetWithTTL("nil", nil, time.Hour), sstore.ErrNilValue)
+			require.ErrorIs(t, ins.SetWithTTL("nil", nil, time.Hour), typed.ErrNilValue)
 			require.NoError(t, ins.Set("keep", &pet{}))
 			return ins.SetWithTTL("a", &pet{Name: "a"}, time.Second)
 		})

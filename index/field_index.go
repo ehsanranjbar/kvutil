@@ -6,20 +6,21 @@ import (
 
 	"github.com/ehsanranjbar/kvutil"
 	"github.com/ehsanranjbar/kvutil/codec"
+	"github.com/ehsanranjbar/kvutil/cond"
+	"github.com/ehsanranjbar/kvutil/field"
 	"github.com/ehsanranjbar/kvutil/kv"
-	"github.com/ehsanranjbar/kvutil/schema"
 	extstore "github.com/ehsanranjbar/kvutil/store/ext"
 )
 
-// Option is an option of an index that is defined on fields.
+// Option is an option of an index.
 type Option[V any] func(indexer Indexer[V]) Indexer[V]
 
 // Where keeps only the records that satisfy a condition in the index, which makes the index
 // smaller and cheaper to keep up to date when most of the records are of no interest to it.
 // A lookup in such an index only finds the records that satisfy the condition.
-func Where[V any](cond schema.Cond[V]) Option[V] {
+func Where[V any](cnd cond.Cond[V]) Option[V] {
 	return func(indexer Indexer[V]) Indexer[V] {
-		return Filter(indexer, cond)
+		return filtered(indexer, cnd)
 	}
 }
 
@@ -28,13 +29,12 @@ func Where[V any](cond schema.Cond[V]) Option[V] {
 // descriptor of the index. A nil codec is the default one of the type of the value.
 func Covering[V, C any](get func(*V) C, c codec.ValueCodec[C], paths ...string) Option[V] {
 	return func(indexer Indexer[V]) Indexer[V] {
-		return Cover(indexer, get, c, paths...)
+		return covered(indexer, get, c, paths...)
 	}
 }
 
-// Cover wraps an indexer so that a value is stored with every entry that it returns.
-// A nil codec is the default one of the type of the value.
-func Cover[V, C any](indexer Indexer[V], get func(*V) C, c codec.ValueCodec[C], paths ...string) Indexer[V] {
+// covered wraps an indexer so that a value is stored with every entry that it returns.
+func covered[V, C any](indexer Indexer[V], get func(*V) C, c codec.ValueCodec[C], paths ...string) Indexer[V] {
 	if c == nil {
 		c = codec.ValueFor[C](nil)
 	}
@@ -78,13 +78,13 @@ func (c *coveringIndexer[V, C]) Descriptor() Descriptor {
 	return desc
 }
 
-// Lookup implements the Lookuper interface, if the wrapped indexer does.
-func (c *coveringIndexer[V, C]) Lookup(conds ...schema.Cond[V]) ([]KeyRange, []schema.Cond[V], error) {
-	l, ok := c.Indexer.(Lookuper[V])
+// Ranges implements the RangePlanner interface, if the wrapped indexer does.
+func (c *coveringIndexer[V, C]) Ranges(conds ...cond.Cond[V]) ([]Bounds, []cond.Cond[V], error) {
+	l, ok := c.Indexer.(RangePlanner[V])
 	if !ok {
 		return nil, nil, errors.New("the indexer cannot be looked up with conditions")
 	}
-	return l.Lookup(conds...)
+	return l.Ranges(conds...)
 }
 
 func with[V any](indexer Indexer[V], opts []Option[V]) Indexer[V] {
@@ -96,14 +96,14 @@ func with[V any](indexer Indexer[V], opts []Option[V]) Indexer[V] {
 
 // Composite defines a new index on a store that finds the records by several fields, which
 // are in its keys in the order that they are given in. Any number of records can have the same
-// values. The fields can be of different types; schema.Fields makes a list of them.
+// values. The fields can be of different types; field.List makes a list of them.
 func Composite[K, V any](
 	store extstore.Extensible[K, V],
 	name string,
-	fields []schema.Component[V],
+	fields []field.Component[V],
 	opts ...Option[V],
 ) *Index[K, V] {
-	return New(store, name, with[V](ByFields(fields...), opts))
+	return New[K, V](store, name, ByFields(fields...), opts...)
 }
 
 // UniqueComposite defines a new index on a store that finds the records by several fields, and
@@ -112,28 +112,28 @@ func Composite[K, V any](
 func UniqueComposite[K, V any](
 	store extstore.Extensible[K, V],
 	name string,
-	fields []schema.Component[V],
+	fields []field.Component[V],
 	opts ...Option[V],
 ) *Index[K, V] {
-	return NewUnique(store, name, with[V](ByFields(fields...), opts))
+	return NewUnique[K, V](store, name, ByFields(fields...), opts...)
 }
 
-// Typed is an index that finds the records by one field, whose values are of the type F.
-type Typed[K, V, F any] struct {
+// FieldIndex is an index that finds the records by one field, whose values are of the type F.
+type FieldIndex[K, V, F any] struct {
 	*Index[K, V]
-	field schema.Field[V, F]
+	field field.Field[V, F]
 }
 
-// Multi defines a new index on a store that finds the records by a field.
+// On defines a new index on a store that finds the records by a field.
 // Any number of records can have the same value.
-func Multi[K, V, F any](
+func On[K, V, F any](
 	store extstore.Extensible[K, V],
 	name string,
-	by schema.Field[V, F],
+	by field.Field[V, F],
 	opts ...Option[V],
-) *Typed[K, V, F] {
-	return &Typed[K, V, F]{
-		Index: New(store, name, with[V](ByFields[V](by), opts)),
+) *FieldIndex[K, V, F] {
+	return &FieldIndex[K, V, F]{
+		Index: New[K, V](store, name, ByFields[V](by), opts...),
 		field: by,
 	}
 }
@@ -144,55 +144,55 @@ func Multi[K, V, F any](
 func Unique[K, V, F any](
 	store extstore.Extensible[K, V],
 	name string,
-	by schema.Field[V, F],
+	by field.Field[V, F],
 	opts ...Option[V],
-) *Typed[K, V, F] {
-	return &Typed[K, V, F]{
-		Index: NewUnique(store, name, with[V](ByFields[V](by), opts)),
+) *FieldIndex[K, V, F] {
+	return &FieldIndex[K, V, F]{
+		Index: NewUnique[K, V](store, name, ByFields[V](by), opts...),
 		field: by,
 	}
 }
 
 // Field returns the field that the index finds the records by.
-func (t *Typed[K, V, F]) Field() schema.Field[V, F] {
+func (t *FieldIndex[K, V, F]) Field() field.Field[V, F] {
 	return t.field
 }
 
 // Instantiate creates the instance of the index for a transaction.
-func (t *Typed[K, V, F]) Instantiate(tx kv.Tx) *TypedInstance[K, V, F] {
-	return &TypedInstance[K, V, F]{
+func (t *FieldIndex[K, V, F]) Instantiate(tx kv.Tx) *FieldInstance[K, V, F] {
+	return &FieldInstance[K, V, F]{
 		Instance: t.Index.Instantiate(tx),
 		field:    t.field,
 	}
 }
 
-// TypedInstance is a Typed index in a transaction.
-type TypedInstance[K, V, F any] struct {
+// FieldInstance is a FieldIndex in a transaction.
+type FieldInstance[K, V, F any] struct {
 	*Instance[K, V]
-	field schema.Field[V, F]
+	field field.Field[V, F]
 }
 
 // Match iterates over the records that have the given value. The iterator must be closed.
-func (i *TypedInstance[K, V, F]) Match(value F) (*Iterator[K, V], error) {
+func (i *FieldInstance[K, V, F]) Match(value F) (*Iterator[K, V], error) {
 	return i.Lookup(i.field.Eq(value))
 }
 
 // Range iterates over the records whose values are in the range, in the order that the index
 // has them in: from the least value, or from the greatest one if the field is descending.
 // The iterator must be closed.
-func (i *TypedInstance[K, V, F]) Range(r kvutil.Range[F]) (*Iterator[K, V], error) {
+func (i *FieldInstance[K, V, F]) Range(r kvutil.Range[F]) (*Iterator[K, V], error) {
 	return i.Lookup(i.field.Range(r))
 }
 
 // ReverseRange iterates over the records whose values are in the range, in the order opposite
 // to the one that the index has them in. The iterator must be closed.
-func (i *TypedInstance[K, V, F]) ReverseRange(r kvutil.Range[F]) (*Iterator[K, V], error) {
+func (i *FieldInstance[K, V, F]) ReverseRange(r kvutil.Range[F]) (*Iterator[K, V], error) {
 	return i.ReverseLookup(i.field.Range(r))
 }
 
 // Find returns the primary key of the first record that has the given value, which is the
 // only one if the index is unique. It reports whether there is one.
-func (i *TypedInstance[K, V, F]) Find(value F) (key K, found bool, err error) {
+func (i *FieldInstance[K, V, F]) Find(value F) (key K, found bool, err error) {
 	it, err := i.Match(value)
 	if err != nil {
 		return key, false, err

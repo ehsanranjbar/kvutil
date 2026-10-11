@@ -136,7 +136,7 @@ func (d *DB) DropRange(start, end []byte) error {
 	return mapError(wb.Flush())
 }
 
-// NewBulkWriter implements the kv.Bulker interface.
+// NewBulkWriter implements the kv.BulkOpener interface.
 func (d *DB) NewBulkWriter() kv.BulkWriter {
 	return &bulkWriter{wb: d.db.NewWriteBatch()}
 }

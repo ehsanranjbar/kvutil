@@ -2,9 +2,10 @@ package ext
 
 import (
 	"github.com/ehsanranjbar/kvutil"
-	"github.com/ehsanranjbar/kvutil/catalog"
 	"github.com/ehsanranjbar/kvutil/codec"
+	"github.com/ehsanranjbar/kvutil/iterutil"
 	"github.com/ehsanranjbar/kvutil/kv"
+	"github.com/ehsanranjbar/kvutil/schema"
 )
 
 // Extension is an extension to the Store, which is told of the records that are set and deleted.
@@ -27,16 +28,16 @@ type ExtensionInstance[K, V any] interface {
 // NamespaceUser is implemented by the extensions that keep data of their own.
 // They are given a namespace under the namespace of the store when they are added to it.
 type NamespaceUser interface {
-	UseNamespace(ns *catalog.Namespace)
+	UseNamespace(ns *schema.Namespace)
 }
 
 // DeleteHook is called before a record that exists is deleted, with the key as it is given
 // and as the store encodes it. Unlike an extension it does not need the type of the records.
 type DeleteHook[K any] func(tx kv.Tx, key K, rawKey []byte) error
 
-// DeleteHooker is implemented by the stores that delete hooks can be added to,
+// DeleteHooks is implemented by the stores that delete hooks can be added to,
 // whatever the type of their records is.
-type DeleteHooker[K any] interface {
+type DeleteHooks[K any] interface {
 	AddDeleteHook(name string, hook DeleteHook[K])
 }
 
@@ -50,7 +51,7 @@ type Extensible[K, V any] interface {
 	// Getter returns what gets the records of the store in a transaction.
 	Getter(tx kv.Tx) Getter[K, V]
 	// Records iterates over the records of the store whose keys are in a range, in a transaction.
-	Records(tx kv.Tx, r kvutil.Range[K]) (kvutil.Iterator[K, *V], error)
+	Records(tx kv.Tx, r kvutil.Range[K]) (iterutil.Iterator[K, *V], error)
 }
 
 // Getter gets the records of a store by their keys.
@@ -59,15 +60,15 @@ type Getter[K, V any] interface {
 	Get(key K) (*V, error)
 }
 
-// ExtOption is an option that is specific to an extension.
-type ExtOption struct {
+// Option is an option that is specific to an extension.
+type Option struct {
 	extName string
 	value   any
 }
 
-// WithExtOption creates an option that only the extension of the given name receives.
-func WithExtOption(name string, value any) ExtOption {
-	return ExtOption{
+// For creates an option that only the extension of the given name receives.
+func For(name string, value any) Option {
+	return Option{
 		extName: name,
 		value:   value,
 	}

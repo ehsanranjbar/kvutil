@@ -150,13 +150,13 @@ func TestEscapeHatch(t *testing.T) {
 	require.NotNil(t, db.Badger())
 
 	err := db.Update(func(tx kv.Tx) error {
-		txn, ok := badgerkv.Txn(tx)
+		txn, ok := badgerkv.Unwrap(tx)
 		require.True(t, ok)
 		require.NotNil(t, txn)
 
 		// Through decorators.
 		nested := prefix.New(prefix.New(tx, []byte("a/")), []byte("b/"))
-		unwrapped, ok := badgerkv.Txn(nested)
+		unwrapped, ok := badgerkv.Unwrap(nested)
 		require.True(t, ok)
 		require.Same(t, txn, unwrapped)
 
@@ -174,14 +174,14 @@ func TestWrappedTxn(t *testing.T) {
 	db := newDB(t).Badger()
 
 	err := db.Update(func(txn *badger.Txn) error {
-		tx := badgerkv.ReadWrite(txn)
+		tx := badgerkv.WrapReadWrite(txn)
 		require.True(t, tx.Writable())
 		return tx.Set([]byte("a"), []byte("1"))
 	})
 	require.NoError(t, err)
 
 	err = db.View(func(txn *badger.Txn) error {
-		tx := badgerkv.Read(txn)
+		tx := badgerkv.WrapRead(txn)
 		require.False(t, tx.Writable())
 		require.ErrorIs(t, tx.Set([]byte("b"), []byte("2")), kv.ErrReadOnly)
 
@@ -190,7 +190,7 @@ func TestWrappedTxn(t *testing.T) {
 		require.Equal(t, []byte("1"), value)
 
 		// A read-only badger transaction that is wrapped as writable is still read-only.
-		require.ErrorIs(t, badgerkv.ReadWrite(txn).Set([]byte("b"), []byte("2")), kv.ErrReadOnly)
+		require.ErrorIs(t, badgerkv.WrapReadWrite(txn).Set([]byte("b"), []byte("2")), kv.ErrReadOnly)
 		return nil
 	})
 	require.NoError(t, err)

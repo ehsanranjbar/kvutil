@@ -8,17 +8,3 @@ import "github.com/ehsanranjbar/kvutil/kv"
 type Instantiator[I any] interface {
 	Instantiate(tx kv.Tx) I
 }
-
-// Iterator iterates over typed records.
-type Iterator[K, V any] interface {
-	// Valid reports whether the iterator is positioned at a record.
-	Valid() bool
-	// Next moves to the next record.
-	Next()
-	// Key returns the key of the current record.
-	Key() (K, error)
-	// Value returns the value of the current record.
-	Value() (V, error)
-	// Close releases the iterator.
-	Close() error
-}

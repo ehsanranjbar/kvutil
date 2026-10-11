@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"slices"
 
+	"github.com/ehsanranjbar/kvutil/cond"
 	"github.com/ehsanranjbar/kvutil/kv"
-	"github.com/ehsanranjbar/kvutil/schema"
 	extstore "github.com/ehsanranjbar/kvutil/store/ext"
 	refstore "github.com/ehsanranjbar/kvutil/store/ref"
 )
@@ -20,24 +20,24 @@ type Instance[K, V any] struct {
 
 // Scan iterates over the entries whose keys are in the range, in ascending order of the keys.
 // The iterator must be closed.
-func (i *Instance[K, V]) Scan(r KeyRange) (*Iterator[K, V], error) {
-	return i.ScanAll([]KeyRange{r}, false)
+func (i *Instance[K, V]) Scan(r Bounds) (*Iterator[K, V], error) {
+	return i.ScanAll([]Bounds{r}, false)
 }
 
 // ReverseScan iterates over the entries whose keys are in the range, in descending order of the keys.
 // The iterator must be closed.
-func (i *Instance[K, V]) ReverseScan(r KeyRange) (*Iterator[K, V], error) {
-	return i.ScanAll([]KeyRange{r}, true)
+func (i *Instance[K, V]) ReverseScan(r Bounds) (*Iterator[K, V], error) {
+	return i.ScanAll([]Bounds{r}, true)
 }
 
 // ScanAll iterates over the entries whose keys are in the ranges, one range after the other in
 // the order that they are given. A record is returned once, even if it has an entry in more
 // than one range. The iterator must be closed.
-func (i *Instance[K, V]) ScanAll(ranges []KeyRange, reverse bool) (*Iterator[K, V], error) {
+func (i *Instance[K, V]) ScanAll(ranges []Bounds, reverse bool) (*Iterator[K, V], error) {
 	return i.scan(ranges, reverse, nil)
 }
 
-func (i *Instance[K, V]) scan(ranges []KeyRange, reverse bool, filter []schema.Cond[V]) (*Iterator[K, V], error) {
+func (i *Instance[K, V]) scan(ranges []Bounds, reverse bool, filter []cond.Cond[V]) (*Iterator[K, V], error) {
 	it := &Iterator[K, V]{
 		ins:     i,
 		ranges:  ranges,
@@ -61,22 +61,22 @@ func (i *Instance[K, V]) scan(ranges []KeyRange, reverse bool, filter []schema.C
 // order of the keys of the index. The index is used for the conditions that it can serve, and
 // the records that it finds are checked against the others, so the result is exact.
 // It fails if the indexer of the index cannot translate conditions.
-func (i *Instance[K, V]) Lookup(conds ...schema.Cond[V]) (*Iterator[K, V], error) {
+func (i *Instance[K, V]) Lookup(conds ...cond.Cond[V]) (*Iterator[K, V], error) {
 	return i.lookup(conds, false)
 }
 
 // ReverseLookup is like Lookup, in descending order of the keys of the index.
-func (i *Instance[K, V]) ReverseLookup(conds ...schema.Cond[V]) (*Iterator[K, V], error) {
+func (i *Instance[K, V]) ReverseLookup(conds ...cond.Cond[V]) (*Iterator[K, V], error) {
 	return i.lookup(conds, true)
 }
 
-func (i *Instance[K, V]) lookup(conds []schema.Cond[V], reverse bool) (*Iterator[K, V], error) {
-	l, ok := i.x.indexer.(Lookuper[V])
+func (i *Instance[K, V]) lookup(conds []cond.Cond[V], reverse bool) (*Iterator[K, V], error) {
+	l, ok := i.x.indexer.(RangePlanner[V])
 	if !ok {
 		return nil, fmt.Errorf("index %q cannot be looked up with conditions", i.x.name)
 	}
 
-	ranges, residual, err := l.Lookup(conds...)
+	ranges, residual, err := l.Ranges(conds...)
 	if err != nil {
 		return nil, err
 	}
@@ -88,16 +88,16 @@ func (i *Instance[K, V]) lookup(conds []schema.Cond[V], reverse bool) (*Iterator
 
 // Plan returns how the index would serve conditions: the ranges of keys that it would read and
 // the conditions that it would have to check on the records that it finds.
-func (i *Instance[K, V]) Plan(conds ...schema.Cond[V]) (ranges []KeyRange, residual []schema.Cond[V], err error) {
-	l, ok := i.x.indexer.(Lookuper[V])
+func (i *Instance[K, V]) Plan(conds ...cond.Cond[V]) (ranges []Bounds, residual []cond.Cond[V], err error) {
+	l, ok := i.x.indexer.(RangePlanner[V])
 	if !ok {
 		return nil, nil, fmt.Errorf("index %q cannot be looked up with conditions", i.x.name)
 	}
-	return l.Lookup(conds...)
+	return l.Ranges(conds...)
 }
 
 // bounds returns the range of stored keys that corresponds to a range of index keys.
-func bounds(r KeyRange) (start, end []byte) {
+func bounds(r Bounds) (start, end []byte) {
 	if low, exclusive, ok := r.Low(); ok {
 		start = low
 		if exclusive {
@@ -125,13 +125,13 @@ func bounds(r KeyRange) (start, end []byte) {
 // that the entries belong to and its values are the records, which are only read when asked for.
 type Iterator[K, V any] struct {
 	ins     *Instance[K, V]
-	ranges  []KeyRange
+	ranges  []Bounds
 	reverse bool
 
 	next   int                 // the next range to open
 	cur    *refstore.Iterator  // the iterator of the current range
 	seen   map[string]struct{} // the primary keys that were returned, if they have to be remembered
-	filter []schema.Cond[V]    // the conditions that the records are checked against
+	filter []cond.Cond[V]      // the conditions that the records are checked against
 	record *V                  // the record of the current entry, once it is read
 	err    error
 }
@@ -198,20 +198,20 @@ func (it *Iterator[K, V]) matches() (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	for _, cond := range it.filter {
-		if ok, err := cond.Match(record); !ok || err != nil {
+	for _, cnd := range it.filter {
+		if ok, err := cnd.Match(record); !ok || err != nil {
 			return false, err
 		}
 	}
 	return true, nil
 }
 
-// Valid implements the kvutil.Iterator interface.
+// Valid implements the iterutil.Iterator interface.
 func (it *Iterator[K, V]) Valid() bool {
 	return it.err == nil && it.cur != nil
 }
 
-// Next implements the kvutil.Iterator interface.
+// Next implements the iterutil.Iterator interface.
 func (it *Iterator[K, V]) Next() {
 	if !it.Valid() {
 		return
@@ -275,7 +275,7 @@ func (it *Iterator[K, V]) Covered() ([]byte, error) {
 	return it.cur.Value()
 }
 
-// Close implements the kvutil.Iterator interface.
+// Close implements the iterutil.Iterator interface.
 func (it *Iterator[K, V]) Close() error {
 	if it.cur == nil {
 		return nil

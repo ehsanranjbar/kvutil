@@ -4,7 +4,7 @@ import (
 	"cmp"
 	"time"
 
-	"github.com/ehsanranjbar/kvutil/iters"
+	"github.com/ehsanranjbar/kvutil/iterutil"
 	extstore "github.com/ehsanranjbar/kvutil/store/ext"
 )
 
@@ -22,7 +22,7 @@ func Count[K, V, G any](
 	name string,
 	group func(v *V) (G, bool),
 	opts ...Option,
-) *Agg[K, V, G, int64, int64] {
+) *Aggregation[K, V, G, int64, int64] {
 	extract := func(v *V) (G, int64, bool) {
 		g, ok := group(v)
 		return g, 1, ok
@@ -35,9 +35,9 @@ func Count[K, V, G any](
 func Sum[K, V, G any, N Number](
 	store extstore.Extensible[K, V],
 	name string,
-	extract Extract[V, G, N],
+	extract Extractor[V, G, N],
 	opts ...Option,
-) *Agg[K, V, G, N, N] {
+) *Aggregation[K, V, G, N, N] {
 	fold := Fold[N, N]{
 		Add:    func(sum, x N) N { return sum + x },
 		Remove: func(sum, x N) N { return sum - x },
@@ -63,9 +63,9 @@ func (a Average[N]) Value() float64 {
 func Avg[K, V, G any, N Number](
 	store extstore.Extensible[K, V],
 	name string,
-	extract Extract[V, G, N],
+	extract Extractor[V, G, N],
 	opts ...Option,
-) *Agg[K, V, G, N, Average[N]] {
+) *Aggregation[K, V, G, N, Average[N]] {
 	fold := Fold[N, Average[N]]{
 		Add:    func(a Average[N], x N) Average[N] { return Average[N]{Sum: a.Sum + x, Count: a.Count + 1} },
 		Remove: func(a Average[N], x N) Average[N] { return Average[N]{Sum: a.Sum - x, Count: a.Count - 1} },
@@ -79,9 +79,9 @@ func Avg[K, V, G any, N Number](
 func Min[K, V, G any, X cmp.Ordered](
 	store extstore.Extensible[K, V],
 	name string,
-	extract Extract[V, G, X],
+	extract Extractor[V, G, X],
 	opts ...Option,
-) *Agg[K, V, G, X, X] {
+) *Aggregation[K, V, G, X, X] {
 	return extreme(store, name, "min", extract, func(a, b X) X { return min(a, b) }, opts)
 }
 
@@ -91,20 +91,20 @@ func Min[K, V, G any, X cmp.Ordered](
 func Max[K, V, G any, X cmp.Ordered](
 	store extstore.Extensible[K, V],
 	name string,
-	extract Extract[V, G, X],
+	extract Extractor[V, G, X],
 	opts ...Option,
-) *Agg[K, V, G, X, X] {
+) *Aggregation[K, V, G, X, X] {
 	return extreme(store, name, "max", extract, func(a, b X) X { return max(a, b) }, opts)
 }
 
 func extreme[K, V, G any, X cmp.Ordered](
 	store extstore.Extensible[K, V],
 	name, function string,
-	extract Extract[V, G, X],
+	extract Extractor[V, G, X],
 	pick func(a, b X) X,
 	opts []Option,
-) *Agg[K, V, G, X, X] {
-	compute := func(contributions iters.Seq[time.Time, X]) (X, error) {
+) *Aggregation[K, V, G, X, X] {
+	compute := func(contributions iterutil.AdvancedIterator[time.Time, X]) (X, error) {
 		first := true
 		return contributions.Aggregate(*new(X), func(best X, _ time.Time, x X) X {
 			if first {

@@ -1,5 +1,5 @@
-// Package serialized provides a store of typed keys and values over a kv transaction.
-package serialized
+// Package typed provides a store of typed keys and values over a kv transaction.
+package typed
 
 import (
 	"errors"
@@ -8,19 +8,19 @@ import (
 	"time"
 
 	"github.com/ehsanranjbar/kvutil"
-	"github.com/ehsanranjbar/kvutil/catalog"
 	"github.com/ehsanranjbar/kvutil/codec"
 	"github.com/ehsanranjbar/kvutil/kv"
 	"github.com/ehsanranjbar/kvutil/kv/prefix"
+	"github.com/ehsanranjbar/kvutil/schema"
 )
 
 // ErrNilValue is returned when a nil value is given to be stored.
-var ErrNilValue = errors.New("serialized: value is nil")
+var ErrNilValue = errors.New("typed: value is nil")
 
 // Store is the definition of a store that encodes its keys and values with codecs.
 // It is defined once and is instantiated for each transaction.
 type Store[K, V any] struct {
-	ns         *catalog.Namespace
+	ns         *schema.Namespace
 	keyCodec   codec.KeyCodec[K]
 	valueCodec codec.ValueCodec[V]
 }
@@ -30,14 +30,14 @@ type Store[K, V any] struct {
 // MarshalBinary and UnmarshalBinary if it has them, and the format of the schema otherwise.
 // It panics if the type of the keys has no key codec, in which case the store must be defined
 // with NewWithCodecs.
-func New[K, V any](ns *catalog.Namespace) *Store[K, V] {
+func New[K, V any](ns *schema.Namespace) *Store[K, V] {
 	return NewWithCodecs[K, V](ns, nil, nil)
 }
 
 // NewWithCodecs defines a new Store in the given namespace with the given codecs.
 // A codec that is nil is the one that New would use.
 func NewWithCodecs[K, V any](
-	ns *catalog.Namespace,
+	ns *schema.Namespace,
 	keyCodec codec.KeyCodec[K],
 	valueCodec codec.ValueCodec[V],
 ) *Store[K, V] {
@@ -53,8 +53,8 @@ func NewWithCodecs[K, V any](
 		valueCodec = codec.ValueFor[V](ns.Schema().Format())
 	}
 
-	ns.Define(catalog.Definition{
-		Kind:      "serialized",
+	ns.Define(schema.Definition{
+		Kind:      "typed",
 		Keys:      true,
 		KeyType:   reflect.TypeFor[K]().String(),
 		ValueType: reflect.TypeFor[V]().String(),
@@ -70,7 +70,7 @@ func NewWithCodecs[K, V any](
 }
 
 // Namespace returns the namespace of the store.
-func (s *Store[K, V]) Namespace() *catalog.Namespace {
+func (s *Store[K, V]) Namespace() *schema.Namespace {
 	return s.ns
 }
 
@@ -253,12 +253,12 @@ type Iterator[K, V any] struct {
 	ins  *Instance[K, V]
 }
 
-// Valid implements the kvutil.Iterator interface.
+// Valid implements the iterutil.Iterator interface.
 func (it *Iterator[K, V]) Valid() bool {
 	return it.base.Valid()
 }
 
-// Next implements the kvutil.Iterator interface.
+// Next implements the iterutil.Iterator interface.
 func (it *Iterator[K, V]) Next() {
 	it.base.Next()
 }
@@ -275,7 +275,7 @@ func (it *Iterator[K, V]) Seek(key K) error {
 	return nil
 }
 
-// Key implements the kvutil.Iterator interface.
+// Key implements the iterutil.Iterator interface.
 func (it *Iterator[K, V]) Key() (K, error) {
 	key, err := it.ins.store.keyCodec.Decode(it.base.Key())
 	if err != nil {
@@ -284,7 +284,7 @@ func (it *Iterator[K, V]) Key() (K, error) {
 	return key, nil
 }
 
-// Value implements the kvutil.Iterator interface.
+// Value implements the iterutil.Iterator interface.
 func (it *Iterator[K, V]) Value() (*V, error) {
 	vbz, err := it.base.Value()
 	if err != nil {
@@ -305,7 +305,7 @@ func (it *Iterator[K, V]) RawValue() ([]byte, error) {
 	return it.base.Value()
 }
 
-// Close implements the kvutil.Iterator interface.
+// Close implements the iterutil.Iterator interface.
 func (it *Iterator[K, V]) Close() error {
 	return it.base.Close()
 }

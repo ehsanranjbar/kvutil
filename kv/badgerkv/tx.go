@@ -9,20 +9,20 @@ import (
 	"github.com/ehsanranjbar/kvutil/kv"
 )
 
-// Read wraps a badger transaction that the caller owns as a read-only kv.Tx.
-func Read(txn *badger.Txn, opts ...Option) kv.Tx {
+// WrapRead wraps a badger transaction that the caller owns as a read-only kv.Tx.
+func WrapRead(txn *badger.Txn, opts ...Option) kv.Tx {
 	return &tx{txn: txn, prefetch: newOptions(opts).prefetch}
 }
 
-// ReadWrite wraps a badger update transaction that the caller owns as a writable kv.Tx.
-func ReadWrite(txn *badger.Txn, opts ...Option) kv.Tx {
+// WrapReadWrite wraps a badger update transaction that the caller owns as a writable kv.Tx.
+func WrapReadWrite(txn *badger.Txn, opts ...Option) kv.Tx {
 	return &tx{txn: txn, writable: true, prefetch: newOptions(opts).prefetch}
 }
 
-// Txn returns the badger transaction underneath a kv.Tx, looking through its decorators.
+// Unwrap returns the badger transaction underneath a kv.Tx, looking through its decorators.
 // The badger transaction knows nothing of the prefixes, codecs and hooks of the layers above,
 // so it is meant for reading and maintenance.
-func Txn(t kv.Tx) (*badger.Txn, bool) {
+func Unwrap(t kv.Tx) (*badger.Txn, bool) {
 	for {
 		switch v := t.(type) {
 		case *tx:

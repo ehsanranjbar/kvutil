@@ -8,8 +8,9 @@ import (
 	"testing"
 
 	"github.com/ehsanranjbar/kvutil"
-	"github.com/ehsanranjbar/kvutil/catalog"
 	"github.com/ehsanranjbar/kvutil/codec/lex"
+	"github.com/ehsanranjbar/kvutil/cond"
+	"github.com/ehsanranjbar/kvutil/field"
 	"github.com/ehsanranjbar/kvutil/index"
 	"github.com/ehsanranjbar/kvutil/kv"
 	"github.com/ehsanranjbar/kvutil/kv/memkv"
@@ -43,39 +44,39 @@ func TestFieldsIndexer(t *testing.T) {
 
 	tests := []struct {
 		name   string
-		fields []schema.Component[pet]
+		fields []field.Component[pet]
 		want   [][]byte
 	}{
 		// A string marks where it ends, and a number has a size of its own.
-		{"One", schema.Fields(nameField), [][]byte{str("rex")}},
-		{"Two", schema.Fields(ownerField, ageField), [][]byte{cat(str("ann"), lex.EncodeInt64(3))}},
-		{"Descending", schema.Fields(ageField.Desc(), nameField.Desc()),
+		{"One", field.List(nameField), [][]byte{str("rex")}},
+		{"Two", field.List(ownerField, ageField), [][]byte{cat(str("ann"), lex.EncodeInt64(3))}},
+		{"Descending", field.List(ageField.Desc(), nameField.Desc()),
 			[][]byte{cat(lex.Invert(lex.EncodeInt64(3)), lex.Invert(str("rex")))}},
 		// A key for each value of a field that has several.
-		{"Several", schema.Fields(tagsField, ageField),
+		{"Several", field.List(tagsField, ageField),
 			[][]byte{cat(str("a"), lex.EncodeInt64(3)), cat(str("b"), lex.EncodeInt64(3))}},
 		// And no key if a field has no value.
-		{"None", schema.Fields(nameField, chipField), nil},
+		{"None", field.List(nameField, chipField), nil},
 	}
 	for _, test := range tests {
 		require.Equal(t, test.want, keysOf(t, index.ByFields(test.fields...), p), test.name)
 	}
 
-	entries, err := index.ByFields(schema.Fields(nameField)...).Index(nil)
+	entries, err := index.ByFields(field.List(nameField)...).Index(nil)
 	require.NoError(t, err)
 	require.Empty(t, entries)
 
 	require.Equal(t, index.Descriptor{
 		Fields:     []index.FieldDescriptor{{Path: "Owner"}, {Path: "Age", Descending: true}, {Path: "Tags"}},
-		Operators:  []index.Operator{index.Equal, index.Range},
+		Operators:  []cond.Op{cond.OpEq, cond.OpIn, cond.OpRange},
 		MultiEntry: true,
 		Encoding:   "string,int desc,string",
-	}, index.ByFields(schema.Fields(ownerField, ageField.Desc(), tagsField)...).Descriptor())
+	}, index.ByFields(field.List(ownerField, ageField.Desc(), tagsField)...).Descriptor())
 }
 
 // TestCompositeOrder checks that the keys sort as the values of their fields do.
 func TestCompositeOrder(t *testing.T) {
-	indexer := index.ByFields(schema.Fields(ownerField, ageField.Desc(), nameField.Desc(), ageField2)...)
+	indexer := index.ByFields(field.List(ownerField, ageField.Desc(), nameField.Desc(), ageField2)...)
 
 	rng := rand.New(rand.NewPCG(3, 5))
 	strs := []string{"", "a", "a\x00", "a\x00\x01", "a\xff", "ab", "b"}
@@ -102,50 +103,50 @@ func TestCompositeOrder(t *testing.T) {
 }
 
 // ageField2 is a second number in a key, after the fields that mark where they end.
-var ageField2 = schema.FieldOf("ChipLength", func(p *pet) int { return len(p.Chip) })
+var ageField2 = field.Of("ChipLength", func(p *pet) int { return len(p.Chip) })
 
-func texts(conds []schema.Cond[pet]) []string {
+func texts(conds []cond.Cond[pet]) []string {
 	texts := []string{}
-	for _, cond := range conds {
-		texts = append(texts, cond.String())
+	for _, cnd := range conds {
+		texts = append(texts, cnd.String())
 	}
 	slices.Sort(texts)
 	return texts
 }
 
 func TestPlan(t *testing.T) {
-	ownerAge := schema.Fields(ownerField, ageField)
-	hasTags := schema.Func("has_tags", func(p *pet) bool { return len(p.Tags) > 0 })
+	ownerAge := field.List(ownerField, ageField)
+	hasTags := cond.Func("has_tags", func(p *pet) bool { return len(p.Tags) > 0 })
 
 	tests := []struct {
 		name     string
-		fields   []schema.Component[pet]
-		conds    []schema.Cond[pet]
-		want     []index.KeyRange
+		fields   []field.Component[pet]
+		conds    []cond.Cond[pet]
+		want     []index.Bounds
 		residual []string
 	}{
 		{
 			name:   "NoCondition",
 			fields: ownerAge,
-			want:   []index.KeyRange{{}},
+			want:   []index.Bounds{{}},
 		},
 		{
 			name:   "Exact",
 			fields: ownerAge,
-			conds:  []schema.Cond[pet]{ownerField.Eq("a")},
-			want:   []index.KeyRange{kvutil.Only(str("a"))},
+			conds:  []cond.Cond[pet]{ownerField.Eq("a")},
+			want:   []index.Bounds{kvutil.Only(str("a"))},
 		},
 		{
 			name:   "ExactOnAll",
 			fields: ownerAge,
-			conds:  []schema.Cond[pet]{ageField.Eq(7), ownerField.Eq("a")},
-			want:   []index.KeyRange{kvutil.Only(cat(str("a"), lex.EncodeInt64(7)))},
+			conds:  []cond.Cond[pet]{ageField.Eq(7), ownerField.Eq("a")},
+			want:   []index.Bounds{kvutil.Only(cat(str("a"), lex.EncodeInt64(7)))},
 		},
 		{
 			name:   "In",
 			fields: ownerAge,
-			conds:  []schema.Cond[pet]{ownerField.In("a", "b"), ageField.Eq(1)},
-			want: []index.KeyRange{
+			conds:  []cond.Cond[pet]{ownerField.In("a", "b"), ageField.Eq(1)},
+			want: []index.Bounds{
 				kvutil.Only(cat(str("a"), lex.EncodeInt64(1))),
 				kvutil.Only(cat(str("b"), lex.EncodeInt64(1))),
 			},
@@ -153,108 +154,108 @@ func TestPlan(t *testing.T) {
 		{
 			name:   "InNothing",
 			fields: ownerAge,
-			conds:  []schema.Cond[pet]{ownerField.In()},
+			conds:  []cond.Cond[pet]{ownerField.In()},
 			want:   nil,
 		},
 		{
 			name:   "Range",
-			fields: schema.Fields(nameField),
-			conds:  []schema.Cond[pet]{nameField.Range(kvutil.From("a").Until("c"))},
-			want:   []index.KeyRange{kvutil.From(str("a")).Until(str("c"))},
+			fields: field.List(nameField),
+			conds:  []cond.Cond[pet]{nameField.Range(kvutil.From("a").Until("c"))},
+			want:   []index.Bounds{kvutil.From(str("a")).Until(str("c"))},
 		},
 		{
 			name:   "OpenRange",
-			fields: schema.Fields(nameField),
-			conds:  []schema.Cond[pet]{nameField.Gt("a")},
-			want:   []index.KeyRange{kvutil.After(str("a"))},
+			fields: field.List(nameField),
+			conds:  []cond.Cond[pet]{nameField.Gt("a")},
+			want:   []index.Bounds{kvutil.After(str("a"))},
 		},
 		{
 			// The side that is open still ends with the keys of the first field.
 			name:   "RangeAfterExact",
 			fields: ownerAge,
-			conds:  []schema.Cond[pet]{ownerField.Eq("a"), ageField.Lte(5)},
-			want:   []index.KeyRange{kvutil.From(str("a")).Through(cat(str("a"), lex.EncodeInt64(5)))},
+			conds:  []cond.Cond[pet]{ownerField.Eq("a"), ageField.Lte(5)},
+			want:   []index.Bounds{kvutil.From(str("a")).Through(cat(str("a"), lex.EncodeInt64(5)))},
 		},
 		{
 			// Two ranges on a field are one range.
 			name:   "TwoRanges",
-			fields: schema.Fields(ageField),
-			conds:  []schema.Cond[pet]{ageField.Gte(1), ageField.Lt(5), ageField.Gt(0)},
-			want:   []index.KeyRange{kvutil.From(lex.EncodeInt64(1)).Until(lex.EncodeInt64(5))},
+			fields: field.List(ageField),
+			conds:  []cond.Cond[pet]{ageField.Gte(1), ageField.Lt(5), ageField.Gt(0)},
+			want:   []index.Bounds{kvutil.From(lex.EncodeInt64(1)).Until(lex.EncodeInt64(5))},
 		},
 		{
 			// The greater a value is, the earlier its key comes.
 			name:   "DescendingRange",
-			fields: schema.Fields(ageField.Desc()),
-			conds:  []schema.Cond[pet]{ageField.Range(kvutil.From(1).Until(5))},
-			want: []index.KeyRange{
+			fields: field.List(ageField.Desc()),
+			conds:  []cond.Cond[pet]{ageField.Range(kvutil.From(1).Until(5))},
+			want: []index.Bounds{
 				kvutil.After(lex.Invert(lex.EncodeInt64(5))).Through(lex.Invert(lex.EncodeInt64(1))),
 			},
 		},
 		{
 			name:   "DescendingExact",
-			fields: schema.Fields(ageField.Desc()),
-			conds:  []schema.Cond[pet]{ageField.Eq(5)},
-			want:   []index.KeyRange{kvutil.Only(lex.Invert(lex.EncodeInt64(5)))},
+			fields: field.List(ageField.Desc()),
+			conds:  []cond.Cond[pet]{ageField.Eq(5)},
+			want:   []index.Bounds{kvutil.Only(lex.Invert(lex.EncodeInt64(5)))},
 		},
 		{
 			// A condition inside a conjunction is used like one that is given on its own.
 			name:   "Conjunction",
 			fields: ownerAge,
-			conds:  []schema.Cond[pet]{schema.And(ownerField.Eq("a"), schema.And(ageField.Eq(7)))},
-			want:   []index.KeyRange{kvutil.Only(cat(str("a"), lex.EncodeInt64(7)))},
+			conds:  []cond.Cond[pet]{cond.And(ownerField.Eq("a"), cond.And(ageField.Eq(7)))},
+			want:   []index.Bounds{kvutil.Only(cat(str("a"), lex.EncodeInt64(7)))},
 		},
 		{
 			// What comes after a range cannot narrow it.
 			name:     "ConditionAfterRange",
 			fields:   ownerAge,
-			conds:    []schema.Cond[pet]{ownerField.Gte("a"), ageField.Eq(1)},
-			want:     []index.KeyRange{kvutil.From(str("a"))},
+			conds:    []cond.Cond[pet]{ownerField.Gte("a"), ageField.Eq(1)},
+			want:     []index.Bounds{kvutil.From(str("a"))},
 			residual: []string{"Age = 1"},
 		},
 		{
 			name:     "ConditionAfterGap",
-			fields:   schema.Fields(ownerField, nameField, ageField),
-			conds:    []schema.Cond[pet]{ageField.Eq(1), ownerField.Eq("a")},
-			want:     []index.KeyRange{kvutil.Only(str("a"))},
+			fields:   field.List(ownerField, nameField, ageField),
+			conds:    []cond.Cond[pet]{ageField.Eq(1), ownerField.Eq("a")},
+			want:     []index.Bounds{kvutil.Only(str("a"))},
 			residual: []string{"Age = 1"},
 		},
 		{
 			name:     "NoConditionOnFirst",
 			fields:   ownerAge,
-			conds:    []schema.Cond[pet]{ageField.Eq(1)},
-			want:     []index.KeyRange{{}},
+			conds:    []cond.Cond[pet]{ageField.Eq(1)},
+			want:     []index.Bounds{{}},
 			residual: []string{"Age = 1"},
 		},
 		{
 			name:     "OtherFieldsAndConditions",
 			fields:   ownerAge,
-			conds:    []schema.Cond[pet]{ownerField.Eq("a"), nameField.Eq("rex"), hasTags, schema.Or(ageField.Eq(1), ageField.Eq(2)), schema.Not(ageField.Eq(3))},
-			want:     []index.KeyRange{kvutil.Only(str("a"))},
+			conds:    []cond.Cond[pet]{ownerField.Eq("a"), nameField.Eq("rex"), hasTags, cond.Or(ageField.Eq(1), ageField.Eq(2)), cond.Not(ageField.Eq(3))},
+			want:     []index.Bounds{kvutil.Only(str("a"))},
 			residual: []string{"(Age = 1) or (Age = 2)", `Name = "rex"`, "has_tags()", "not (Age = 3)"},
 		},
 		{
 			// Only the first comparison of a field is used, unless they are all ranges.
 			name:     "SecondComparison",
 			fields:   ownerAge,
-			conds:    []schema.Cond[pet]{ownerField.Eq("a"), ownerField.Gt("0"), ownerField.In("a", "b")},
-			want:     []index.KeyRange{kvutil.Only(str("a"))},
+			conds:    []cond.Cond[pet]{ownerField.Eq("a"), ownerField.Gt("0"), ownerField.In("a", "b")},
+			want:     []index.Bounds{kvutil.Only(str("a"))},
 			residual: []string{`Owner > "0"`, `Owner in ("a", "b")`},
 		},
 		{
 			// A comparison of the same field with another encoding is of no use to the index.
 			name:   "OtherEncoding",
-			fields: schema.Fields(nameField),
-			conds: []schema.Cond[pet]{
-				schema.FieldOf("Name", func(p *pet) []byte { return []byte(p.Name) }).Eq([]byte("a")),
+			fields: field.List(nameField),
+			conds: []cond.Cond[pet]{
+				field.Of("Name", func(p *pet) []byte { return []byte(p.Name) }).Eq([]byte("a")),
 			},
-			want:     []index.KeyRange{{}},
+			want:     []index.Bounds{{}},
 			residual: []string{`Name = []byte{0x61}`},
 		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			ranges, residual, err := index.ByFields(test.fields...).Lookup(test.conds...)
+			ranges, residual, err := index.ByFields(test.fields...).Ranges(test.conds...)
 			require.NoError(t, err)
 			require.Equal(t, test.want, ranges)
 			if test.residual == nil {
@@ -269,12 +270,12 @@ func TestPlan(t *testing.T) {
 // indexes, and checks that each of them finds exactly the records that satisfy the conditions.
 func TestLookupFindsWhatAScanFinds(t *testing.T) {
 	db := memkv.New()
-	store := extstore.New[int64, pet](catalog.NewSchema().Namespace("pets"))
+	store := extstore.New[int64, pet](schema.New().Namespace("pets"))
 	indexes := []*index.Index[int64, pet]{
-		index.Composite(store, "owner_age_name", schema.Fields(ownerField, ageField.Desc(), nameField)),
-		index.Composite(store, "name_owner", schema.Fields(nameField.Desc(), ownerField)),
-		index.Composite(store, "tag_age", schema.Fields(tagsField, ageField)),
-		index.Multi(store, "age", ageField).Index,
+		index.Composite(store, "owner_age_name", field.List(ownerField, ageField.Desc(), nameField)),
+		index.Composite(store, "name_owner", field.List(nameField.Desc(), ownerField)),
+		index.Composite(store, "tag_age", field.List(tagsField, ageField)),
+		index.On(store, "age", ageField).Index,
 	}
 
 	rng := rand.New(rand.NewPCG(13, 17))
@@ -304,10 +305,10 @@ func TestLookupFindsWhatAScanFinds(t *testing.T) {
 
 	// comparison returns a random comparison of a field.
 	comparison := func(f interface {
-		eq() schema.Cond[pet]
-		in() schema.Cond[pet]
-		between() schema.Cond[pet]
-	}) schema.Cond[pet] {
+		eq() cond.Cond[pet]
+		in() cond.Cond[pet]
+		between() cond.Cond[pet]
+	}) cond.Cond[pet] {
 		switch rng.IntN(3) {
 		case 0:
 			return f.eq()
@@ -321,23 +322,23 @@ func TestLookupFindsWhatAScanFinds(t *testing.T) {
 	nameOf := func() string { return names[rng.IntN(len(names))] }
 	tagOf := func() string { return allTags[rng.IntN(len(allTags))] }
 
-	fields := []func() schema.Cond[pet]{
-		func() schema.Cond[pet] { return comparison(random[string]{ownerField, owner, rng}) },
-		func() schema.Cond[pet] { return comparison(random[int]{ageField, ageOf, rng}) },
-		func() schema.Cond[pet] { return comparison(random[string]{nameField, nameOf, rng}) },
-		func() schema.Cond[pet] { return comparison(random[string]{tagsField, tagOf, rng}) },
+	fields := []func() cond.Cond[pet]{
+		func() cond.Cond[pet] { return comparison(random[string]{ownerField, owner, rng}) },
+		func() cond.Cond[pet] { return comparison(random[int]{ageField, ageOf, rng}) },
+		func() cond.Cond[pet] { return comparison(random[string]{nameField, nameOf, rng}) },
+		func() cond.Cond[pet] { return comparison(random[string]{tagsField, tagOf, rng}) },
 		// Two sides of a range, given apart.
-		func() schema.Cond[pet] { return schema.And[pet](ageField.Gte(ageOf()), ageField.Lt(ageOf())) },
-		func() schema.Cond[pet] { return schema.Or[pet](ownerField.Eq(owner()), nameField.Eq(nameOf())) },
-		func() schema.Cond[pet] { return schema.Not[pet](tagsField.Eq(tagOf())) },
-		func() schema.Cond[pet] {
-			return schema.Func("even_age", func(p *pet) bool { return p.Age%2 == 0 })
+		func() cond.Cond[pet] { return cond.And[pet](ageField.Gte(ageOf()), ageField.Lt(ageOf())) },
+		func() cond.Cond[pet] { return cond.Or[pet](ownerField.Eq(owner()), nameField.Eq(nameOf())) },
+		func() cond.Cond[pet] { return cond.Not[pet](tagsField.Eq(tagOf())) },
+		func() cond.Cond[pet] {
+			return cond.Func("even_age", func(p *pet) bool { return p.Age%2 == 0 })
 		},
 	}
 
 	narrowed := 0
 	for range 2000 {
-		var conds []schema.Cond[pet]
+		var conds []cond.Cond[pet]
 		for _, f := range fields {
 			if rng.IntN(3) == 0 {
 				conds = append(conds, f())
@@ -347,7 +348,7 @@ func TestLookupFindsWhatAScanFinds(t *testing.T) {
 
 		want := []int64{}
 		for id, p := range pets {
-			ok, err := schema.And(conds...).Match(p)
+			ok, err := cond.And(conds...).Match(p)
 			require.NoError(t, err)
 			if ok {
 				want = append(want, id)
@@ -376,7 +377,7 @@ func TestLookupFindsWhatAScanFinds(t *testing.T) {
 
 				ranges, _, err := ins.Plan(conds...)
 				require.NoError(t, err)
-				if len(ranges) != 1 || ranges[0] != (index.KeyRange{}) {
+				if len(ranges) != 1 || ranges[0] != (index.Bounds{}) {
 					narrowed++
 				}
 			}
@@ -390,14 +391,14 @@ func TestLookupFindsWhatAScanFinds(t *testing.T) {
 
 // random makes random comparisons of a field.
 type random[F any] struct {
-	field schema.Field[pet, F]
+	field field.Field[pet, F]
 	value func() F
 	rng   *rand.Rand
 }
 
-func (r random[F]) eq() schema.Cond[pet] { return r.field.Eq(r.value()) }
-func (r random[F]) in() schema.Cond[pet] { return r.field.In(r.value(), r.value()) }
-func (r random[F]) between() schema.Cond[pet] {
+func (r random[F]) eq() cond.Cond[pet] { return r.field.Eq(r.value()) }
+func (r random[F]) in() cond.Cond[pet] { return r.field.In(r.value(), r.value()) }
+func (r random[F]) between() cond.Cond[pet] {
 	var rg kvutil.Range[F]
 	switch r.rng.IntN(3) {
 	case 0:
@@ -416,16 +417,16 @@ func (r random[F]) between() schema.Cond[pet] {
 
 func TestWhere(t *testing.T) {
 	db := memkv.New()
-	sch := catalog.NewSchema()
+	sch := schema.New()
 	store := extstore.New[int64, pet](sch.Namespace("pets"))
-	old := index.Multi(store, "old_by_name", nameField, index.Where(ageField.Gte(10)))
-	tagged := index.New(store, "tagged", index.Filter(index.ByFields(schema.Fields(ownerField)...),
-		schema.Func("has_tags", func(p *pet) bool { return len(p.Tags) > 0 })))
+	old := index.On(store, "old_by_name", nameField, index.Where(ageField.Gte(10)))
+	tagged := index.New(store, "tagged", index.ByFields(field.List(ownerField)...),
+		index.Where(cond.Func("has_tags", func(p *pet) bool { return len(p.Tags) > 0 })))
 	require.NoError(t, sch.Check(db))
 
 	// The condition is a part of what the index is.
 	require.Equal(t, "Age >= 10", old.Descriptor().Where)
-	require.Equal(t, "Age >= 10", old.Descriptor().Condition.(schema.Cond[pet]).String())
+	require.Equal(t, "Age >= 10", old.Descriptor().Condition.(cond.Cond[pet]).String())
 	require.Equal(t, "has_tags()", tagged.Descriptor().Where)
 
 	err := db.Update(func(tx kv.Tx) error {
@@ -453,15 +454,15 @@ func TestWhere(t *testing.T) {
 	require.NoError(t, err)
 
 	// An index with another condition has other records in it, so it has to be built again.
-	changed := catalog.NewSchema()
-	index.Multi(extstore.New[int64, pet](changed.Namespace("pets")), "old_by_name", nameField, index.Where(ageField.Gte(11)))
-	require.ErrorIs(t, changed.Check(db), catalog.ErrChanged)
+	changed := schema.New()
+	index.On(extstore.New[int64, pet](changed.Namespace("pets")), "old_by_name", nameField, index.Where(ageField.Gte(11)))
+	require.ErrorIs(t, changed.Check(db), schema.ErrChanged)
 }
 
 func TestUniqueComposite(t *testing.T) {
 	db := memkv.New()
-	store := extstore.New[int64, pet](catalog.NewSchema().Namespace("pets"))
-	idx := index.UniqueComposite(store, "by_owner_name", schema.Fields(ownerField, nameField))
+	store := extstore.New[int64, pet](schema.New().Namespace("pets"))
+	idx := index.UniqueComposite(store, "by_owner_name", field.List(ownerField, nameField))
 	require.True(t, idx.Descriptor().Unique)
 
 	err := db.Update(func(tx kv.Tx) error {

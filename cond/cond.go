@@ -1,11 +1,10 @@
-package schema
+// Package cond has the conditions on records: what a query asks for, and what an index can be
+// limited to.
+package cond
 
 import (
 	"bytes"
-	"fmt"
 	"strings"
-
-	"github.com/ehsanranjbar/kvutil"
 )
 
 // Cond is a condition on the records of the type V.
@@ -114,102 +113,30 @@ func (c *Comparison[V]) Err() error {
 	return c.err
 }
 
-func (f Field[V, F]) comparison(op Op, text string) *Comparison[V] {
+// NewComparison makes a comparison of a field, for the packages that define fields.
+// The function returns the encoded values that a record has for the field. The values that the
+// field is compared with are set on the comparison that is returned.
+func NewComparison[V any](path, codec string, op Op, keys func(*V) ([][]byte, error)) *Comparison[V] {
 	return &Comparison[V]{
-		Path:  f.path,
-		Codec: f.codec.Name(),
+		Path:  path,
+		Codec: codec,
 		Op:    op,
-		keys:  f.ascending,
-		text:  text,
+		keys:  keys,
 	}
 }
 
-// Eq returns the condition of the field being equal to a value.
-func (f Field[V, F]) Eq(value F) *Comparison[V] {
-	c := f.comparison(OpEq, fmt.Sprintf("%s = %#v", f.path, value))
-	key, err := f.Encode(value)
-	c.Values, c.err = [][]byte{key}, err
+// Describe sets the text of the comparison.
+func (c *Comparison[V]) Describe(text string) *Comparison[V] {
+	c.text = text
 	return c
 }
 
-// In returns the condition of the field being equal to one of the values.
-func (f Field[V, F]) In(values ...F) *Comparison[V] {
-	texts := make([]string, 0, len(values))
-	for _, value := range values {
-		texts = append(texts, fmt.Sprintf("%#v", value))
+// Fail makes the comparison fail with an error, if the error is not nil.
+// It is for a value of the comparison that could not be encoded.
+func (c *Comparison[V]) Fail(err error) {
+	if err != nil {
+		c.err = err
 	}
-	c := f.comparison(OpIn, fmt.Sprintf("%s in (%s)", f.path, strings.Join(texts, ", ")))
-
-	for _, value := range values {
-		key, err := f.Encode(value)
-		if err != nil {
-			c.err = err
-		}
-		c.Values = append(c.Values, key)
-	}
-	return c
-}
-
-// Gt returns the condition of the field being greater than a value.
-func (f Field[V, F]) Gt(value F) *Comparison[V] {
-	return f.Range(kvutil.After(value))
-}
-
-// Gte returns the condition of the field being greater than a value, or equal to it.
-func (f Field[V, F]) Gte(value F) *Comparison[V] {
-	return f.Range(kvutil.From(value))
-}
-
-// Lt returns the condition of the field being less than a value.
-func (f Field[V, F]) Lt(value F) *Comparison[V] {
-	return f.Range(kvutil.Until(value))
-}
-
-// Lte returns the condition of the field being less than a value, or equal to it.
-func (f Field[V, F]) Lte(value F) *Comparison[V] {
-	return f.Range(kvutil.Through(value))
-}
-
-// Between returns the condition of the field being between two values, or equal to one of them.
-func (f Field[V, F]) Between(low, high F) *Comparison[V] {
-	return f.Range(kvutil.Between(low, high))
-}
-
-// Range returns the condition of the field being in a range.
-func (f Field[V, F]) Range(r kvutil.Range[F]) *Comparison[V] {
-	var texts []string
-	c := f.comparison(OpRange, "")
-
-	if low, exclusive, ok := r.Low(); ok {
-		key, err := f.Encode(low)
-		if err != nil {
-			c.err = err
-		}
-		c.Low = &Bound{Value: key, Exclusive: exclusive}
-		if exclusive {
-			texts = append(texts, fmt.Sprintf("%s > %#v", f.path, low))
-		} else {
-			texts = append(texts, fmt.Sprintf("%s >= %#v", f.path, low))
-		}
-	}
-	if high, exclusive, ok := r.High(); ok {
-		key, err := f.Encode(high)
-		if err != nil {
-			c.err = err
-		}
-		c.High = &Bound{Value: key, Exclusive: exclusive}
-		if exclusive {
-			texts = append(texts, fmt.Sprintf("%s < %#v", f.path, high))
-		} else {
-			texts = append(texts, fmt.Sprintf("%s <= %#v", f.path, high))
-		}
-	}
-
-	if len(texts) == 0 {
-		texts = []string{f.path + " is anything"}
-	}
-	c.text = strings.Join(texts, " and ")
-	return c
 }
 
 // Conjunction is the condition of every one of its conditions being satisfied.

@@ -13,13 +13,13 @@ import (
 
 	badger "github.com/dgraph-io/badger/v4"
 	"github.com/ehsanranjbar/kvutil/agg"
-	"github.com/ehsanranjbar/kvutil/catalog"
 	"github.com/ehsanranjbar/kvutil/codec"
 	"github.com/ehsanranjbar/kvutil/internal/testkv"
-	"github.com/ehsanranjbar/kvutil/iters"
+	"github.com/ehsanranjbar/kvutil/iterutil"
 	"github.com/ehsanranjbar/kvutil/kv"
 	"github.com/ehsanranjbar/kvutil/kv/badgerkv"
 	"github.com/ehsanranjbar/kvutil/kv/memkv"
+	"github.com/ehsanranjbar/kvutil/schema"
 	extstore "github.com/ehsanranjbar/kvutil/store/ext"
 	"github.com/stretchr/testify/require"
 )
@@ -45,7 +45,7 @@ func at(o *order) time.Time {
 }
 
 // median returns the middle one of the amounts.
-func median(amounts iters.Seq[time.Time, int64]) (int64, error) {
+func median(amounts iterutil.AdvancedIterator[time.Time, int64]) (int64, error) {
 	values, err := amounts.Values()
 	if err != nil {
 		return 0, err
@@ -60,20 +60,20 @@ func day(d int) time.Time {
 
 // fixture is a store of orders with aggregations of both kinds.
 type fixture struct {
-	schema *catalog.Schema
+	sch    *schema.Schema
 	orders *extstore.Store[int64, order]
 
-	total  *agg.Agg[int64, order, string, int64, int64]
-	count  *agg.Agg[int64, order, string, int64, int64]
-	avg    *agg.Agg[int64, order, string, int64, agg.Average[int64]]
-	max    *agg.Agg[int64, order, string, int64, int64]
-	min    *agg.Agg[int64, order, string, int64, int64]
-	median *agg.Agg[int64, order, string, int64, int64]
+	total  *agg.Aggregation[int64, order, string, int64, int64]
+	count  *agg.Aggregation[int64, order, string, int64, int64]
+	avg    *agg.Aggregation[int64, order, string, int64, agg.Average[int64]]
+	max    *agg.Aggregation[int64, order, string, int64, int64]
+	min    *agg.Aggregation[int64, order, string, int64, int64]
+	median *agg.Aggregation[int64, order, string, int64, int64]
 }
 
 func newFixture() *fixture {
-	f := &fixture{schema: catalog.NewSchema()}
-	f.orders = extstore.New[int64, order](f.schema.Namespace("orders"))
+	f := &fixture{sch: schema.New()}
+	f.orders = extstore.New[int64, order](f.sch.Namespace("orders"))
 
 	// Folded from what the orders add and remove.
 	f.total = agg.Sum(f.orders, "total", amount, agg.ByTime(at, agg.Daily, agg.Monthly, agg.AllTime))
@@ -136,7 +136,7 @@ var (
 func verify[S any](
 	t *testing.T,
 	tx kv.Tx,
-	a *agg.Agg[int64, order, string, int64, S],
+	a *agg.Aggregation[int64, order, string, int64, S],
 	orders map[int64]order,
 	want func(amounts []int64) S,
 	collected bool,
@@ -212,8 +212,8 @@ func (f *fixture) verify(t *testing.T, db kv.DB, orders map[int64]order, collect
 func TestAggregationsEqualRecomputation(t *testing.T) {
 	run := func(t *testing.T, db kv.DB, ops int) {
 		f := newFixture()
-		require.NoError(t, f.schema.Check(db))
-		collector := agg.NewCollector(db, f.schema, agg.WithBatchSize(7), agg.WithErrorHandler(func(err error) {
+		require.NoError(t, f.sch.Check(db))
+		collector := agg.NewCollector(db, f.sch, agg.WithBatchSize(7), agg.WithErrorHandler(func(err error) {
 			t.Errorf("collector: %v", err)
 		}))
 
@@ -272,7 +272,7 @@ func TestAggregationsEqualRecomputation(t *testing.T) {
 		f.verify(t, db, nil, true)
 
 		require.NoError(t, db.View(func(tx kv.Tx) error {
-			for _, ns := range []*catalog.Namespace{
+			for _, ns := range []*schema.Namespace{
 				f.total.Namespace(), f.count.Namespace(), f.avg.Namespace(),
 				f.max.Namespace(), f.min.Namespace(), f.median.Namespace(),
 			} {
@@ -297,7 +297,7 @@ func keyOf(it kv.Iterator) []byte {
 }
 
 // count returns the number of the keys of a namespace.
-func count(t *testing.T, db kv.DB, ns *catalog.Namespace) (n int) {
+func count(t *testing.T, db kv.DB, ns *schema.Namespace) (n int) {
 	t.Helper()
 
 	require.NoError(t, db.View(func(tx kv.Tx) error {
@@ -326,7 +326,7 @@ func TestUnchangedRecordNotesNothing(t *testing.T) {
 	o := order{Customer: "ann", Amount: 5, At: day(3)}
 	require.NoError(t, set(t, db, f.orders, 1, o))
 
-	namespaces := []*catalog.Namespace{f.total.Namespace(), f.max.Namespace(), f.median.Namespace()}
+	namespaces := []*schema.Namespace{f.total.Namespace(), f.max.Namespace(), f.median.Namespace()}
 	var before []int
 	for _, ns := range namespaces {
 		before = append(before, count(t, db, ns))
@@ -452,7 +452,7 @@ func TestSeries(t *testing.T) {
 
 func TestAppendOnly(t *testing.T) {
 	db := memkv.New()
-	orders := extstore.New[int64, order](catalog.NewSchema().Namespace("orders"))
+	orders := extstore.New[int64, order](schema.New().Namespace("orders"))
 	adds := agg.Delta(orders, "adds", amount,
 		agg.Fold[int64, int64]{Add: func(s, x int64) int64 { return s + x }},
 		agg.AppendOnly())
@@ -483,7 +483,7 @@ func TestAppendOnly(t *testing.T) {
 func TestDefinitionProblems(t *testing.T) {
 	add := func(s, x int64) int64 { return s + x }
 	newOrders := func() *extstore.Store[int64, order] {
-		return extstore.New[int64, order](catalog.NewSchema().Namespace("orders"))
+		return extstore.New[int64, order](schema.New().Namespace("orders"))
 	}
 
 	// A fold that cannot remove must say that it is append-only.
@@ -520,22 +520,22 @@ func TestDefinitionProblems(t *testing.T) {
 	})
 
 	// The same name twice is reported by the schema.
-	schema := catalog.NewSchema()
-	orders := extstore.New[int64, order](schema.Namespace("orders"))
+	sch := schema.New()
+	orders := extstore.New[int64, order](sch.Namespace("orders"))
 	agg.Count(orders, "same", customer)
 	agg.Count(orders, "same", customer)
-	require.Error(t, schema.Validate())
+	require.Error(t, sch.Validate())
 }
 
 func TestCatalog(t *testing.T) {
-	define := func(buckets ...agg.Bucket) (*catalog.Schema, *agg.Agg[int64, order, string, int64, int64]) {
-		schema := catalog.NewSchema()
-		orders := extstore.New[int64, order](schema.Namespace("orders"))
-		return schema, agg.Sum(orders, "total", amount, agg.ByTime(at, buckets...),
+	define := func(buckets ...agg.Bucket) (*schema.Schema, *agg.Aggregation[int64, order, string, int64, int64]) {
+		sch := schema.New()
+		orders := extstore.New[int64, order](sch.Namespace("orders"))
+		return sch, agg.Sum(orders, "total", amount, agg.ByTime(at, buckets...),
 			agg.Describe("sum", "Amount", "At", "Customer"))
 	}
 
-	schema, total := define(agg.Daily, agg.AllTime)
+	sch, total := define(agg.Daily, agg.AllTime)
 	require.Equal(t, "total", total.Name())
 	require.Equal(t, "orders/ext/total", total.Namespace().Path())
 	def := total.Namespace().Definition()
@@ -553,23 +553,23 @@ func TestCatalog(t *testing.T) {
 	require.Equal(t, def.Descriptor, total.Descriptor())
 
 	db := memkv.New()
-	require.NoError(t, schema.Check(db))
+	require.NoError(t, sch.Check(db))
 	same, _ := define(agg.Daily, agg.AllTime)
 	require.NoError(t, same.Check(db))
 
 	// An aggregation with other buckets has to be built again.
 	changed, _ := define(agg.Daily, agg.Weekly, agg.AllTime)
-	require.ErrorIs(t, changed.Check(db), catalog.ErrChanged)
+	require.ErrorIs(t, changed.Check(db), schema.ErrChanged)
 	ny, err := time.LoadLocation("America/New_York")
 	require.NoError(t, err)
 	changed, _ = define(agg.Daily.In(ny), agg.AllTime)
-	require.ErrorIs(t, changed.Check(db), catalog.ErrChanged)
+	require.ErrorIs(t, changed.Check(db), schema.ErrChanged)
 }
 
 func TestRebuild(t *testing.T) {
 	testkv.Each(t, func(t *testing.T, db kv.DB) {
 		// Orders that were written when the store had no aggregation.
-		plain := extstore.New[int64, order](catalog.NewSchema().Namespace("orders"))
+		plain := extstore.New[int64, order](schema.New().Namespace("orders"))
 		rng := rand.New(rand.NewPCG(5, 6))
 		orders := map[int64]order{}
 		require.NoError(t, db.Update(func(tx kv.Tx) error {
@@ -613,8 +613,8 @@ func TestRebuild(t *testing.T) {
 
 func TestCollectorPutsFailuresAside(t *testing.T) {
 	db := memkv.New()
-	schema := catalog.NewSchema()
-	orders := extstore.New[int64, order](schema.Namespace("orders"))
+	sch := schema.New()
+	orders := extstore.New[int64, order](sch.Namespace("orders"))
 
 	// A fold and a function that cannot take the amount 13.
 	unlucky := agg.Delta(orders, "unlucky", amount, agg.Fold[int64, int64]{
@@ -626,7 +626,7 @@ func TestCollectorPutsFailuresAside(t *testing.T) {
 		},
 		Remove: func(s, x int64) int64 { return s - x },
 	}, agg.ByTime(at, agg.Daily, agg.AllTime))
-	failing := agg.Recompute(orders, "failing", amount, func(amounts iters.Seq[time.Time, int64]) (int64, error) {
+	failing := agg.Recompute(orders, "failing", amount, func(amounts iterutil.AdvancedIterator[time.Time, int64]) (int64, error) {
 		values, err := amounts.Values()
 		if err != nil {
 			return 0, err
@@ -643,7 +643,7 @@ func TestCollectorPutsFailuresAside(t *testing.T) {
 	require.NoError(t, set(t, db, orders, 3, order{Customer: "ann", Amount: 7, At: day(3)}))
 
 	var reported []string
-	collector := agg.NewCollector(db, schema, agg.WithBatchSize(1), agg.WithErrorHandler(func(err error) {
+	collector := agg.NewCollector(db, sch, agg.WithBatchSize(1), agg.WithErrorHandler(func(err error) {
 		reported = append(reported, err.Error())
 	}))
 	require.NoError(t, collector.Collect(context.Background()))
@@ -702,14 +702,14 @@ func TestCollectorPutsFailuresAside(t *testing.T) {
 
 func TestCollectorRun(t *testing.T) {
 	db := memkv.New()
-	schema := catalog.NewSchema()
-	orders := extstore.New[int64, order](schema.Namespace("orders"))
+	sch := schema.New()
+	orders := extstore.New[int64, order](sch.Namespace("orders"))
 	total := agg.Sum(orders, "total", amount)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- agg.NewCollector(db, schema, agg.WithInterval(5*time.Millisecond)).Run(ctx)
+		done <- agg.NewCollector(db, sch, agg.WithInterval(5*time.Millisecond)).Run(ctx)
 	}()
 
 	require.NoError(t, set(t, db, orders, 1, order{Customer: "ann", Amount: 5}))
@@ -728,7 +728,7 @@ func TestCollectorRun(t *testing.T) {
 
 	// A collector that is asked to collect with a context that is done does not go on.
 	require.NoError(t, set(t, db, orders, 2, order{Customer: "ann", Amount: 5}))
-	require.ErrorIs(t, agg.NewCollector(db, schema).Collect(ctx), context.Canceled)
+	require.ErrorIs(t, agg.NewCollector(db, sch).Collect(ctx), context.Canceled)
 }
 
 // TestConcurrentWriters has many transactions write into one group at the same time, with the
@@ -743,8 +743,8 @@ func TestConcurrentWriters(t *testing.T) {
 		strict := badgerkv.Wrap(raw, badgerkv.WithMaxRetries(0))
 		db := badgerkv.Wrap(raw)
 
-		schema := catalog.NewSchema()
-		orders := extstore.New[int64, order](schema.Namespace("orders"))
+		sch := schema.New()
+		orders := extstore.New[int64, order](sch.Namespace("orders"))
 		total := agg.Sum(orders, "total", amount, agg.ByTime(at, agg.Daily, agg.AllTime))
 		top := agg.Max(orders, "max", amount, agg.ByTime(at, agg.Daily, agg.AllTime))
 		counted := agg.Count(orders, "count", customer)
@@ -753,7 +753,7 @@ func TestConcurrentWriters(t *testing.T) {
 		defer cancel()
 		var background sync.WaitGroup
 		if withCollector {
-			collector := agg.NewCollector(db, schema, agg.WithInterval(time.Millisecond), agg.WithBatchSize(16),
+			collector := agg.NewCollector(db, sch, agg.WithInterval(time.Millisecond), agg.WithBatchSize(16),
 				agg.WithErrorHandler(func(err error) { t.Errorf("collector: %v", err) }))
 			background.Go(func() { collector.Run(ctx) })
 
@@ -806,7 +806,7 @@ func TestConcurrentWriters(t *testing.T) {
 
 		check := func(collected bool) {
 			require.NoError(t, db.View(func(tx kv.Tx) error {
-				get := func(a *agg.Agg[int64, order, string, int64, int64]) int64 {
+				get := func(a *agg.Aggregation[int64, order, string, int64, int64]) int64 {
 					ins := a.Instantiate(tx)
 					read := ins.Get
 					if collected {
@@ -824,7 +824,7 @@ func TestConcurrentWriters(t *testing.T) {
 			}))
 		}
 		check(false)
-		require.NoError(t, agg.NewCollector(db, schema).Collect(context.Background()))
+		require.NoError(t, agg.NewCollector(db, sch).Collect(context.Background()))
 		check(true)
 	}
 
@@ -839,15 +839,15 @@ func BenchmarkWrites(b *testing.B) {
 	for _, withCollector := range []bool{false, true} {
 		b.Run(fmt.Sprintf("Collector=%v", withCollector), func(b *testing.B) {
 			db := testkv.NewBadger(b)
-			schema := catalog.NewSchema()
-			orders := extstore.New[int64, order](schema.Namespace("orders"))
+			sch := schema.New()
+			orders := extstore.New[int64, order](sch.Namespace("orders"))
 			total := agg.Sum(orders, "total", amount, agg.ByTime(at, agg.Daily, agg.AllTime))
 			agg.Max(orders, "max", amount, agg.ByTime(at, agg.Daily, agg.AllTime))
 
 			ctx, cancel := context.WithCancel(context.Background())
 			var wg sync.WaitGroup
 			if withCollector {
-				wg.Go(func() { agg.NewCollector(db, schema, agg.WithInterval(10*time.Millisecond)).Run(ctx) })
+				wg.Go(func() { agg.NewCollector(db, sch, agg.WithInterval(10*time.Millisecond)).Run(ctx) })
 			}
 
 			b.ResetTimer()
@@ -884,8 +884,8 @@ type purchase struct {
 
 func TestTypedGroups(t *testing.T) {
 	testkv.Each(t, func(t *testing.T, db kv.DB) {
-		schema := catalog.NewSchema()
-		purchases := extstore.New[int64, purchase](schema.Namespace("purchases"))
+		sch := schema.New()
+		purchases := extstore.New[int64, purchase](sch.Namespace("purchases"))
 
 		byShop := agg.Sum(purchases, "by_shop", func(p *purchase) (string, int64, bool) {
 			return p.Shop, p.Amount, true
@@ -900,7 +900,7 @@ func TestTypedGroups(t *testing.T) {
 		overall := agg.Count(purchases, "overall", func(*purchase) (agg.NoGroup, bool) {
 			return agg.NoGroup{}, true
 		})
-		require.NoError(t, schema.Check(db))
+		require.NoError(t, sch.Check(db))
 		require.Equal(t, "pair(string,int64),msgpack,msgpack", byBoth.Descriptor().Encoding)
 		require.Equal(t, "none,msgpack,msgpack", overall.Descriptor().Encoding)
 
@@ -961,7 +961,7 @@ func TestTypedGroups(t *testing.T) {
 
 		write()
 		check(false)
-		require.NoError(t, agg.NewCollector(db, schema, agg.WithBatchSize(2)).Collect(context.Background()))
+		require.NoError(t, agg.NewCollector(db, sch, agg.WithBatchSize(2)).Collect(context.Background()))
 		check(false)
 		check(true)
 	})
@@ -970,7 +970,7 @@ func TestTypedGroups(t *testing.T) {
 func TestGroupCodec(t *testing.T) {
 	type shop struct{ Name string }
 	newPurchases := func() *extstore.Store[int64, purchase] {
-		return extstore.New[int64, purchase](catalog.NewSchema().Namespace("purchases"))
+		return extstore.New[int64, purchase](schema.New().Namespace("purchases"))
 	}
 	byShop := func(p *purchase) (shop, int64, bool) { return shop{p.Shop}, p.Amount, true }
 

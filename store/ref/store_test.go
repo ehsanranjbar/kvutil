@@ -4,9 +4,9 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/ehsanranjbar/kvutil/catalog"
 	"github.com/ehsanranjbar/kvutil/internal/testkv"
 	"github.com/ehsanranjbar/kvutil/kv"
+	"github.com/ehsanranjbar/kvutil/schema"
 	refstore "github.com/ehsanranjbar/kvutil/store/ref"
 	"github.com/stretchr/testify/require"
 )
@@ -42,9 +42,9 @@ func scan(t *testing.T, refs *refstore.Instance, start, end []byte, reverse bool
 
 func TestStore(t *testing.T) {
 	testkv.Each(t, func(t *testing.T, db kv.DB) {
-		schema := catalog.NewSchema()
-		store := refstore.New(schema.Namespace("refs"), catalog.Definition{Kind: "test"})
-		require.NoError(t, schema.Validate())
+		sch := schema.New()
+		store := refstore.New(sch.Namespace("refs"), schema.Definition{Kind: "test"})
+		require.NoError(t, sch.Validate())
 		require.False(t, store.Unique())
 		require.Equal(t, "test", store.Namespace().Definition().Kind)
 		require.True(t, store.Namespace().Definition().Keys)
@@ -117,7 +117,7 @@ func TestStore(t *testing.T) {
 
 func TestUniqueStore(t *testing.T) {
 	testkv.Each(t, func(t *testing.T, db kv.DB) {
-		store := refstore.NewUnique(catalog.NewSchema().Namespace("refs"), catalog.Definition{Kind: "test"})
+		store := refstore.NewUnique(schema.New().Namespace("refs"), schema.Definition{Kind: "test"})
 		require.True(t, store.Unique())
 
 		err := db.Update(func(tx kv.Tx) error {
@@ -166,8 +166,8 @@ func TestUniqueStore(t *testing.T) {
 
 func TestCorruptEntries(t *testing.T) {
 	db := testkv.NewMem(t)
-	multi := refstore.New(catalog.NewSchema().Namespace("multi"), catalog.Definition{Kind: "test"})
-	unique := refstore.NewUnique(catalog.NewSchema().Namespace("unique"), catalog.Definition{Kind: "test"})
+	multi := refstore.New(schema.New().Namespace("multi"), schema.Definition{Kind: "test"})
+	unique := refstore.NewUnique(schema.New().Namespace("unique"), schema.Definition{Kind: "test"})
 
 	err := db.Update(func(tx kv.Tx) error {
 		// The length says that the primary key is longer than the whole key.

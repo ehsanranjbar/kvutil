@@ -1,4 +1,4 @@
-package schema_test
+package field_test
 
 import (
 	"math/rand/v2"
@@ -7,7 +7,8 @@ import (
 	"github.com/ehsanranjbar/kvutil"
 	"github.com/ehsanranjbar/kvutil/codec"
 	"github.com/ehsanranjbar/kvutil/codec/lex"
-	"github.com/ehsanranjbar/kvutil/schema"
+	"github.com/ehsanranjbar/kvutil/cond"
+	"github.com/ehsanranjbar/kvutil/field"
 	"github.com/stretchr/testify/require"
 )
 
@@ -27,10 +28,10 @@ type Book struct {
 }
 
 var (
-	title  = schema.FieldOf("Title", func(b *Book) string { return b.Title })
-	year   = schema.FieldOf("Year", func(b *Book) int { return b.Year })
-	tags   = schema.Each("Tags", func(b *Book) []string { return b.Tags })
-	parts  = schema.Fields(title, year.Desc())
+	title  = field.Of("Title", func(b *Book) string { return b.Title })
+	year   = field.Of("Year", func(b *Book) int { return b.Year })
+	tags   = field.Each("Tags", func(b *Book) []string { return b.Tags })
+	parts  = field.List(title, year.Desc())
 	sample = &Book{Title: "Dune", Year: 1965, Tags: []string{"scifi", "classic"}}
 )
 
@@ -72,16 +73,16 @@ func TestField(t *testing.T) {
 func TestFieldCodec(t *testing.T) {
 	// A type without a key codec is a mistake in the definition.
 	require.PanicsWithValue(t,
-		`field "Author": no key codec for type schema_test.Author; give the field a key codec`,
-		func() { schema.FieldOf("Author", func(b *Book) Author { return b.Author }) })
-	require.Panics(t, func() { schema.Each("Authors", func(b *Book) []Author { return nil }) })
-	require.Panics(t, func() { schema.Path[Book, Author]("Author") })
+		`field "Author": no key codec for type field_test.Author; give the field a key codec`,
+		func() { field.Of("Author", func(b *Book) Author { return b.Author }) })
+	require.Panics(t, func() { field.Each("Authors", func(b *Book) []Author { return nil }) })
+	require.Panics(t, func() { field.Path[Book, Author]("Author") })
 
 	// A key codec that is given is used.
-	byteTitle := schema.FieldOf("Title", func(b *Book) string { return b.Title }, codec.StringKey[string]())
+	byteTitle := field.Of("Title", func(b *Book) string { return b.Title }, codec.StringKey[string]())
 	require.Equal(t, "string", byteTitle.Codec().Name())
 	require.Panics(t, func() {
-		schema.FieldOf("Title", func(b *Book) string { return b.Title }, codec.StringKey[string](), codec.StringKey[string]())
+		field.Of("Title", func(b *Book) string { return b.Title }, codec.StringKey[string](), codec.StringKey[string]())
 	})
 }
 
@@ -96,60 +97,60 @@ func TestPath(t *testing.T) {
 		Editor:   &Author{Name: "Ann"},
 	}
 
-	require.Equal(t, []string{"Dune"}, schema.Path[Book, string]("Title").Values(b))
-	require.Equal(t, []int{1965}, schema.Path[Book, int]("Year").Values(b))
-	require.Equal(t, []string{"Herbert"}, schema.Path[Book, string]("Author.Name").Values(b))
-	require.Equal(t, []int{1920}, schema.Path[Book, int]("Author.Born").Values(b))
+	require.Equal(t, []string{"Dune"}, field.Path[Book, string]("Title").Values(b))
+	require.Equal(t, []int{1965}, field.Path[Book, int]("Year").Values(b))
+	require.Equal(t, []string{"Herbert"}, field.Path[Book, string]("Author.Name").Values(b))
+	require.Equal(t, []int{1920}, field.Path[Book, int]("Author.Born").Values(b))
 
 	// A pointer is the value that it points to, and a record with a nil pointer has no value.
-	bySubtitle := schema.Path[Book, string]("Subtitle")
+	bySubtitle := field.Path[Book, string]("Subtitle")
 	require.False(t, bySubtitle.Multi())
 	require.Equal(t, []string{"A novel"}, bySubtitle.Values(b))
 	require.Empty(t, bySubtitle.Values(&Book{}))
 
 	// The same holds for a pointer on the way to the field.
-	byEditor := schema.Path[Book, string]("Editor.Name")
+	byEditor := field.Path[Book, string]("Editor.Name")
 	require.Equal(t, []string{"Ann"}, byEditor.Values(b))
 	require.Empty(t, byEditor.Values(&Book{}))
 
 	// A slice is each of its elements.
-	byTag := schema.Path[Book, string]("Tags")
+	byTag := field.Path[Book, string]("Tags")
 	require.True(t, byTag.Multi())
 	require.Equal(t, []string{"scifi", "classic"}, byTag.Values(b))
 	require.Empty(t, byTag.Values(&Book{}))
 
 	// A path is the same field as the function that returns its value.
-	keys, err := schema.Path[Book, int]("Year").Keys(b)
+	keys, err := field.Path[Book, int]("Year").Keys(b)
 	require.NoError(t, err)
 	want, err := year.Keys(b)
 	require.NoError(t, err)
 	require.Equal(t, want, keys)
-	require.Equal(t, year.Eq(1965).String(), schema.Path[Book, int]("Year").Eq(1965).String())
+	require.Equal(t, year.Eq(1965).String(), field.Path[Book, int]("Year").Eq(1965).String())
 
 	for name, define := range map[string]func(){
-		"MissingField":   func() { schema.Path[Book, string]("Missing") },
-		"MissingNested":  func() { schema.Path[Book, string]("Author.Missing") },
-		"WrongType":      func() { schema.Path[Book, int]("Title") },
-		"WrongElement":   func() { schema.Path[Book, int]("Tags") },
-		"NotAStruct":     func() { schema.Path[Book, string]("Title.Length") },
-		"Unexported":     func() { schema.Path[Book, string]("hidden") },
-		"StructAsAValue": func() { schema.Path[Book, Author]("Author") },
+		"MissingField":   func() { field.Path[Book, string]("Missing") },
+		"MissingNested":  func() { field.Path[Book, string]("Author.Missing") },
+		"WrongType":      func() { field.Path[Book, int]("Title") },
+		"WrongElement":   func() { field.Path[Book, int]("Tags") },
+		"NotAStruct":     func() { field.Path[Book, string]("Title.Length") },
+		"Unexported":     func() { field.Path[Book, string]("hidden") },
+		"StructAsAValue": func() { field.Path[Book, Author]("Author") },
 	} {
 		require.Panics(t, define, name)
 	}
 }
 
-func match(t *testing.T, cond schema.Cond[Book], b *Book) bool {
+func match(t *testing.T, cnd cond.Cond[Book], b *Book) bool {
 	t.Helper()
 
-	ok, err := cond.Match(b)
+	ok, err := cnd.Match(b)
 	require.NoError(t, err)
 	return ok
 }
 
 func TestComparisons(t *testing.T) {
 	tests := []struct {
-		cond schema.Cond[Book]
+		cnd  cond.Cond[Book]
 		want bool
 		text string
 	}{
@@ -192,8 +193,8 @@ func TestComparisons(t *testing.T) {
 		{year.Desc().Lt(1964), false, "Year < 1964"},
 	}
 	for _, test := range tests {
-		require.Equal(t, test.want, match(t, test.cond, sample), test.text)
-		require.Equal(t, test.text, test.cond.String())
+		require.Equal(t, test.want, match(t, test.cnd, sample), test.text)
+		require.Equal(t, test.text, test.cnd.String())
 	}
 
 	// A record with no value satisfies no comparison.
@@ -204,43 +205,43 @@ func TestComparisons(t *testing.T) {
 	c := year.Between(1960, 1970)
 	require.Equal(t, "Year", c.Path)
 	require.Equal(t, "int", c.Codec)
-	require.Equal(t, schema.OpRange, c.Op)
-	require.Equal(t, &schema.Bound{Value: lex.EncodeInt64(1960)}, c.Low)
-	require.Equal(t, &schema.Bound{Value: lex.EncodeInt64(1970)}, c.High)
+	require.Equal(t, cond.OpRange, c.Op)
+	require.Equal(t, &cond.Bound{Value: lex.EncodeInt64(1960)}, c.Low)
+	require.Equal(t, &cond.Bound{Value: lex.EncodeInt64(1970)}, c.High)
 	require.NoError(t, c.Err())
 
 	c = title.In("a", "b")
-	require.Equal(t, schema.OpIn, c.Op)
+	require.Equal(t, cond.OpIn, c.Op)
 	require.Equal(t, [][]byte{[]byte("a\x00\x01"), []byte("b\x00\x01")}, c.Values)
-	require.Equal(t, schema.OpEq, title.Eq("a").Op)
+	require.Equal(t, cond.OpEq, title.Eq("a").Op)
 	require.Nil(t, year.Gt(1).High)
 	require.True(t, year.Gt(1).Low.Exclusive)
 }
 
 func TestCombinations(t *testing.T) {
 	yes, no := year.Eq(1965), year.Eq(1900)
-	long := schema.Func("long_title", func(b *Book) bool { return len(b.Title) > 10 })
+	long := cond.Func("long_title", func(b *Book) bool { return len(b.Title) > 10 })
 
 	tests := []struct {
-		cond schema.Cond[Book]
+		cnd  cond.Cond[Book]
 		want bool
 		text string
 	}{
-		{schema.And(yes, title.Eq("Dune")), true, `(Year = 1965) and (Title = "Dune")`},
-		{schema.And(yes, no), false, "(Year = 1965) and (Year = 1900)"},
-		{schema.And[Book](), true, "true"},
-		{schema.Or(no, yes), true, "(Year = 1900) or (Year = 1965)"},
-		{schema.Or(no, no), false, "(Year = 1900) or (Year = 1900)"},
-		{schema.Or[Book](), false, "false"},
-		{schema.Not(no), true, "not (Year = 1900)"},
-		{schema.Not(yes), false, "not (Year = 1965)"},
+		{cond.And(yes, title.Eq("Dune")), true, `(Year = 1965) and (Title = "Dune")`},
+		{cond.And(yes, no), false, "(Year = 1965) and (Year = 1900)"},
+		{cond.And[Book](), true, "true"},
+		{cond.Or(no, yes), true, "(Year = 1900) or (Year = 1965)"},
+		{cond.Or(no, no), false, "(Year = 1900) or (Year = 1900)"},
+		{cond.Or[Book](), false, "false"},
+		{cond.Not(no), true, "not (Year = 1900)"},
+		{cond.Not(yes), false, "not (Year = 1965)"},
 		{long, false, "long_title()"},
-		{schema.Not(long), true, "not (long_title())"},
-		{schema.And(yes, schema.Or(no, schema.Not(long))), true, "(Year = 1965) and ((Year = 1900) or (not (long_title())))"},
+		{cond.Not(long), true, "not (long_title())"},
+		{cond.And(yes, cond.Or(no, cond.Not(long))), true, "(Year = 1965) and ((Year = 1900) or (not (long_title())))"},
 	}
 	for _, test := range tests {
-		require.Equal(t, test.want, match(t, test.cond, sample), test.text)
-		require.Equal(t, test.text, test.cond.String())
+		require.Equal(t, test.want, match(t, test.cnd, sample), test.text)
+		require.Equal(t, test.text, test.cnd.String())
 	}
 }
 

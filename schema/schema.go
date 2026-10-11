@@ -1,6 +1,6 @@
-// Package catalog describes what is defined in a database: the namespaces that divide its
+// Package schema describes what is defined in a database: the namespaces that divide its
 // keys and the stores, indexes and the like that live in them. It holds no data.
-package catalog
+package schema
 
 import (
 	"bytes"
@@ -13,10 +13,10 @@ import (
 )
 
 // ErrChanged is returned by Check for a definition that is not the one the data was written with.
-var ErrChanged = errors.New("catalog: definition has changed")
+var ErrChanged = errors.New("schema: definition has changed")
 
 // reservedName is the name of the namespace that the schema keeps its own records in.
-const reservedName = "_catalog"
+const reservedName = "_schema"
 
 // PrefixAllocator gives the namespaces at the root of a schema their prefixes.
 // It must give a name the same prefix every time.
@@ -54,8 +54,8 @@ func WithPrefixAllocator(allocator PrefixAllocator) Option {
 	}
 }
 
-// NewSchema creates a new Schema.
-func NewSchema(opts ...Option) *Schema {
+// New creates a new Schema.
+func New(opts ...Option) *Schema {
 	s := &Schema{}
 	for _, opt := range opts {
 		opt(s)
@@ -63,7 +63,7 @@ func NewSchema(opts ...Option) *Schema {
 
 	s.root = &Namespace{schema: s}
 	s.meta = s.root.Sub(reservedName)
-	s.meta.Define(Definition{Kind: "catalog", Keys: true})
+	s.meta.Define(Definition{Kind: "schema", Keys: true})
 	return s
 }
 
@@ -108,7 +108,7 @@ func (s *Schema) Definitions() []*Definition {
 
 // fail records a problem with a definition. The schema must be locked.
 func (s *Schema) fail(format string, args ...any) {
-	s.errs = append(s.errs, fmt.Errorf("catalog: "+format, args...))
+	s.errs = append(s.errs, fmt.Errorf("schema: "+format, args...))
 }
 
 // Validate reports the problems of the schema that can be found without a database:

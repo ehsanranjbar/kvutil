@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"github.com/ehsanranjbar/kvutil"
-	"github.com/ehsanranjbar/kvutil/catalog"
 	"github.com/ehsanranjbar/kvutil/kv"
+	"github.com/ehsanranjbar/kvutil/schema"
 )
 
 const (
@@ -32,7 +32,7 @@ type collectable interface {
 // without it, but reading them takes longer the more there is that was not collected.
 type Collector struct {
 	db       kv.DB
-	schema   *catalog.Schema
+	sch      *schema.Schema
 	batch    int
 	interval time.Duration
 	onError  func(error)
@@ -66,10 +66,10 @@ func WithErrorHandler(f func(error)) CollectorOption {
 }
 
 // NewCollector creates a collector for the aggregations that are defined in a schema.
-func NewCollector(db kv.DB, schema *catalog.Schema, opts ...CollectorOption) *Collector {
+func NewCollector(db kv.DB, sch *schema.Schema, opts ...CollectorOption) *Collector {
 	c := &Collector{
 		db:       db,
-		schema:   schema,
+		sch:      sch,
 		batch:    DefaultBatchSize,
 		interval: DefaultInterval,
 		onError:  func(error) {},
@@ -83,7 +83,7 @@ func NewCollector(db kv.DB, schema *catalog.Schema, opts ...CollectorOption) *Co
 // aggs returns the aggregations that are defined in the schema right now.
 func (c *Collector) aggs() []collectable {
 	var aggs []collectable
-	for _, def := range c.schema.Definitions() {
+	for _, def := range c.sch.Definitions() {
 		if a, ok := def.Object.(collectable); ok {
 			aggs = append(aggs, a)
 		}
@@ -152,7 +152,7 @@ func (c *Collector) Run(ctx context.Context) error {
 // Rebuild builds an aggregation again from the records of its store, which is how an
 // aggregation that is added to a store with records in it gets to know of them.
 // It must not run while records are written to the store.
-func Rebuild[K, V, G, X, S any](ctx context.Context, db kv.DB, a *Agg[K, V, G, X, S], opts ...CollectorOption) error {
+func Rebuild[K, V, G, X, S any](ctx context.Context, db kv.DB, a *Aggregation[K, V, G, X, S], opts ...CollectorOption) error {
 	c := NewCollector(db, a.ns.Schema(), opts...)
 
 	// Everything that the aggregation has stored goes first.
@@ -223,7 +223,7 @@ func Rebuild[K, V, G, X, S any](ctx context.Context, db kv.DB, a *Agg[K, V, G, X
 }
 
 // clearRange deletes the keys of a range, a batch at a time.
-func clearRange(ctx context.Context, db kv.DB, r catalog.Range, batch int) error {
+func clearRange(ctx context.Context, db kv.DB, r kv.KeyRange, batch int) error {
 	for {
 		if err := ctx.Err(); err != nil {
 			return err

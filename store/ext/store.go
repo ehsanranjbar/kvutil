@@ -9,11 +9,12 @@ import (
 	"time"
 
 	"github.com/ehsanranjbar/kvutil"
-	"github.com/ehsanranjbar/kvutil/catalog"
 	"github.com/ehsanranjbar/kvutil/codec"
 	"github.com/ehsanranjbar/kvutil/internal/ordmap"
+	"github.com/ehsanranjbar/kvutil/iterutil"
 	"github.com/ehsanranjbar/kvutil/kv"
-	sstore "github.com/ehsanranjbar/kvutil/store/serialized"
+	"github.com/ehsanranjbar/kvutil/schema"
+	"github.com/ehsanranjbar/kvutil/store/typed"
 )
 
 // ErrTTLWithExtensions is returned when a record that expires is set in a store that has
@@ -28,9 +29,9 @@ var (
 // Store is a wrapper around a serialized store with an ordered list of extensions
 // that are called on set and delete.
 type Store[K, V any] struct {
-	ns          *catalog.Namespace
-	data        *sstore.Store[K, V]
-	extNS       *catalog.Namespace
+	ns          *schema.Namespace
+	data        *typed.Store[K, V]
+	extNS       *schema.Namespace
 	exts        *ordmap.Map[string, Extension[K, V]]
 	deleteHooks *ordmap.Map[string, DeleteHook[K]]
 }
@@ -38,14 +39,14 @@ type Store[K, V any] struct {
 // New defines a new Store in the given namespace, with the codecs that its types have by default.
 // It panics if the type of the keys has no key codec, in which case the store must be defined
 // with NewWithCodecs.
-func New[K, V any](ns *catalog.Namespace) *Store[K, V] {
+func New[K, V any](ns *schema.Namespace) *Store[K, V] {
 	return NewWithCodecs[K, V](ns, nil, nil)
 }
 
 // NewWithCodecs defines a new Store in the given namespace with the given codecs.
 // A codec that is nil is the one that New would use.
 func NewWithCodecs[K, V any](
-	ns *catalog.Namespace,
+	ns *schema.Namespace,
 	keyCodec codec.KeyCodec[K],
 	valueCodec codec.ValueCodec[V],
 ) *Store[K, V] {
@@ -54,13 +55,13 @@ func NewWithCodecs[K, V any](
 		exts:        ordmap.New[string, Extension[K, V]](),
 		deleteHooks: ordmap.New[string, DeleteHook[K]](),
 	}
-	ns.Define(catalog.Definition{
+	ns.Define(schema.Definition{
 		Kind:      "ext",
 		KeyType:   reflect.TypeFor[K]().String(),
 		ValueType: reflect.TypeFor[V]().String(),
 	})
-	s.data = sstore.NewWithCodecs(ns.Sub("data", catalog.WithPrefix(dataPrefix)), keyCodec, valueCodec)
-	s.extNS = ns.Sub("ext", catalog.WithPrefix(extPrefix))
+	s.data = typed.NewWithCodecs(ns.Sub("data", schema.WithPrefix(dataPrefix)), keyCodec, valueCodec)
+	s.extNS = ns.Sub("ext", schema.WithPrefix(extPrefix))
 	return s
 }
 
@@ -88,22 +89,22 @@ func (s *Store[K, V]) Getter(tx kv.Tx) Getter[K, V] {
 }
 
 // Records implements the Extensible interface.
-func (s *Store[K, V]) Records(tx kv.Tx, r kvutil.Range[K]) (kvutil.Iterator[K, *V], error) {
+func (s *Store[K, V]) Records(tx kv.Tx, r kvutil.Range[K]) (iterutil.Iterator[K, *V], error) {
 	return s.data.Instantiate(tx).Iterator(r)
 }
 
-// AddDeleteHook implements the DeleteHooker interface. Delete hooks are called after the extensions.
+// AddDeleteHook implements the DeleteHooks interface. Delete hooks are called after the extensions.
 func (s *Store[K, V]) AddDeleteHook(name string, hook DeleteHook[K]) {
 	s.deleteHooks.Add(name, hook)
 }
 
 // Namespace returns the namespace of the store.
-func (s *Store[K, V]) Namespace() *catalog.Namespace {
+func (s *Store[K, V]) Namespace() *schema.Namespace {
 	return s.ns
 }
 
 // Data returns the serialized store that holds the records.
-func (s *Store[K, V]) Data() *sstore.Store[K, V] {
+func (s *Store[K, V]) Data() *typed.Store[K, V] {
 	return s.data
 }
 
@@ -138,7 +139,7 @@ func (s *Store[K, V]) Instantiate(tx kv.Tx) *Instance[K, V] {
 type Instance[K, V any] struct {
 	store *Store[K, V]
 	tx    kv.Tx
-	data  *sstore.Instance[K, V]
+	data  *typed.Instance[K, V]
 	exts  *ordmap.Map[string, ExtensionInstance[K, V]]
 }
 
@@ -177,12 +178,12 @@ func (s *Instance[K, V]) Has(key K) (bool, error) {
 }
 
 // Iterator iterates over the records whose keys are in the range, in ascending order.
-func (s *Instance[K, V]) Iterator(r kvutil.Range[K]) (*sstore.Iterator[K, V], error) {
+func (s *Instance[K, V]) Iterator(r kvutil.Range[K]) (*typed.Iterator[K, V], error) {
 	return s.data.Iterator(r)
 }
 
 // ReverseIterator iterates over the records whose keys are in the range, in descending order.
-func (s *Instance[K, V]) ReverseIterator(r kvutil.Range[K]) (*sstore.Iterator[K, V], error) {
+func (s *Instance[K, V]) ReverseIterator(r kvutil.Range[K]) (*typed.Iterator[K, V], error) {
 	return s.data.ReverseIterator(r)
 }
 
@@ -192,13 +193,13 @@ func (s *Instance[K, V]) Set(key K, value *V) error {
 }
 
 // SetWithOptions is a variant of Set that passes options to the extensions.
-// An option that is made by WithExtOption only goes to the extension that it names.
+// An option that is made by For only goes to the extension that it names.
 func (s *Instance[K, V]) SetWithOptions(key K, value *V, opts ...any) error {
 	if !s.tx.Writable() {
 		return kv.ErrReadOnly
 	}
 	if value == nil {
-		return sstore.ErrNilValue
+		return typed.ErrNilValue
 	}
 
 	if s.store.exts.Len() > 0 {
@@ -226,7 +227,7 @@ func (s *Instance[K, V]) SetWithOptions(key K, value *V, opts ...any) error {
 func filterOptions(name string, opts []any) []any {
 	var extOpts []any
 	for _, opt := range opts {
-		if eo, ok := opt.(ExtOption); ok {
+		if eo, ok := opt.(Option); ok {
 			if eo.extName == name {
 				extOpts = append(extOpts, eo.value)
 			}

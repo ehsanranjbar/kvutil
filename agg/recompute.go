@@ -7,9 +7,8 @@ import (
 	"slices"
 	"time"
 
-	"github.com/ehsanranjbar/kvutil"
 	"github.com/ehsanranjbar/kvutil/codec"
-	"github.com/ehsanranjbar/kvutil/iters"
+	"github.com/ehsanranjbar/kvutil/iterutil"
 	"github.com/ehsanranjbar/kvutil/kv"
 	"github.com/ehsanranjbar/kvutil/kv/prefix"
 	extstore "github.com/ehsanranjbar/kvutil/store/ext"
@@ -26,10 +25,10 @@ import (
 func Recompute[K, V, G, X, S any](
 	store extstore.Extensible[K, V],
 	name string,
-	extract Extract[V, G, X],
-	compute func(contributions iters.Seq[time.Time, X]) (S, error),
+	extract Extractor[V, G, X],
+	compute func(contributions iterutil.AdvancedIterator[time.Time, X]) (S, error),
 	opts ...Option,
-) *Agg[K, V, G, X, S] {
+) *Aggregation[K, V, G, X, S] {
 	return define(store, name, "recompute", extract, opts, func(c *core[X, S], o options) kind[X, S] {
 		if o.appendOnly {
 			panic(fmt.Sprintf("agg %q: AppendOnly is for delta aggregations", name))
@@ -57,7 +56,7 @@ func Recompute[K, V, G, X, S any](
 
 type recomputeKind[X, S any] struct {
 	*core[X, S]
-	compute func(iters.Seq[time.Time, X]) (S, error)
+	compute func(iterutil.AdvancedIterator[time.Time, X]) (S, error)
 	merge   func(a, b S) S
 	stored  []Bucket // the buckets whose states are stored
 }
@@ -104,18 +103,18 @@ type contributions[X any] struct {
 	codec  codec.ValueCodec[X]
 }
 
-var _ kvutil.Iterator[time.Time, int] = (*contributions[int])(nil)
+var _ iterutil.Iterator[time.Time, int] = (*contributions[int])(nil)
 
-// Valid implements the kvutil.Iterator interface.
+// Valid implements the iterutil.Iterator interface.
 func (it *contributions[X]) Valid() bool { return it.base.Valid() }
 
-// Next implements the kvutil.Iterator interface.
+// Next implements the iterutil.Iterator interface.
 func (it *contributions[X]) Next() { it.base.Next() }
 
-// Close implements the kvutil.Iterator interface.
+// Close implements the iterutil.Iterator interface.
 func (it *contributions[X]) Close() error { return it.base.Close() }
 
-// Key implements the kvutil.Iterator interface.
+// Key implements the iterutil.Iterator interface.
 func (it *contributions[X]) Key() (time.Time, error) {
 	key := it.base.Key()
 	if len(key) < it.offset+timeSize {
@@ -124,7 +123,7 @@ func (it *contributions[X]) Key() (time.Time, error) {
 	return timeCodec.Decode(key[it.offset : it.offset+timeSize])
 }
 
-// Value implements the kvutil.Iterator interface.
+// Value implements the iterutil.Iterator interface.
 func (it *contributions[X]) Value() (x X, err error) {
 	bz, err := it.base.Value()
 	if err != nil {
@@ -155,7 +154,7 @@ func (r *recomputeKind[X, S]) computeSpan(tx *prefix.Tx, b Bucket, group []byte,
 			err = fmt.Errorf("agg %q: the function panicked: %v", r.name, p)
 		}
 	}()
-	state, err = r.compute(iters.From[time.Time, X](it))
+	state, err = r.compute(iterutil.Of[time.Time, X](it))
 	if err != nil {
 		return state, false, fmt.Errorf("agg %q: %w", r.name, err)
 	}

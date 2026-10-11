@@ -5,10 +5,11 @@ import (
 	"fmt"
 
 	"github.com/ehsanranjbar/kvutil"
-	"github.com/ehsanranjbar/kvutil/catalog"
 	"github.com/ehsanranjbar/kvutil/codec"
+	"github.com/ehsanranjbar/kvutil/cond"
+	"github.com/ehsanranjbar/kvutil/field"
 	"github.com/ehsanranjbar/kvutil/index"
-	"github.com/ehsanranjbar/kvutil/iters"
+	"github.com/ehsanranjbar/kvutil/iterutil"
 	"github.com/ehsanranjbar/kvutil/kv"
 	"github.com/ehsanranjbar/kvutil/kv/memkv"
 	"github.com/ehsanranjbar/kvutil/schema"
@@ -27,34 +28,34 @@ type Book struct {
 // The fields of a book that indexes are defined on and that conditions are written with.
 var (
 	// By the path of a field of the struct, which is read by reflection.
-	Author  = schema.Path[Book, string]("Author")
-	Year    = schema.Path[Book, int]("Year")
-	ISBN    = schema.Path[Book, string]("ISBN")
-	InPrint = schema.Path[Book, bool]("InPrint")
+	Author  = field.Path[Book, string]("Author")
+	Year    = field.Path[Book, int]("Year")
+	ISBN    = field.Path[Book, string]("ISBN")
+	InPrint = field.Path[Book, bool]("InPrint")
 	// A slice is each of its elements: a book is found by each of its tags.
-	Tags = schema.Path[Book, string]("Tags")
+	Tags = field.Path[Book, string]("Tags")
 	// By a function, for a value that is not a field of the struct as it is.
-	Decade = schema.FieldOf("Decade", func(b *Book) int { return b.Year / 10 * 10 })
+	Decade = field.Of("Decade", func(b *Book) int { return b.Year / 10 * 10 })
 )
 
 // Example defines a store with one index of every kind and looks books up with each of them.
 func Example() {
-	sch := catalog.NewSchema()
+	sch := schema.New()
 	books := extstore.New[int64, Book](sch.Namespace("books"))
 
 	// Any number of books can have the same author.
-	byAuthor := index.Multi(books, "by_author", Author)
+	byAuthor := index.On(books, "by_author", Author)
 	// A book is found by each of its tags, and a book without tags is not in the index.
-	byTag := index.Multi(books, "by_tag", Tags)
+	byTag := index.On(books, "by_tag", Tags)
 	// One book at most can have an ISBN.
 	byISBN := index.Unique(books, "by_isbn", ISBN)
 	// The title is stored with the entries, so it can be listed without reading the books.
-	byYear := index.Multi(books, "by_year", Year,
+	byYear := index.On(books, "by_year", Year,
 		index.Covering(func(b *Book) string { return b.Title }, nil, "Title"))
 	// Several fields in one key: by author, and from the latest year for the same author.
-	byAuthorYear := index.Composite(books, "by_author_year", schema.Fields(Author, Year.Desc()))
+	byAuthorYear := index.Composite(books, "by_author_year", field.List(Author, Year.Desc()))
 	// Only the books that are in print are in the index.
-	inPrintByDecade := index.Multi(books, "in_print_by_decade", Decade, index.Where(InPrint.Eq(true)))
+	inPrintByDecade := index.On(books, "in_print_by_decade", Decade, index.Where(InPrint.Eq(true)))
 
 	db := memkv.New()
 	if err := sch.Check(db); err != nil {
@@ -88,7 +89,7 @@ func Example() {
 		if err != nil {
 			panic(err)
 		}
-		titles, err := iters.From(it).
+		titles, err := iterutil.Of(it).
 			Map(func(_ int64, b *Book) (string, error) { return b.Title, nil }).
 			Values()
 		if err != nil {
@@ -137,7 +138,7 @@ func Example() {
 		// what comes back is exactly what was asked for.
 		fmt.Println("Herbert, in print, not scifi:",
 			titles(byAuthorYear.Instantiate(tx).Lookup(
-				Author.Eq("Herbert"), InPrint.Eq(true), schema.Not(Tags.Eq("scifi")))))
+				Author.Eq("Herbert"), InPrint.Eq(true), cond.Not(Tags.Eq("scifi")))))
 
 		// How an index would serve conditions, without running them.
 		ranges, residual, err := byAuthorYear.Instantiate(tx).Plan(Author.In("Austen", "Herbert"), Tags.Eq("classic"))

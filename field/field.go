@@ -1,6 +1,6 @@
-// Package schema describes the fields of records: what indexes find records by, and what
+// Package field describes the fields of records: what indexes find records by, and what
 // conditions on records are written with.
-package schema
+package field
 
 import (
 	"fmt"
@@ -40,10 +40,10 @@ func newField[V, F any](path string, get func(*V) []F, multi bool, c []codec.Key
 	return f
 }
 
-// FieldOf defines a field by a function that returns its value for a record.
+// Of defines a field by a function that returns its value for a record.
 // The values are encoded with the key codec of their type, unless one is given.
 // It panics if the type has no key codec and none is given.
-func FieldOf[V, F any](path string, get func(*V) F, c ...codec.KeyCodec[F]) Field[V, F] {
+func Of[V, F any](path string, get func(*V) F, c ...codec.KeyCodec[F]) Field[V, F] {
 	return newField(path, func(v *V) []F { return []F{get(v)} }, false, c)
 }
 
@@ -221,7 +221,7 @@ type Component[V any] interface {
 	Keys(v *V) ([][]byte, error)
 }
 
-// Fields returns fields of different types as the parts of the keys of an index.
-func Fields[V any](parts ...Component[V]) []Component[V] {
+// List returns fields of different types as the parts of the keys of an index.
+func List[V any](parts ...Component[V]) []Component[V] {
 	return parts
 }

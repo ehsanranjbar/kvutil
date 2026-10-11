@@ -29,8 +29,8 @@ type BulkWriter interface {
 	Cancel()
 }
 
-// Bulker is an optional capability of a DB to create bulk writers.
-type Bulker interface {
+// BulkOpener is an optional capability of a DB to create bulk writers.
+type BulkOpener interface {
 	// NewBulkWriter creates a new bulk writer.
 	NewBulkWriter() BulkWriter
 }
@@ -59,7 +59,7 @@ func DropRange(db DB, start, end []byte) error {
 
 // NewBulkWriter creates a bulk writer, or returns ErrUnsupported if the DB cannot.
 func NewBulkWriter(db DB) (BulkWriter, error) {
-	if b, ok := db.(Bulker); ok {
+	if b, ok := db.(BulkOpener); ok {
 		return b.NewBulkWriter(), nil
 	}
 	return nil, ErrUnsupported

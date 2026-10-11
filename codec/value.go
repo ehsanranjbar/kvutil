@@ -58,8 +58,8 @@ func (jsonFormat) Marshal(v any) ([]byte, error) { return json.Marshal(v) }
 // Unmarshal implements the Format interface.
 func (jsonFormat) Unmarshal(data []byte, v any) error { return json.Unmarshal(data, v) }
 
-// From returns a value codec that encodes the values of a type with the given format.
-func From[V any](format Format) ValueCodec[V] {
+// Formatted returns a value codec that encodes the values of a type with the given format.
+func Formatted[V any](format Format) ValueCodec[V] {
 	return formatCodec[V]{format: format}
 }
 
@@ -130,5 +130,5 @@ func ValueFor[V any](format Format) ValueCodec[V] {
 	if format == nil {
 		format = Msgpack
 	}
-	return From[V](format)
+	return Formatted[V](format)
 }

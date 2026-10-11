@@ -21,10 +21,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ehsanranjbar/kvutil/catalog"
 	"github.com/ehsanranjbar/kvutil/codec"
 	"github.com/ehsanranjbar/kvutil/kv"
 	"github.com/ehsanranjbar/kvutil/kv/prefix"
+	"github.com/ehsanranjbar/kvutil/schema"
 	extstore "github.com/ehsanranjbar/kvutil/store/ext"
 )
 
@@ -36,11 +36,11 @@ var (
 	ErrNoBucket = errors.New("agg: the aggregation does not have the bucket")
 )
 
-// Extract says what a record contributes to an aggregation: a value, in a group.
+// Extractor says what a record contributes to an aggregation: a value, in a group.
 // A record that is not ok contributes nothing. The type of the groups must have a key codec:
 // it can be a number, a string or a codec.Pair of them, among others. An aggregation that
 // does not group its records has NoGroup as the type of its groups.
-type Extract[V, G, X any] func(v *V) (group G, x X, ok bool)
+type Extractor[V, G, X any] func(v *V) (group G, x X, ok bool)
 
 // NoGroup is the type of the groups of an aggregation that has one state for all the records.
 type NoGroup struct{}
@@ -212,7 +212,7 @@ func appendTime(dst []byte, t time.Time) []byte {
 // encoded in the keys: in the form of their key codec that marks where it ends.
 type core[X, S any] struct {
 	name      string
-	ns        *catalog.Namespace
+	ns        *schema.Namespace
 	buckets   []Bucket
 	skipGroup func(bz []byte) (n int, err error) // the size of the group at the front of the bytes
 	xCodec    codec.ValueCodec[X]
@@ -277,12 +277,12 @@ type kind[X, S any] interface {
 	collect(db kv.DB, cursor []byte, batch int, report func(error)) (next []byte, err error)
 }
 
-// Agg is a stored aggregation of the records of a store. It is kept as an extension of the
+// Aggregation is a stored aggregation of the records of a store. It is kept as an extension of the
 // store, and is instantiated for a transaction to be read.
-type Agg[K, V, G, X, S any] struct {
+type Aggregation[K, V, G, X, S any] struct {
 	*core[X, S]
 	store   extstore.Extensible[K, V]
-	extract Extract[V, G, X]
+	extract Extractor[V, G, X]
 	gCodec  codec.KeyCodec[G]
 	timeOf  func(*V) time.Time
 	kind    kind[X, S]
@@ -297,10 +297,10 @@ type Agg[K, V, G, X, S any] struct {
 func define[K, V, G, X, S any](
 	store extstore.Extensible[K, V],
 	name, kindName string,
-	extract Extract[V, G, X],
+	extract Extractor[V, G, X],
 	opts []Option,
 	newKind func(c *core[X, S], o options) kind[X, S],
-) *Agg[K, V, G, X, S] {
+) *Aggregation[K, V, G, X, S] {
 	var o options
 	for _, opt := range opts {
 		opt(&o)
@@ -333,7 +333,7 @@ func define[K, V, G, X, S any](
 		}
 	}
 
-	a := &Agg[K, V, G, X, S]{
+	a := &Aggregation[K, V, G, X, S]{
 		core: &core[X, S]{
 			name:    name,
 			buckets: o.buckets,
@@ -358,27 +358,27 @@ func define[K, V, G, X, S any](
 }
 
 // Name returns the name of the aggregation.
-func (a *Agg[K, V, G, X, S]) Name() string {
+func (a *Aggregation[K, V, G, X, S]) Name() string {
 	return a.name
 }
 
 // Descriptor returns the descriptor of the aggregation.
-func (a *Agg[K, V, G, X, S]) Descriptor() Descriptor {
+func (a *Aggregation[K, V, G, X, S]) Descriptor() Descriptor {
 	return a.desc
 }
 
 // Namespace returns the namespace that the aggregation keeps its data in.
-func (a *Agg[K, V, G, X, S]) Namespace() *catalog.Namespace {
+func (a *Aggregation[K, V, G, X, S]) Namespace() *schema.Namespace {
 	return a.ns
 }
 
 // Buckets returns the buckets that the aggregation is kept for.
-func (a *Agg[K, V, G, X, S]) Buckets() []Bucket {
+func (a *Aggregation[K, V, G, X, S]) Buckets() []Bucket {
 	return slices.Clone(a.buckets)
 }
 
 // contributionOf returns what a record contributes, or nil if it contributes nothing.
-func (a *Agg[K, V, G, X, S]) contributionOf(v *V) (*contribution[X], error) {
+func (a *Aggregation[K, V, G, X, S]) contributionOf(v *V) (*contribution[X], error) {
 	if v == nil {
 		return nil, nil
 	}
@@ -403,7 +403,7 @@ func (a *Agg[K, V, G, X, S]) contributionOf(v *V) (*contribution[X], error) {
 }
 
 // encodeGroup encodes a group as it is in the keys.
-func (a *Agg[K, V, G, X, S]) encodeGroup(group G) ([]byte, error) {
+func (a *Aggregation[K, V, G, X, S]) encodeGroup(group G) ([]byte, error) {
 	gbz, err := a.gCodec.Append(nil, group)
 	if err != nil {
 		return nil, fmt.Errorf("failed to encode the group: %w", err)
@@ -412,23 +412,23 @@ func (a *Agg[K, V, G, X, S]) encodeGroup(group G) ([]byte, error) {
 }
 
 // collectName implements the collectable interface.
-func (a *Agg[K, V, G, X, S]) collectName() string {
+func (a *Aggregation[K, V, G, X, S]) collectName() string {
 	return a.ns.Path()
 }
 
 // collectBatch implements the collectable interface.
-func (a *Agg[K, V, G, X, S]) collectBatch(db kv.DB, cursor []byte, batch int, report func(error)) ([]byte, error) {
+func (a *Aggregation[K, V, G, X, S]) collectBatch(db kv.DB, cursor []byte, batch int, report func(error)) ([]byte, error) {
 	return a.kind.collect(db, cursor, batch, report)
 }
 
 // maintainer is the extension that notes the changes of the records for an aggregation.
 type maintainer[K, V, G, X, S any] struct {
-	a       *Agg[K, V, G, X, S]
+	a       *Aggregation[K, V, G, X, S]
 	newKind func(c *core[X, S], o options) kind[X, S]
 }
 
 // UseNamespace implements the extstore.NamespaceUser interface.
-func (m maintainer[K, V, G, X, S]) UseNamespace(ns *catalog.Namespace) {
+func (m maintainer[K, V, G, X, S]) UseNamespace(ns *schema.Namespace) {
 	a := m.a
 	a.ns = ns
 
@@ -442,7 +442,7 @@ func (m maintainer[K, V, G, X, S]) UseNamespace(ns *catalog.Namespace) {
 	a.desc.Encoding = a.gCodec.Name() + "," + a.xCodec.Name() + "," + a.sCodec.Name()
 	a.kind = m.newKind(a.core, a.opts)
 
-	ns.Define(catalog.Definition{
+	ns.Define(schema.Definition{
 		Kind:       "agg",
 		Keys:       true,
 		KeyType:    reflect.TypeFor[K]().String(),
@@ -459,7 +459,7 @@ func (m maintainer[K, V, G, X, S]) Instantiate(tx kv.Tx) extstore.ExtensionInsta
 }
 
 type maintenance[K, V, G, X, S any] struct {
-	a  *Agg[K, V, G, X, S]
+	a  *Aggregation[K, V, G, X, S]
 	tx *prefix.Tx
 }
 
@@ -491,13 +491,13 @@ func (m *maintenance[K, V, G, X, S]) change(rawKey []byte, old, new *V) error {
 }
 
 // Instantiate creates the instance of the aggregation for a transaction.
-func (a *Agg[K, V, G, X, S]) Instantiate(tx kv.Tx) *Instance[K, V, G, X, S] {
+func (a *Aggregation[K, V, G, X, S]) Instantiate(tx kv.Tx) *Instance[K, V, G, X, S] {
 	return &Instance[K, V, G, X, S]{a: a, tx: a.ns.Open(tx)}
 }
 
-// Instance is an Agg in a transaction, which it is read with.
+// Instance is an Aggregation in a transaction, which it is read with.
 type Instance[K, V, G, X, S any] struct {
-	a  *Agg[K, V, G, X, S]
+	a  *Aggregation[K, V, G, X, S]
 	tx *prefix.Tx
 }
 

@@ -1,4 +1,4 @@
-package catalog
+package schema
 
 import (
 	"bytes"
@@ -115,8 +115,8 @@ func (ns *Namespace) Prefix() []byte {
 }
 
 // Range returns the range of all the keys of the namespace.
-func (ns *Namespace) Range() Range {
-	return Range{Start: ns.prefix, End: kv.PrefixEnd(ns.prefix)}
+func (ns *Namespace) Range() kv.KeyRange {
+	return kv.KeyRange{Start: ns.prefix, End: kv.PrefixEnd(ns.prefix)}
 }
 
 // Open returns the keyspace of the namespace in a transaction.
@@ -167,13 +167,13 @@ func (ns *Namespace) Cascade(to *Namespace) {
 // Footprint returns the ranges of the keys that an operation on the namespace may touch:
 // its own range, which has everything that is defined under it, and the ranges of the
 // namespaces that it cascades to.
-func (ns *Namespace) Footprint() []Range {
+func (ns *Namespace) Footprint() []kv.KeyRange {
 	s := ns.schema
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	var (
-		ranges  []Range
+		ranges  []kv.KeyRange
 		visited = map[*Namespace]bool{}
 		visit   func(n *Namespace)
 	)
@@ -198,12 +198,6 @@ func (ns *Namespace) Footprint() []Range {
 	}
 	visit(ns)
 	return ranges
-}
-
-// Range is a range of keys from Start up to, and not including, End. An empty End is unbounded.
-type Range struct {
-	Start []byte
-	End   []byte
 }
 
 // Definition describes something that is defined in a namespace.

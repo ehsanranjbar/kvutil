@@ -36,10 +36,10 @@ type Fold[X, S any] struct {
 func Delta[K, V, G, X, S any](
 	store extstore.Extensible[K, V],
 	name string,
-	extract Extract[V, G, X],
+	extract Extractor[V, G, X],
 	fold Fold[X, S],
 	opts ...Option,
-) *Agg[K, V, G, X, S] {
+) *Aggregation[K, V, G, X, S] {
 	return define(store, name, "delta", extract, opts, func(c *core[X, S], o options) kind[X, S] {
 		if fold.Add == nil {
 			panic(fmt.Sprintf("agg %q: a delta aggregation needs a function to add a contribution", name))

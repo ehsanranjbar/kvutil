@@ -7,13 +7,13 @@ import (
 	"time"
 
 	"github.com/ehsanranjbar/kvutil"
-	"github.com/ehsanranjbar/kvutil/catalog"
 	"github.com/ehsanranjbar/kvutil/codec"
 	"github.com/ehsanranjbar/kvutil/internal/testkv"
 	"github.com/ehsanranjbar/kvutil/kv"
 	"github.com/ehsanranjbar/kvutil/kv/memkv"
+	"github.com/ehsanranjbar/kvutil/schema"
 	extstore "github.com/ehsanranjbar/kvutil/store/ext"
-	sstore "github.com/ehsanranjbar/kvutil/store/serialized"
+	"github.com/ehsanranjbar/kvutil/store/typed"
 	"github.com/stretchr/testify/require"
 )
 
@@ -23,7 +23,7 @@ type pet struct {
 
 var (
 	_ kvutil.Instantiator[*extstore.Instance[int64, pet]] = (*extstore.Store[int64, pet])(nil)
-	_ extstore.DeleteHooker[int64]                        = (*extstore.Store[int64, pet])(nil)
+	_ extstore.DeleteHooks[int64]                         = (*extstore.Store[int64, pet])(nil)
 )
 
 // recorder is an extension that records what it is told, and that keeps the names of the
@@ -31,11 +31,11 @@ var (
 type recorder struct {
 	name   string
 	events *[]string
-	ns     *catalog.Namespace
+	ns     *schema.Namespace
 	fail   error
 }
 
-func (r *recorder) UseNamespace(ns *catalog.Namespace) {
+func (r *recorder) UseNamespace(ns *schema.Namespace) {
 	r.ns = ns
 }
 
@@ -73,16 +73,16 @@ func (r *recorderInstance) OnDelete(key int64, rawKey []byte, old *pet) error {
 
 func TestStoreWithoutExtensions(t *testing.T) {
 	testkv.Each(t, func(t *testing.T, db kv.DB) {
-		schema := catalog.NewSchema()
-		store := extstore.New[int64, pet](schema.Namespace("pets"))
-		require.NoError(t, schema.Check(db))
+		sch := schema.New()
+		store := extstore.New[int64, pet](sch.Namespace("pets"))
+		require.NoError(t, sch.Check(db))
 
 		err := db.Update(func(tx kv.Tx) error {
 			ins := store.Instantiate(tx)
 			require.True(t, ins.Writable())
 			require.NoError(t, ins.Set(1, &pet{Name: "rex"}))
 			require.NoError(t, ins.Set(2, &pet{Name: "tom"}))
-			require.ErrorIs(t, ins.Set(3, nil), sstore.ErrNilValue)
+			require.ErrorIs(t, ins.Set(3, nil), typed.ErrNilValue)
 			require.NoError(t, ins.Delete(2))
 			require.NoError(t, ins.Delete(2))
 
@@ -132,11 +132,11 @@ func TestExtensions(t *testing.T) {
 		first := &recorder{name: "first", events: &events}
 		second := &recorder{name: "second", events: &events}
 
-		schema := catalog.NewSchema()
-		store := extstore.New[int64, pet](schema.Namespace("pets")).
+		sch := schema.New()
+		store := extstore.New[int64, pet](sch.Namespace("pets")).
 			WithExtension("first", first).
 			WithExtension("second", second)
-		require.NoError(t, schema.Check(db))
+		require.NoError(t, sch.Check(db))
 		require.Same(t, first, store.Extension("first"))
 		require.Nil(t, store.Extension("missing"))
 		require.Equal(t, "pets/ext/first", first.ns.Path())
@@ -149,8 +149,8 @@ func TestExtensions(t *testing.T) {
 			require.NoError(t, ins.Set(1, &pet{Name: "rex"}))
 			require.NoError(t, ins.SetWithOptions(1, &pet{Name: "max"},
 				"for all",
-				extstore.WithExtOption("second", "for second"),
-				extstore.WithExtOption("third", "for nobody"),
+				extstore.For("second", "for second"),
+				extstore.For("third", "for nobody"),
 			))
 			// Deleting a record that does not exist is not reported.
 			require.NoError(t, ins.Delete(2))
@@ -175,7 +175,7 @@ func TestExtensionNamespace(t *testing.T) {
 	db := memkv.New()
 	var events []string
 	names := &recorder{name: "names", events: &events}
-	store := extstore.New[int64, pet](catalog.NewSchema().Namespace("pets")).WithExtension("names", names)
+	store := extstore.New[int64, pet](schema.New().Namespace("pets")).WithExtension("names", names)
 
 	err := db.Update(func(tx kv.Tx) error {
 		ins := store.Instantiate(tx)
@@ -221,7 +221,7 @@ func TestExtensionFailure(t *testing.T) {
 		failure := errors.New("failure")
 		ok := &recorder{name: "ok", events: &events}
 		failing := &recorder{name: "failing", events: &events}
-		store := extstore.New[int64, pet](catalog.NewSchema().Namespace("pets")).
+		store := extstore.New[int64, pet](schema.New().Namespace("pets")).
 			WithExtension("ok", ok).
 			WithExtension("failing", failing)
 
@@ -268,7 +268,7 @@ func TestDeleteHooks(t *testing.T) {
 		}
 
 		// Hooks alone, which do not need the record to be read.
-		store := extstore.New[int64, pet](catalog.NewSchema().Namespace("pets"))
+		store := extstore.New[int64, pet](schema.New().Namespace("pets"))
 		store.AddDeleteHook("a", hook("a"))
 		store.AddDeleteHook("b", hook("b"))
 
@@ -289,7 +289,7 @@ func TestDeleteHooks(t *testing.T) {
 
 		// With an extension, which is called first.
 		events = nil
-		store = extstore.New[int64, pet](catalog.NewSchema().Namespace("pets")).
+		store = extstore.New[int64, pet](schema.New().Namespace("pets")).
 			WithExtension("ext", &recorder{name: "ext", events: &events})
 		store.AddDeleteHook("a", hook("a"))
 
@@ -307,7 +307,7 @@ func TestDeleteHooks(t *testing.T) {
 
 		// A failing hook stops the delete.
 		failure := errors.New("failure")
-		store = extstore.New[int64, pet](catalog.NewSchema().Namespace("pets"))
+		store = extstore.New[int64, pet](schema.New().Namespace("pets"))
 		store.AddDeleteHook("failing", func(kv.Tx, int64, []byte) error { return failure })
 		err = db.Update(func(tx kv.Tx) error {
 			ins := store.Instantiate(tx)
@@ -326,7 +326,7 @@ func TestDeleteHooks(t *testing.T) {
 func TestReadOnly(t *testing.T) {
 	db := memkv.New()
 	var events []string
-	store := extstore.New[int64, pet](catalog.NewSchema().Namespace("pets")).
+	store := extstore.New[int64, pet](schema.New().Namespace("pets")).
 		WithExtension("ext", &recorder{name: "ext", events: &events})
 
 	require.NoError(t, db.Update(func(tx kv.Tx) error {
@@ -354,10 +354,10 @@ func TestTTL(t *testing.T) {
 	db := testkv.NewBadger(t)
 	var events []string
 
-	plain := extstore.New[int64, pet](catalog.NewSchema().Namespace("plain"))
-	extended := extstore.New[int64, pet](catalog.NewSchema().Namespace("extended")).
+	plain := extstore.New[int64, pet](schema.New().Namespace("plain"))
+	extended := extstore.New[int64, pet](schema.New().Namespace("extended")).
 		WithExtension("ext", &recorder{name: "ext", events: &events})
-	hooked := extstore.New[int64, pet](catalog.NewSchema().Namespace("hooked"))
+	hooked := extstore.New[int64, pet](schema.New().Namespace("hooked"))
 	hooked.AddDeleteHook("hook", func(kv.Tx, int64, []byte) error { return nil })
 
 	err := db.Update(func(tx kv.Tx) error {
@@ -378,13 +378,13 @@ func TestTTL(t *testing.T) {
 func TestDefinitionProblems(t *testing.T) {
 	t.Run("ExtensionNameTwice", func(t *testing.T) {
 		var events []string
-		schema := catalog.NewSchema()
+		sch := schema.New()
 		first := &recorder{name: "first", events: &events}
-		store := extstore.New[int64, pet](schema.Namespace("pets")).
+		store := extstore.New[int64, pet](sch.Namespace("pets")).
 			WithExtension("same", first).
 			WithExtension("same", &recorder{name: "second", events: &events})
 
-		require.Error(t, schema.Validate())
+		require.Error(t, sch.Validate())
 		// The first one stays.
 		require.Same(t, first, store.Extension("same"))
 	})
@@ -392,14 +392,14 @@ func TestDefinitionProblems(t *testing.T) {
 	t.Run("MissingKeyCodec", func(t *testing.T) {
 		type point struct{ X, Y int }
 
-		require.Panics(t, func() { extstore.New[point, pet](catalog.NewSchema().Namespace("points")) })
+		require.Panics(t, func() { extstore.New[point, pet](schema.New().Namespace("points")) })
 	})
 
 	t.Run("Codecs", func(t *testing.T) {
-		schema := catalog.NewSchema()
-		store := extstore.NewWithCodecs(schema.Namespace("pets"),
-			codec.StringKey[string](), codec.From[pet](codec.JSON))
-		require.NoError(t, schema.Validate())
+		sch := schema.New()
+		store := extstore.NewWithCodecs(sch.Namespace("pets"),
+			codec.StringKey[string](), codec.Formatted[pet](codec.JSON))
+		require.NoError(t, sch.Validate())
 		require.Equal(t, "string", store.KeyCodec().Name())
 		require.Equal(t, "json", store.ValueCodec().Name())
 	})

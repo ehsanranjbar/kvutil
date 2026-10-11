@@ -10,7 +10,7 @@ import (
 	"strings"
 
 	"github.com/ehsanranjbar/kvutil"
-	"github.com/ehsanranjbar/kvutil/catalog"
+	"github.com/ehsanranjbar/kvutil/cond"
 	"github.com/ehsanranjbar/kvutil/kv"
 	"github.com/ehsanranjbar/kvutil/schema"
 	extstore "github.com/ehsanranjbar/kvutil/store/ext"
@@ -40,36 +40,26 @@ type Indexer[V any] interface {
 	Descriptor() Descriptor
 }
 
-// KeyRange is a range of index keys. A bound may be the beginning of a key, in which case it
+// Bounds is a range of index keys. A bound may be the beginning of a key, in which case it
 // stands for all the keys that begin with it: a bound that is in the range has them in the
 // range and a bound that is out of it has them out of it.
-type KeyRange = kvutil.Range[[]byte]
+type Bounds = kvutil.Range[[]byte]
 
-// Lookuper is implemented by the indexers that can translate conditions into ranges of keys.
-type Lookuper[V any] interface {
-	// Lookup returns the ranges of index keys that have every record that satisfies all the
+// RangePlanner is implemented by the indexers that can translate conditions into ranges of keys.
+type RangePlanner[V any] interface {
+	// Ranges returns the ranges of index keys that have every record that satisfies all the
 	// conditions. The conditions that the ranges do not enforce are returned as the residual,
 	// which the records must still be checked against.
-	Lookup(conds ...schema.Cond[V]) (ranges []KeyRange, residual []schema.Cond[V], err error)
+	Ranges(conds ...cond.Cond[V]) (ranges []Bounds, residual []cond.Cond[V], err error)
 }
-
-// Operator is a kind of condition that an index can serve.
-type Operator string
-
-const (
-	// Equal is the condition of a field being equal to a value.
-	Equal Operator = "="
-	// Range is the condition of a field being in a range of values.
-	Range Operator = "range"
-)
 
 // Descriptor describes an index to whoever plans queries on it.
 type Descriptor struct {
 	// Fields are the fields that are indexed, in the order that they have in the keys.
 	// A field can be used for a lookup if all the fields before it are given exact values.
 	Fields []FieldDescriptor
-	// Operators are the kinds of conditions that the index can serve.
-	Operators []Operator
+	// Operators are the kinds of comparisons that the index can serve.
+	Operators []cond.Op
 	// Unique is set if a key of the index belongs to one record at most.
 	Unique bool
 	// MultiEntry is set if a record may have more than one entry in the index.
@@ -82,7 +72,7 @@ type Descriptor struct {
 	// Where is the condition that a record must satisfy to be in the index, as text.
 	// It is empty if every record is in the index.
 	Where string
-	// Condition is the condition of Where itself, as a schema.Cond of the type of the records.
+	// Condition is the condition of Where itself, as a cond.Cond of the type of the records.
 	Condition any
 	// Encoding identifies how the keys and the values of the entries are encoded.
 	// An index whose encoding changes must be built again.
@@ -127,14 +117,26 @@ type Index[K, V any] struct {
 }
 
 // New defines a new index on a store, whose entries are computed by the given indexer.
-func New[K, V any](store extstore.Extensible[K, V], name string, indexer Indexer[V]) *Index[K, V] {
+func New[K, V any](
+	store extstore.Extensible[K, V],
+	name string,
+	indexer Indexer[V],
+	opts ...Option[V],
+) *Index[K, V] {
+	indexer = with(indexer, opts)
 	return newIndex(store, name, indexer, indexer.Descriptor())
 }
 
 // NewUnique defines a new index on a store, whose entries are computed by the given indexer,
 // and that lets one record at most have a key. Setting a record with a key that another record
 // has fails with ErrUniqueViolation.
-func NewUnique[K, V any](store extstore.Extensible[K, V], name string, indexer Indexer[V]) *Index[K, V] {
+func NewUnique[K, V any](
+	store extstore.Extensible[K, V],
+	name string,
+	indexer Indexer[V],
+	opts ...Option[V],
+) *Index[K, V] {
+	indexer = with(indexer, opts)
 	desc := indexer.Descriptor()
 	desc.Unique = true
 	return newIndex(store, name, indexer, desc)
@@ -172,7 +174,7 @@ func (x *Index[K, V]) Indexer() Indexer[V] {
 }
 
 // Namespace returns the namespace that the index keeps its entries in.
-func (x *Index[K, V]) Namespace() *catalog.Namespace {
+func (x *Index[K, V]) Namespace() *schema.Namespace {
 	return x.refs.Namespace()
 }
 
@@ -191,9 +193,9 @@ type maintainer[K, V any] struct {
 }
 
 // UseNamespace implements the extstore.NamespaceUser interface.
-func (m maintainer[K, V]) UseNamespace(ns *catalog.Namespace) {
+func (m maintainer[K, V]) UseNamespace(ns *schema.Namespace) {
 	x := m.x
-	def := catalog.Definition{
+	def := schema.Definition{
 		Kind:       "index",
 		KeyType:    reflect.TypeFor[K]().String(),
 		ValueType:  reflect.TypeFor[V]().String(),

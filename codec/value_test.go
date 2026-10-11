@@ -45,7 +45,7 @@ func TestFormats(t *testing.T) {
 
 	for _, format := range []codec.Format{codec.Msgpack, codec.JSON} {
 		t.Run(format.Name(), func(t *testing.T) {
-			c := codec.From[plainValue](format)
+			c := codec.Formatted[plainValue](format)
 			require.Equal(t, format.Name(), c.Name())
 
 			bz, err := c.Encode(want)
@@ -60,7 +60,7 @@ func TestFormats(t *testing.T) {
 		})
 	}
 
-	bz, err := codec.From[plainValue](codec.JSON).Encode(want)
+	bz, err := codec.Formatted[plainValue](codec.JSON).Encode(want)
 	require.NoError(t, err)
 	require.JSONEq(t, `{"Name":"foo","Count":3,"Tags":["a","b"]}`, string(bz))
 }

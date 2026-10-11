@@ -6,10 +6,10 @@ import (
 	"time"
 
 	"github.com/ehsanranjbar/kvutil/agg"
-	"github.com/ehsanranjbar/kvutil/catalog"
-	"github.com/ehsanranjbar/kvutil/iters"
+	"github.com/ehsanranjbar/kvutil/iterutil"
 	"github.com/ehsanranjbar/kvutil/kv"
 	"github.com/ehsanranjbar/kvutil/kv/memkv"
+	"github.com/ehsanranjbar/kvutil/schema"
 	extstore "github.com/ehsanranjbar/kvutil/store/ext"
 )
 
@@ -22,8 +22,8 @@ type Sale struct {
 // Example keeps the sales of each shop summed up by day, by month and for all of time, and the
 // largest sale of each day, and reads them before and after they are collected.
 func Example() {
-	schema := catalog.NewSchema()
-	sales := extstore.New[int64, Sale](schema.Namespace("sales"))
+	sch := schema.New()
+	sales := extstore.New[int64, Sale](sch.Namespace("sales"))
 
 	byShop := func(s *Sale) (string, int64, bool) { return s.Shop, s.Amount, true }
 	when := func(s *Sale) time.Time { return s.At }
@@ -40,7 +40,7 @@ func Example() {
 
 	// Any function of the sales of a span can be an aggregation.
 	spread := agg.Recompute(sales, "spread", byShop,
-		func(amounts iters.Seq[time.Time, int64]) (int64, error) {
+		func(amounts iterutil.AdvancedIterator[time.Time, int64]) (int64, error) {
 			values, err := amounts.Values()
 			if err != nil {
 				return 0, err
@@ -54,7 +54,7 @@ func Example() {
 		agg.ByTime(when, agg.Monthly))
 
 	db := memkv.New()
-	if err := schema.Check(db); err != nil {
+	if err := sch.Check(db); err != nil {
 		panic(err)
 	}
 
@@ -125,7 +125,7 @@ func Example() {
 	read("written")
 
 	// A collector usually runs in the background, with Run. Here it is asked to collect once.
-	collector := agg.NewCollector(db, schema)
+	collector := agg.NewCollector(db, sch)
 	if err := collector.Collect(context.Background()); err != nil {
 		panic(err)
 	}

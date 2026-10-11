@@ -8,9 +8,9 @@ import (
 	"fmt"
 	"math"
 
-	"github.com/ehsanranjbar/kvutil/catalog"
 	"github.com/ehsanranjbar/kvutil/kv"
 	"github.com/ehsanranjbar/kvutil/kv/prefix"
+	"github.com/ehsanranjbar/kvutil/schema"
 )
 
 var (
@@ -32,26 +32,26 @@ var (
 // A unique store has one primary key at most for a key. An entry is stored under its key alone,
 // with the primary key in front of its value, so that a key is looked up with a single read.
 type Store struct {
-	ns     *catalog.Namespace
+	ns     *schema.Namespace
 	unique bool
 }
 
 // New defines a new Store in the given namespace, which is described by the definition.
-func New(ns *catalog.Namespace, def catalog.Definition) *Store {
+func New(ns *schema.Namespace, def schema.Definition) *Store {
 	def.Keys = true
 	ns.Define(def)
 	return &Store{ns: ns}
 }
 
 // NewUnique defines a new unique Store in the given namespace, which is described by the definition.
-func NewUnique(ns *catalog.Namespace, def catalog.Definition) *Store {
+func NewUnique(ns *schema.Namespace, def schema.Definition) *Store {
 	s := New(ns, def)
 	s.unique = true
 	return s
 }
 
 // Namespace returns the namespace of the store.
-func (s *Store) Namespace() *catalog.Namespace {
+func (s *Store) Namespace() *schema.Namespace {
 	return s.ns
 }
 

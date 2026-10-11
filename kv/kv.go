@@ -83,6 +83,12 @@ type DB interface {
 	Update(fn func(Tx) error) error
 }
 
+// KeyRange is a range of keys from Start up to, and not including, End. An empty End is unbounded.
+type KeyRange struct {
+	Start []byte
+	End   []byte
+}
+
 // PrefixEnd returns the smallest key that is greater than every key with the given prefix,
 // so that [prefix, PrefixEnd(prefix)) is the range of the keys with the prefix.
 // It returns nil if there is no such key, which is when the prefix is empty or all 0xff.
