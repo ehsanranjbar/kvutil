@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"time"
 
+	"github.com/ehsanranjbar/kvutil"
 	"github.com/ehsanranjbar/kvutil/catalog"
 	"github.com/ehsanranjbar/kvutil/codec"
 	"github.com/ehsanranjbar/kvutil/expr"
@@ -85,6 +86,11 @@ func (s *Store[K, V]) AddExtension(name string, ext Extension[K, V]) {
 // Getter implements the Extensible interface.
 func (s *Store[K, V]) Getter(tx kv.Tx) Getter[K, V] {
 	return s.Instantiate(tx)
+}
+
+// Records implements the Extensible interface.
+func (s *Store[K, V]) Records(tx kv.Tx, r expr.Range[K]) (kvutil.Iterator[K, *V], error) {
+	return s.data.Instantiate(tx).Iterator(r)
 }
 
 // AddDeleteHook implements the DeleteHooker interface. Delete hooks are called after the extensions.

@@ -225,6 +225,9 @@ type Definition struct {
 	Validate func() error
 	// Descriptor describes the thing to whoever plans queries on it. Its type depends on the kind.
 	Descriptor any
+	// Object is the thing itself, for whoever needs more of it than its description,
+	// like what runs the background work of the things of a kind.
+	Object any
 
 	ns *Namespace
 }
