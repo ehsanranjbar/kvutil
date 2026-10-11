@@ -85,7 +85,7 @@ func Example() {
 		panic(err)
 	}
 
-	titles := func(it *index.Iterator[int64, Book], err error) []string {
+	titles := func(it index.Keyed[int64, Book], err error) []string {
 		if err != nil {
 			panic(err)
 		}
@@ -149,6 +149,34 @@ func Example() {
 
 		// The index of the books in print does not have the others.
 		fmt.Println("in print, 1970s:", titles(inPrintByDecade.Instantiate(tx).Match(1970)))
+
+		// What several indexes find can be combined. Only the primary keys are read from the
+		// indexes, and only the records of the result are read from the store.
+		herbert := func() index.Keyed[int64, Book] { return must(byAuthor.Instantiate(tx).Match("Herbert")) }
+		scifi := func() index.Keyed[int64, Book] { return must(byTag.Instantiate(tx).Match("scifi")) }
+		classic := func() index.Keyed[int64, Book] { return must(byTag.Instantiate(tx).Match("classic")) }
+		fmt.Println("Herbert and scifi:", titles(index.Intersect(herbert(), scifi())))
+		fmt.Println("scifi or classic:", titles(index.Union(scifi(), classic())))
+		fmt.Println("Herbert, not scifi:", titles(index.Except(herbert(), scifi())))
+
+		// A combination is a source of another one: Herbert and (scifi or classic).
+		tagged, err := index.Union(scifi(), classic())
+		if err != nil {
+			return err
+		}
+		fmt.Println("Herbert, scifi or classic:", titles(index.Intersect(herbert(), tagged)))
+
+		// The primary keys of a lookup as a bitmap, to combine as bitmaps are.
+		byHerbert, exact, err := index.Bitmap(herbert())
+		if err != nil {
+			return err
+		}
+		recent, _, err := index.Bitmap[int64, Book](must(byYear.Instantiate(tx).Lookup(Year.Gte(1970))))
+		if err != nil {
+			return err
+		}
+		byHerbert.And(recent)
+		fmt.Println("bitmap:", byHerbert.ToArray(), "exact:", exact, titles(index.FromBitmap(books, tx, byHerbert)))
 		return nil
 	})
 	if err != nil {
@@ -167,4 +195,9 @@ func Example() {
 	// Herbert, in print, not scifi: [The Dosadi Experiment]
 	// plan: 2 ranges, then check [Tags = "classic"]
 	// in print, 1970s: [The Dosadi Experiment]
+	// Herbert and scifi: [Dune Children of Dune]
+	// scifi or classic: [Dune Children of Dune Emma]
+	// Herbert, not scifi: [The Dosadi Experiment]
+	// Herbert, scifi or classic: [Dune Children of Dune]
+	// bitmap: [9223372036854775812 9223372036854775813] exact: true [Children of Dune The Dosadi Experiment]
 }

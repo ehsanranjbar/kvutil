@@ -1,6 +1,7 @@
 package index
 
 import (
+	"bytes"
 	"fmt"
 	"slices"
 
@@ -255,6 +256,38 @@ func (it *Iterator[K, V]) Value() (*V, error) {
 	}
 	it.record, err = it.ins.getter.Get(key)
 	return it.record, err
+}
+
+// Contains reports whether a record is one of the records that the iterator returns: whether it
+// has an entry in the ranges that the iterator reads, and satisfies the conditions that the
+// iterator checks. It does not depend on where the iterator is, and it works on a closed one.
+func (it *Iterator[K, V]) Contains(_ []byte, record *V) (bool, error) {
+	entries, err := it.ins.x.indexer.Index(record)
+	if err != nil {
+		return false, err
+	}
+
+	found := false
+entries:
+	for _, e := range entries {
+		for _, r := range it.ranges {
+			start, end := bounds(r)
+			if bytes.Compare(e.Key, start) >= 0 && (len(end) == 0 || bytes.Compare(e.Key, end) < 0) {
+				found = true
+				break entries
+			}
+		}
+	}
+	if !found {
+		return false, nil
+	}
+
+	for _, cnd := range it.filter {
+		if ok, err := cnd.Match(record); !ok || err != nil {
+			return false, err
+		}
+	}
+	return true, nil
 }
 
 // IndexKey returns the key of the current entry.
