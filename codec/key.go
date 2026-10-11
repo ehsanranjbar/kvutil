@@ -27,8 +27,8 @@ type KeyCodec[K any] interface {
 }
 
 // KeyFor returns the key codec of a type, or an error if the type has none.
-// Integers, strings, byte slices, byte arrays, times and pairs of these have one,
-// and so do the named types that are defined on them.
+// Integers, floats, booleans, strings, byte slices, byte arrays, times and pairs of these
+// have one, and so do the named types that are defined on them.
 func KeyFor[K any]() (KeyCodec[K], error) {
 	var zero K
 	if p, ok := any(zero).(keyCodecProvider); ok {
@@ -65,6 +65,12 @@ func KeyFor[K any]() (KeyCodec[K], error) {
 		c = IntKey[uint32]()
 	case uint64:
 		c = IntKey[uint64]()
+	case float32:
+		c = FloatKey[float32]()
+	case float64:
+		c = FloatKey[float64]()
+	case bool:
+		c = BoolKey[bool]()
 	case time.Time:
 		c = TimeKey()
 	}
@@ -97,6 +103,12 @@ func KeyFor[K any]() (KeyCodec[K], error) {
 		return convertedKey[K, uint32]{base: IntKey[uint32]()}, nil
 	case reflect.Uint64:
 		return convertedKey[K, uint64]{base: IntKey[uint64]()}, nil
+	case reflect.Float32:
+		return convertedKey[K, float32]{base: FloatKey[float32]()}, nil
+	case reflect.Float64:
+		return convertedKey[K, float64]{base: FloatKey[float64]()}, nil
+	case reflect.Bool:
+		return convertedKey[K, bool]{base: BoolKey[bool]()}, nil
 	case reflect.Slice:
 		if rt.Elem().Kind() == reflect.Uint8 {
 			return convertedKey[K, []byte]{base: BytesKey[[]byte]()}, nil
@@ -184,6 +196,98 @@ func (c intKey[K]) Read(bz []byte) (K, int, error) {
 	var buf [8]byte
 	copy(buf[:], bz[:c.size])
 	return K((binary.BigEndian.Uint64(buf[:]) >> c.shift) ^ c.sign), c.size, nil
+}
+
+// FloatKey returns the key codec of a floating-point type. The keys have a fixed width and sort
+// numerically, with NaN before every number. -0 and +0 are equal, so they are the same key.
+func FloatKey[K ~float32 | ~float64]() KeyCodec[K] {
+	rt := reflect.TypeFor[K]()
+	return floatKey[K]{name: rt.Kind().String(), size: int(rt.Size())}
+}
+
+type floatKey[K ~float32 | ~float64] struct {
+	name string
+	size int
+}
+
+// Name implements the KeyCodec interface.
+func (c floatKey[K]) Name() string {
+	return c.name
+}
+
+// Encode implements the KeyCodec interface.
+func (c floatKey[K]) Encode(k K) ([]byte, error) {
+	return c.Append(nil, k)
+}
+
+// Decode implements the KeyCodec interface.
+func (c floatKey[K]) Decode(bz []byte) (K, error) {
+	if len(bz) != c.size {
+		return 0, errShort(c.name, len(bz), c.size)
+	}
+	k, _, err := c.Read(bz)
+	return k, err
+}
+
+// Append implements the KeyCodec interface.
+func (c floatKey[K]) Append(dst []byte, k K) ([]byte, error) {
+	if c.size == 4 {
+		return append(dst, lex.EncodeFloat32(float32(k))...), nil
+	}
+	return append(dst, lex.EncodeFloat64(float64(k))...), nil
+}
+
+// Read implements the KeyCodec interface.
+func (c floatKey[K]) Read(bz []byte) (K, int, error) {
+	if len(bz) < c.size {
+		return 0, 0, errShort(c.name, len(bz), c.size)
+	}
+	if c.size == 4 {
+		return K(lex.DecodeFloat32(bz[:4])), 4, nil
+	}
+	return K(lex.DecodeFloat64(bz[:8])), 8, nil
+}
+
+// BoolKey returns the key codec of a boolean type. False sorts before true.
+func BoolKey[K ~bool]() KeyCodec[K] {
+	return boolKey[K]{}
+}
+
+type boolKey[K ~bool] struct{}
+
+// Name implements the KeyCodec interface.
+func (boolKey[K]) Name() string {
+	return "bool"
+}
+
+// Encode implements the KeyCodec interface.
+func (c boolKey[K]) Encode(k K) ([]byte, error) {
+	return c.Append(nil, k)
+}
+
+// Decode implements the KeyCodec interface.
+func (c boolKey[K]) Decode(bz []byte) (K, error) {
+	if len(bz) != 1 {
+		return false, errShort(c.Name(), len(bz), 1)
+	}
+	k, _, err := c.Read(bz)
+	return k, err
+}
+
+// Append implements the KeyCodec interface.
+func (boolKey[K]) Append(dst []byte, k K) ([]byte, error) {
+	if k {
+		return append(dst, 0x01), nil
+	}
+	return append(dst, 0x00), nil
+}
+
+// Read implements the KeyCodec interface.
+func (c boolKey[K]) Read(bz []byte) (K, int, error) {
+	if len(bz) < 1 {
+		return false, 0, errShort(c.Name(), len(bz), 1)
+	}
+	return bz[0] != 0x00, 1, nil
 }
 
 // StringKey returns the key codec of a string type. The keys sort by their bytes.

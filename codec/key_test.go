@@ -93,6 +93,7 @@ type (
 	namedString string
 	namedBytes  []byte
 	namedArray  [4]byte
+	namedFloat  float64
 )
 
 func TestKeyFor(t *testing.T) {
@@ -127,6 +128,47 @@ func TestKeyFor(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, test.want, got)
 		}
+	})
+
+	t.Run("FloatsAndBooleans", func(t *testing.T) {
+		randomFloat := func(rng *rand.Rand) float64 {
+			return []float64{math.Inf(-1), -1e300, -1.5, -math.SmallestNonzeroFloat64, 0, 1.5, 2, math.MaxFloat64, math.Inf(1)}[rng.IntN(9)]
+		}
+		testKeyCodec(t, keyFor[float64](t), randomFloat, cmp.Compare[float64])
+		testKeyCodec(t, keyFor[float32](t),
+			func(rng *rand.Rand) float32 { return float32(rng.IntN(7)-3) / 2 },
+			cmp.Compare[float32])
+		testKeyCodec(t, keyFor[namedFloat](t),
+			func(rng *rand.Rand) namedFloat { return namedFloat(randomFloat(rng)) },
+			cmp.Compare[namedFloat])
+		testKeyCodec(t, keyFor[bool](t),
+			func(rng *rand.Rand) bool { return rng.IntN(2) == 1 },
+			func(a, b bool) int {
+				switch {
+				case a == b:
+					return 0
+				case b:
+					return -1
+				}
+				return 1
+			})
+
+		// The two zeros are one key, and NaN is a key before all the others.
+		c := keyFor[float64](t)
+		zero, err := c.Encode(0)
+		require.NoError(t, err)
+		negZero, err := c.Encode(math.Copysign(0, -1))
+		require.NoError(t, err)
+		require.Equal(t, zero, negZero)
+
+		nan, err := c.Encode(math.NaN())
+		require.NoError(t, err)
+		negInf, err := c.Encode(math.Inf(-1))
+		require.NoError(t, err)
+		require.Negative(t, bytes.Compare(nan, negInf))
+		decoded, err := c.Decode(nan)
+		require.NoError(t, err)
+		require.True(t, math.IsNaN(decoded))
 	})
 
 	t.Run("StringAndBytes", func(t *testing.T) {
@@ -240,13 +282,13 @@ func TestKeyFor(t *testing.T) {
 	t.Run("Unsupported", func(t *testing.T) {
 		_, err := codec.KeyFor[struct{}]()
 		require.Error(t, err)
-		_, err = codec.KeyFor[float64]()
+		_, err = codec.KeyFor[complex128]()
 		require.Error(t, err)
 		_, err = codec.KeyFor[[]string]()
 		require.Error(t, err)
 		_, err = codec.KeyFor[map[string]int]()
 		require.Error(t, err)
-		_, err = codec.KeyFor[codec.Pair[string, float64]]()
+		_, err = codec.KeyFor[codec.Pair[string, struct{}]]()
 		require.Error(t, err)
 	})
 }

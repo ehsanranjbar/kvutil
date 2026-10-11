@@ -67,16 +67,24 @@ func NewWithCodecs[K, V any](
 // WithExtension adds an extension to the store. Extensions are called in the order that they
 // are added. An extension that is a NamespaceUser is given a namespace of its own.
 func (s *Store[K, V]) WithExtension(name string, ext Extension[K, V]) *Store[K, V] {
-	// A name that is taken is reported by the schema.
-	ns := s.extNS.Sub(name)
-	if s.exts.Add(name, ext) != nil {
-		return s
-	}
+	s.AddExtension(name, ext)
+	return s
+}
 
+// AddExtension implements the Extensible interface. It is WithExtension without a result.
+func (s *Store[K, V]) AddExtension(name string, ext Extension[K, V]) {
+	// A name that is taken is reported by the schema. The extension is given its namespace
+	// all the same, so that it is complete, but it is not called by the store.
+	ns := s.extNS.Sub(name)
 	if nu, ok := ext.(NamespaceUser); ok {
 		nu.UseNamespace(ns)
 	}
-	return s
+	s.exts.Add(name, ext)
+}
+
+// Getter implements the Extensible interface.
+func (s *Store[K, V]) Getter(tx kv.Tx) Getter[K, V] {
+	return s.Instantiate(tx)
 }
 
 // AddDeleteHook implements the DeleteHooker interface. Delete hooks are called after the extensions.

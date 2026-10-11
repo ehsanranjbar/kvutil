@@ -2,6 +2,7 @@ package ext
 
 import (
 	"github.com/ehsanranjbar/kvutil/catalog"
+	"github.com/ehsanranjbar/kvutil/codec"
 	"github.com/ehsanranjbar/kvutil/kv"
 )
 
@@ -36,6 +37,23 @@ type DeleteHook[K any] func(tx kv.Tx, key K, rawKey []byte) error
 // whatever the type of their records is.
 type DeleteHooker[K any] interface {
 	AddDeleteHook(name string, hook DeleteHook[K])
+}
+
+// Extensible is implemented by the stores that extensions can be added to.
+// It is what something that is built as an extension, like an index, needs of its store.
+type Extensible[K, V any] interface {
+	// AddExtension adds an extension to the store.
+	AddExtension(name string, ext Extension[K, V])
+	// KeyCodec returns the key codec of the store.
+	KeyCodec() codec.KeyCodec[K]
+	// Getter returns what gets the records of the store in a transaction.
+	Getter(tx kv.Tx) Getter[K, V]
+}
+
+// Getter gets the records of a store by their keys.
+type Getter[K, V any] interface {
+	// Get returns the record of the key, or kv.ErrNotFound if it does not exist.
+	Get(key K) (*V, error)
 }
 
 // ExtOption is an option that is specific to an extension.
