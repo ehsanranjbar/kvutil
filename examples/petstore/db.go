@@ -5,13 +5,13 @@ import (
 	"time"
 
 	badger "github.com/dgraph-io/badger/v4"
-	"github.com/ehsanranjbar/kvutil"
 	"github.com/ehsanranjbar/kvutil/examples/petstore/types"
-	"github.com/ehsanranjbar/kvutil/iters"
-	extstore "github.com/ehsanranjbar/kvutil/store/ext"
-	pstore "github.com/ehsanranjbar/kvutil/store/prefix"
-	recstore "github.com/ehsanranjbar/kvutil/store/rec"
-	"github.com/ehsanranjbar/kvutil/store/rec/rectools"
+	"github.com/ehsanranjbar/kvutil/legacy"
+	"github.com/ehsanranjbar/kvutil/legacy/iters"
+	extstore "github.com/ehsanranjbar/kvutil/legacy/store/ext"
+	pstore "github.com/ehsanranjbar/kvutil/legacy/store/prefix"
+	recstore "github.com/ehsanranjbar/kvutil/legacy/store/rec"
+	"github.com/ehsanranjbar/kvutil/legacy/store/rec/rectools"
 	"github.com/google/uuid"
 )
 
@@ -21,7 +21,7 @@ type File = recstore.Object[uuid.UUID, []byte]
 type DB struct {
 	base     *badger.DB
 	gcTicker *time.Ticker
-	reg      *kvutil.NameRegistry
+	reg      *legacy.NameRegistry
 
 	categoriesIdSeq   *badger.Sequence
 	categoriesStore   *recstore.Store[int64, types.Category, *types.Category]
@@ -49,7 +49,7 @@ func NewDB(opt badger.Options) (*DB, error) {
 		}
 	}()
 
-	reg, err := kvutil.NewNameRegistry(base)
+	reg, err := legacy.NewNameRegistry(base)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create name registry: %w", err)
 	}

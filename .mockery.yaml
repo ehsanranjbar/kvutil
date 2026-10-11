@@ -2,15 +2,15 @@ template: testify
 filename: "mock_{{.InterfaceName | snakecase}}.go"
 structname: "Mock{{.InterfaceName}}"
 pkgname: "mocks"
-dir: "testutil/mocks"
+dir: "legacy/testutil/mocks"
 packages:
-  github.com/ehsanranjbar/kvutil/indexing:
+  github.com/ehsanranjbar/kvutil/legacy/indexing:
     interfaces:
       Indexer:
       ValueRetriever:
   github.com/ehsanranjbar/kvutil/schema:
     interfaces:
       PathExtractor:
-  github.com/ehsanranjbar/kvutil/store/ext:
+  github.com/ehsanranjbar/kvutil/legacy/store/ext:
     interfaces:
       Extension:
