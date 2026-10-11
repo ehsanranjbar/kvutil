@@ -65,6 +65,15 @@ func TestStore(t *testing.T) {
 			require.NoError(t, err)
 			require.False(t, ok)
 
+			value, err := refs.Get([]byte("k1"), []byte("b"))
+			require.NoError(t, err)
+			require.Equal(t, []byte("v1"), value)
+			value, err = refs.Get([]byte("k1"), []byte("a"))
+			require.NoError(t, err)
+			require.Empty(t, value)
+			_, err = refs.Get([]byte("k1"), []byte("c"))
+			require.ErrorIs(t, err, kv.ErrNotFound)
+
 			all := []entry{
 				{"k1", "a", ""},
 				{"k1", "b", "v1"},
@@ -139,6 +148,14 @@ func TestUniqueStore(t *testing.T) {
 			ok, err = refs.Has([]byte("missing"), []byte("a"))
 			require.NoError(t, err)
 			require.False(t, ok)
+
+			value, err := refs.Get([]byte("k1"), []byte("a"))
+			require.NoError(t, err)
+			require.Equal(t, []byte("new"), value)
+			_, err = refs.Get([]byte("k1"), []byte("b"))
+			require.ErrorIs(t, err, kv.ErrNotFound)
+			_, err = refs.Get([]byte("missing"), []byte("a"))
+			require.ErrorIs(t, err, kv.ErrNotFound)
 
 			all := []entry{{"k1", "a", "new"}, {"k2", "b", ""}, {"k3", "", "v3"}}
 			require.Equal(t, all, scan(t, refs, nil, nil, false))

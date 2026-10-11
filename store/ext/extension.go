@@ -41,6 +41,18 @@ type DeleteHooks[K any] interface {
 	AddDeleteHook(name string, hook DeleteHook[K])
 }
 
+// Referable is implemented by the stores whose records something can refer to by their keys
+// alone, whatever the type of the records is, like a relation between two stores does.
+type Referable[K any] interface {
+	DeleteHooks[K]
+	// KeyCodec returns the key codec of the store.
+	KeyCodec() codec.KeyCodec[K]
+	// Namespace returns the namespace of the store.
+	Namespace() *schema.Namespace
+	// Contains reports whether the store has a record of a key, in a transaction.
+	Contains(tx kv.Tx, key K) (bool, error)
+}
+
 // Extensible is implemented by the stores that extensions can be added to.
 // It is what something that is built as an extension, like an index, needs of its store.
 type Extensible[K, V any] interface {

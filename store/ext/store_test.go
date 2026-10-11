@@ -24,6 +24,7 @@ type pet struct {
 var (
 	_ kvutil.Instantiator[*extstore.Instance[int64, pet]] = (*extstore.Store[int64, pet])(nil)
 	_ extstore.DeleteHooks[int64]                         = (*extstore.Store[int64, pet])(nil)
+	_ extstore.Referable[int64]                           = (*extstore.Store[int64, pet])(nil)
 )
 
 // recorder is an extension that records what it is told, and that keeps the names of the
@@ -90,6 +91,12 @@ func TestStoreWithoutExtensions(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, &pet{Name: "rex"}, got)
 			ok, err := ins.Has(2)
+			require.NoError(t, err)
+			require.False(t, ok)
+			ok, err = store.Contains(tx, 1)
+			require.NoError(t, err)
+			require.True(t, ok)
+			ok, err = store.Contains(tx, 2)
 			require.NoError(t, err)
 			require.False(t, ok)
 

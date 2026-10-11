@@ -142,6 +142,31 @@ func (i *Instance) Delete(key, primaryKey []byte) error {
 	return i.tx.Delete(key)
 }
 
+// Get returns the value of the reference of the key to the primary key, or kv.ErrNotFound if
+// the key does not refer to it. The value is a slice that the caller owns.
+func (i *Instance) Get(key, primaryKey []byte) ([]byte, error) {
+	if len(primaryKey) > math.MaxUint8 {
+		return nil, ErrPrimaryKeyTooLong
+	}
+
+	if !i.store.unique {
+		return i.tx.Get(entryKey(key, primaryKey))
+	}
+
+	existing, err := i.tx.Get(key)
+	if err != nil {
+		return nil, err
+	}
+	pk, value, err := splitUnique(existing)
+	if err != nil {
+		return nil, err
+	}
+	if !bytes.Equal(pk, primaryKey) {
+		return nil, kv.ErrNotFound
+	}
+	return value, nil
+}
+
 // Has reports whether the key refers to the primary key.
 func (i *Instance) Has(key, primaryKey []byte) (bool, error) {
 	if len(primaryKey) > math.MaxUint8 {

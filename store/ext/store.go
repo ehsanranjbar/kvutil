@@ -88,6 +88,11 @@ func (s *Store[K, V]) Getter(tx kv.Tx) Getter[K, V] {
 	return s.Instantiate(tx)
 }
 
+// Contains implements the Referable interface.
+func (s *Store[K, V]) Contains(tx kv.Tx, key K) (bool, error) {
+	return s.data.Instantiate(tx).Has(key)
+}
+
 // Records implements the Extensible interface.
 func (s *Store[K, V]) Records(tx kv.Tx, r kvutil.Range[K]) (iterutil.Iterator[K, *V], error) {
 	return s.data.Instantiate(tx).Iterator(r)
