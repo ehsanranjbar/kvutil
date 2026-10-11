@@ -8,7 +8,6 @@ import (
 	"github.com/ehsanranjbar/kvutil"
 	"github.com/ehsanranjbar/kvutil/catalog"
 	"github.com/ehsanranjbar/kvutil/codec"
-	"github.com/ehsanranjbar/kvutil/expr"
 	"github.com/ehsanranjbar/kvutil/internal/testkv"
 	"github.com/ehsanranjbar/kvutil/kv"
 	"github.com/ehsanranjbar/kvutil/kv/memkv"
@@ -44,7 +43,7 @@ var (
 )
 
 // scan collects the keys of a range of a store.
-func scan[K, V any](t *testing.T, ins *sstore.Instance[K, V], r expr.Range[K], reverse bool) []K {
+func scan[K, V any](t *testing.T, ins *sstore.Instance[K, V], r kvutil.Range[K], reverse bool) []K {
 	t.Helper()
 
 	iterate := ins.Iterator
@@ -135,7 +134,7 @@ func TestStore(t *testing.T) {
 			require.ErrorIs(t, ins.Set(4, &pet{}), kv.ErrReadOnly)
 			require.ErrorIs(t, ins.Delete(1), kv.ErrReadOnly)
 
-			require.Equal(t, []int64{-1, 1}, scan(t, ins, expr.Range[int64]{}, false))
+			require.Equal(t, []int64{-1, 1}, scan(t, ins, kvutil.All[int64](), false))
 
 			// The store keeps its keys in its own namespace.
 			raw, err := schema.Namespace("other").Open(tx).Iterator(nil, nil)
@@ -161,23 +160,23 @@ func TestIterator(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		bound := func(v int64, exclusive bool) *expr.Bound[int64] { return expr.NewBound(v, exclusive) }
 		tests := []struct {
 			name string
-			r    expr.Range[int64]
+			r    kvutil.Range[int64]
 			want []int64
 		}{
-			{"All", expr.Range[int64]{}, []int64{-2, -1, 0, 1, 2, 3}},
-			{"Inclusive", expr.NewRange(bound(-1, false), bound(2, false)), []int64{-1, 0, 1, 2}},
-			{"Exclusive", expr.NewRange(bound(-1, true), bound(2, true)), []int64{0, 1}},
-			{"LowOnly", expr.NewRange(bound(1, false), nil), []int64{1, 2, 3}},
-			{"LowOnlyExclusive", expr.NewRange(bound(1, true), nil), []int64{2, 3}},
-			{"HighOnly", expr.NewRange(nil, bound(-1, false)), []int64{-2, -1}},
-			{"HighOnlyExclusive", expr.NewRange(nil, bound(-1, true)), []int64{-2}},
-			{"OneKey", expr.NewRange(bound(1, false), bound(1, false)), []int64{1}},
-			{"MissingBounds", expr.NewRange(bound(-10, false), bound(10, false)), []int64{-2, -1, 0, 1, 2, 3}},
-			{"Empty", expr.NewRange(bound(1, true), bound(1, true)), []int64{}},
-			{"Inverted", expr.NewRange(bound(2, false), bound(1, false)), []int64{}},
+			{"All", kvutil.All[int64](), []int64{-2, -1, 0, 1, 2, 3}},
+			{"Zero", kvutil.Range[int64]{}, []int64{-2, -1, 0, 1, 2, 3}},
+			{"Inclusive", kvutil.Between[int64](-1, 2), []int64{-1, 0, 1, 2}},
+			{"Exclusive", kvutil.After[int64](-1).Until(2), []int64{0, 1}},
+			{"LowOnly", kvutil.From[int64](1), []int64{1, 2, 3}},
+			{"LowOnlyExclusive", kvutil.After[int64](1), []int64{2, 3}},
+			{"HighOnly", kvutil.Through[int64](-1), []int64{-2, -1}},
+			{"HighOnlyExclusive", kvutil.Until[int64](-1), []int64{-2}},
+			{"OneKey", kvutil.Only[int64](1), []int64{1}},
+			{"MissingBounds", kvutil.Between[int64](-10, 10), []int64{-2, -1, 0, 1, 2, 3}},
+			{"Empty", kvutil.After[int64](1).Until(1), []int64{}},
+			{"Inverted", kvutil.Between[int64](2, 1), []int64{}},
 		}
 
 		err = db.View(func(tx kv.Tx) error {
@@ -192,7 +191,7 @@ func TestIterator(t *testing.T) {
 				require.Equal(t, reversed, scan(t, ins, test.r, true), test.name+" reversed")
 			}
 
-			it, err := ins.Iterator(expr.Range[int64]{})
+			it, err := ins.Iterator(kvutil.All[int64]())
 			require.NoError(t, err)
 			defer it.Close()
 
@@ -225,12 +224,12 @@ func TestEmptyStringKey(t *testing.T) {
 			require.NoError(t, ins.Set(key, &pet{Name: key}))
 		}
 
-		require.Equal(t, []string{"", "a", "b"}, scan(t, ins, expr.Range[string]{}, false))
-		require.Equal(t, []string{""}, scan(t, ins, expr.NewRange(nil, expr.NewBound("", false)), false))
+		require.Equal(t, []string{"", "a", "b"}, scan(t, ins, kvutil.All[string](), false))
+		require.Equal(t, []string{""}, scan(t, ins, kvutil.Through(""), false))
 		// Nothing is before the empty key.
-		require.Equal(t, []string{}, scan(t, ins, expr.NewRange(nil, expr.NewBound("", true)), false))
-		require.Equal(t, []string{}, scan(t, ins, expr.NewRange(nil, expr.NewBound("", true)), true))
-		require.Equal(t, []string{"a", "b"}, scan(t, ins, expr.NewRange(expr.NewBound("", true), nil), false))
+		require.Equal(t, []string{}, scan(t, ins, kvutil.Until(""), false))
+		require.Equal(t, []string{}, scan(t, ins, kvutil.Until(""), true))
+		require.Equal(t, []string{"a", "b"}, scan(t, ins, kvutil.After(""), false))
 		return nil
 	})
 	require.NoError(t, err)
@@ -335,7 +334,7 @@ func TestMissingKeyCodec(t *testing.T) {
 		for _, p := range []point{{1, 2}, {1, -1}, {-1, 5}} {
 			require.NoError(t, ins.Set(p, &pet{}))
 		}
-		require.Equal(t, []point{{-1, 5}, {1, -1}, {1, 2}}, scan(t, ins, expr.Range[point]{}, false))
+		require.Equal(t, []point{{-1, 5}, {1, -1}, {1, 2}}, scan(t, ins, kvutil.All[point](), false))
 		return nil
 	})
 	require.NoError(t, err)
@@ -401,7 +400,7 @@ func TestTTL(t *testing.T) {
 		require.Eventually(t, func() bool { return !has() }, 5*time.Second, 100*time.Millisecond)
 
 		err = db.View(func(tx kv.Tx) error {
-			require.Equal(t, []string{"keep"}, scan(t, store.Instantiate(tx), expr.Range[string]{}, false))
+			require.Equal(t, []string{"keep"}, scan(t, store.Instantiate(tx), kvutil.All[string](), false))
 			return nil
 		})
 		require.NoError(t, err)

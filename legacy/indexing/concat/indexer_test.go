@@ -7,12 +7,12 @@ import (
 
 	"github.com/ehsanranjbar/kvutil/codec/be"
 	"github.com/ehsanranjbar/kvutil/codec/lex"
-	"github.com/ehsanranjbar/kvutil/expr"
 	"github.com/ehsanranjbar/kvutil/legacy"
+	"github.com/ehsanranjbar/kvutil/legacy/expr"
 	"github.com/ehsanranjbar/kvutil/legacy/indexing"
 	"github.com/ehsanranjbar/kvutil/legacy/indexing/concat"
 	"github.com/ehsanranjbar/kvutil/legacy/iters"
-	"github.com/ehsanranjbar/kvutil/schema"
+	"github.com/ehsanranjbar/kvutil/legacy/schema"
 	"github.com/stretchr/testify/require"
 )
 

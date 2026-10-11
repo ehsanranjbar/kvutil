@@ -7,8 +7,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ehsanranjbar/kvutil"
 	"github.com/ehsanranjbar/kvutil/catalog"
-	"github.com/ehsanranjbar/kvutil/expr"
 	"github.com/ehsanranjbar/kvutil/kv"
 )
 
@@ -152,7 +152,7 @@ func (c *Collector) Run(ctx context.Context) error {
 // Rebuild builds an aggregation again from the records of its store, which is how an
 // aggregation that is added to a store with records in it gets to know of them.
 // It must not run while records are written to the store.
-func Rebuild[K, V, X, S any](ctx context.Context, db kv.DB, a *Agg[K, V, X, S], opts ...CollectorOption) error {
+func Rebuild[K, V, G, X, S any](ctx context.Context, db kv.DB, a *Agg[K, V, G, X, S], opts ...CollectorOption) error {
 	c := NewCollector(db, a.ns.Schema(), opts...)
 
 	// Everything that the aggregation has stored goes first.
@@ -181,17 +181,17 @@ func Rebuild[K, V, X, S any](ctx context.Context, db kv.DB, a *Agg[K, V, X, S], 
 		err := db.Update(func(tx kv.Tx) error {
 			batchLast, batchSize = last, 0
 
-			var low *expr.Bound[K]
+			var r kvutil.Range[K]
 			if last != nil {
-				low = expr.NewBound(*last, true)
+				r = r.After(*last)
 			}
-			it, err := a.store.Records(tx, expr.NewRange(low, nil))
+			it, err := a.store.Records(tx, r)
 			if err != nil {
 				return err
 			}
 			defer it.Close()
 
-			m := &maintenance[K, V, X, S]{a: a, tx: a.ns.Open(tx)}
+			m := &maintenance[K, V, G, X, S]{a: a, tx: a.ns.Open(tx)}
 			for ; it.Valid() && batchSize < c.batch; it.Next() {
 				batchSize++
 				key, err := it.Key()

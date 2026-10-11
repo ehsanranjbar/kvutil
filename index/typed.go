@@ -1,51 +1,27 @@
 package index
 
 import (
+	"errors"
 	"fmt"
 
+	"github.com/ehsanranjbar/kvutil"
 	"github.com/ehsanranjbar/kvutil/codec"
-	"github.com/ehsanranjbar/kvutil/expr"
 	"github.com/ehsanranjbar/kvutil/kv"
+	"github.com/ehsanranjbar/kvutil/schema"
 	extstore "github.com/ehsanranjbar/kvutil/store/ext"
 )
 
-// Extractor says what a typed index finds the records by: a value of the type F that is taken
-// from a record, or several of them.
-type Extractor[V, F any] struct {
-	path  string
-	get   func(*V) []F
-	multi bool
-	codec codec.KeyCodec[F]
-}
-
-// Field makes an Extractor of a function that returns the value of a field of a record.
-// The path names the field in the descriptor of the index.
-func Field[V, F any](path string, get func(*V) F) Extractor[V, F] {
-	return Extractor[V, F]{
-		path: path,
-		get:  func(v *V) []F { return []F{get(v)} },
-	}
-}
-
-// Each makes an Extractor of a function that returns several values for a record, such as its
-// tags. The record is found by each of them, and a record with no value is not in the index.
-func Each[V, F any](path string, get func(*V) []F) Extractor[V, F] {
-	return Extractor[V, F]{
-		path:  path,
-		get:   get,
-		multi: true,
-	}
-}
-
-// WithCodec sets the key codec that the values are encoded with, instead of the one that their
-// type has by default.
-func (e Extractor[V, F]) WithCodec(c codec.KeyCodec[F]) Extractor[V, F] {
-	e.codec = c
-	return e
-}
-
-// Option is an option of a typed index.
+// Option is an option of an index that is defined on fields.
 type Option[V any] func(indexer Indexer[V]) Indexer[V]
+
+// Where keeps only the records that satisfy a condition in the index, which makes the index
+// smaller and cheaper to keep up to date when most of the records are of no interest to it.
+// A lookup in such an index only finds the records that satisfy the condition.
+func Where[V any](cond schema.Cond[V]) Option[V] {
+	return func(indexer Indexer[V]) Indexer[V] {
+		return Filter(indexer, cond)
+	}
+}
 
 // Covering stores a value with every entry of the index, which can be read from the index
 // without getting the record. The paths name the fields that the value has, for the
@@ -103,141 +79,115 @@ func (c *coveringIndexer[V, C]) Descriptor() Descriptor {
 }
 
 // Lookup implements the Lookuper interface, if the wrapped indexer does.
-func (c *coveringIndexer[V, C]) Lookup(conds ...any) ([]KeyRange, []any, error) {
-	l, ok := c.Indexer.(Lookuper)
+func (c *coveringIndexer[V, C]) Lookup(conds ...schema.Cond[V]) ([]KeyRange, []schema.Cond[V], error) {
+	l, ok := c.Indexer.(Lookuper[V])
 	if !ok {
-		return nil, nil, fmt.Errorf("the indexer cannot be looked up with conditions")
+		return nil, nil, errors.New("the indexer cannot be looked up with conditions")
 	}
 	return l.Lookup(conds...)
 }
 
-// extractorIndexer is the indexer of a typed index.
-type extractorIndexer[V, F any] struct {
-	by     Extractor[V, F]
-	unique bool
-}
-
-// Index implements the Indexer interface.
-func (x *extractorIndexer[V, F]) Index(v *V) ([]Entry, error) {
-	values := x.by.get(v)
-	entries := make([]Entry, 0, len(values))
-	for _, value := range values {
-		// The form that marks where the key ends, as the primary key follows it.
-		key, err := x.by.codec.Append(nil, value)
-		if err != nil {
-			return nil, fmt.Errorf("failed to encode %s: %w", x.by.path, err)
-		}
-		entries = append(entries, Entry{Key: key})
-	}
-	return entries, nil
-}
-
-// Descriptor implements the Indexer interface.
-func (x *extractorIndexer[V, F]) Descriptor() Descriptor {
-	return Descriptor{
-		Fields:     []FieldDescriptor{{Path: x.by.path}},
-		Operators:  []Operator{Equal, Range},
-		Unique:     x.unique,
-		MultiEntry: x.by.multi,
-		Encoding:   x.by.codec.Name(),
-	}
-}
-
-// Typed is an index that finds the records by a value of the type F.
-type Typed[K, V, F any] struct {
-	*Index[K, V]
-	codec codec.KeyCodec[F]
-}
-
-// Multi defines a new index on a store that finds the records by what the extractor takes from
-// them. Any number of records can have the same value.
-// It panics if the type of the values has no key codec and the extractor is not given one.
-func Multi[K, V, F any](
-	store extstore.Extensible[K, V],
-	name string,
-	by Extractor[V, F],
-	opts ...Option[V],
-) *Typed[K, V, F] {
-	return newTyped(store, name, by, false, opts)
-}
-
-// Unique defines a new index on a store that finds the records by what the extractor takes from
-// them, and that lets one record at most have a value. Setting a record with a value that
-// another record has fails with ErrUniqueViolation.
-// It panics if the type of the values has no key codec and the extractor is not given one.
-func Unique[K, V, F any](
-	store extstore.Extensible[K, V],
-	name string,
-	by Extractor[V, F],
-	opts ...Option[V],
-) *Typed[K, V, F] {
-	return newTyped(store, name, by, true, opts)
-}
-
-func newTyped[K, V, F any](
-	store extstore.Extensible[K, V],
-	name string,
-	by Extractor[V, F],
-	unique bool,
-	opts []Option[V],
-) *Typed[K, V, F] {
-	if by.codec == nil {
-		c, err := codec.KeyFor[F]()
-		if err != nil {
-			// A mistake in the definition, which is made in code when the program starts.
-			panic(fmt.Sprintf("index %q: %v; give the extractor one with WithCodec", name, err))
-		}
-		by.codec = c
-	}
-
-	var indexer Indexer[V] = &extractorIndexer[V, F]{by: by, unique: unique}
+func with[V any](indexer Indexer[V], opts []Option[V]) Indexer[V] {
 	for _, opt := range opts {
 		indexer = opt(indexer)
 	}
+	return indexer
+}
+
+// Composite defines a new index on a store that finds the records by several fields, which
+// are in its keys in the order that they are given in. Any number of records can have the same
+// values. The fields can be of different types; schema.Fields makes a list of them.
+func Composite[K, V any](
+	store extstore.Extensible[K, V],
+	name string,
+	fields []schema.Component[V],
+	opts ...Option[V],
+) *Index[K, V] {
+	return New(store, name, with[V](ByFields(fields...), opts))
+}
+
+// UniqueComposite defines a new index on a store that finds the records by several fields, and
+// that lets one record at most have the same values for all of them. Setting a record with the
+// values of another record fails with ErrUniqueViolation.
+func UniqueComposite[K, V any](
+	store extstore.Extensible[K, V],
+	name string,
+	fields []schema.Component[V],
+	opts ...Option[V],
+) *Index[K, V] {
+	return NewUnique(store, name, with[V](ByFields(fields...), opts))
+}
+
+// Typed is an index that finds the records by one field, whose values are of the type F.
+type Typed[K, V, F any] struct {
+	*Index[K, V]
+	field schema.Field[V, F]
+}
+
+// Multi defines a new index on a store that finds the records by a field.
+// Any number of records can have the same value.
+func Multi[K, V, F any](
+	store extstore.Extensible[K, V],
+	name string,
+	by schema.Field[V, F],
+	opts ...Option[V],
+) *Typed[K, V, F] {
 	return &Typed[K, V, F]{
-		Index: New(store, name, indexer),
-		codec: by.codec,
+		Index: New(store, name, with[V](ByFields[V](by), opts)),
+		field: by,
 	}
+}
+
+// Unique defines a new index on a store that finds the records by a field, and that lets one
+// record at most have a value. Setting a record with a value that another record has fails
+// with ErrUniqueViolation.
+func Unique[K, V, F any](
+	store extstore.Extensible[K, V],
+	name string,
+	by schema.Field[V, F],
+	opts ...Option[V],
+) *Typed[K, V, F] {
+	return &Typed[K, V, F]{
+		Index: NewUnique(store, name, with[V](ByFields[V](by), opts)),
+		field: by,
+	}
+}
+
+// Field returns the field that the index finds the records by.
+func (t *Typed[K, V, F]) Field() schema.Field[V, F] {
+	return t.field
 }
 
 // Instantiate creates the instance of the index for a transaction.
 func (t *Typed[K, V, F]) Instantiate(tx kv.Tx) *TypedInstance[K, V, F] {
 	return &TypedInstance[K, V, F]{
 		Instance: t.Index.Instantiate(tx),
-		codec:    t.codec,
+		field:    t.field,
 	}
 }
 
 // TypedInstance is a Typed index in a transaction.
 type TypedInstance[K, V, F any] struct {
 	*Instance[K, V]
-	codec codec.KeyCodec[F]
+	field schema.Field[V, F]
 }
 
 // Match iterates over the records that have the given value. The iterator must be closed.
 func (i *TypedInstance[K, V, F]) Match(value F) (*Iterator[K, V], error) {
-	b := expr.NewBound(value, false)
-	return i.Range(expr.NewRange(b, b))
+	return i.Lookup(i.field.Eq(value))
 }
 
-// Range iterates over the records whose values are in the range, in ascending order of the
-// values. The zero range has every record of the index in it. The iterator must be closed.
-func (i *TypedInstance[K, V, F]) Range(r expr.Range[F]) (*Iterator[K, V], error) {
-	kr, err := i.keyRange(r)
-	if err != nil {
-		return nil, err
-	}
-	return i.Scan(kr)
+// Range iterates over the records whose values are in the range, in the order that the index
+// has them in: from the least value, or from the greatest one if the field is descending.
+// The iterator must be closed.
+func (i *TypedInstance[K, V, F]) Range(r kvutil.Range[F]) (*Iterator[K, V], error) {
+	return i.Lookup(i.field.Range(r))
 }
 
-// ReverseRange iterates over the records whose values are in the range, in descending order of
-// the values. The zero range has every record of the index in it. The iterator must be closed.
-func (i *TypedInstance[K, V, F]) ReverseRange(r expr.Range[F]) (*Iterator[K, V], error) {
-	kr, err := i.keyRange(r)
-	if err != nil {
-		return nil, err
-	}
-	return i.ReverseScan(kr)
+// ReverseRange iterates over the records whose values are in the range, in the order opposite
+// to the one that the index has them in. The iterator must be closed.
+func (i *TypedInstance[K, V, F]) ReverseRange(r kvutil.Range[F]) (*Iterator[K, V], error) {
+	return i.ReverseLookup(i.field.Range(r))
 }
 
 // Find returns the primary key of the first record that has the given value, which is the
@@ -254,27 +204,4 @@ func (i *TypedInstance[K, V, F]) Find(value F) (key K, found bool, err error) {
 	}
 	key, err = it.Key()
 	return key, err == nil, err
-}
-
-func (i *TypedInstance[K, V, F]) keyRange(r expr.Range[F]) (KeyRange, error) {
-	encode := func(b *expr.Bound[F]) (*expr.Bound[[]byte], error) {
-		if b.IsEmpty() {
-			return nil, nil
-		}
-		key, err := i.codec.Append(nil, b.Value())
-		if err != nil {
-			return nil, fmt.Errorf("failed to encode the bound: %w", err)
-		}
-		return expr.NewBound(key, b.Exclusive()), nil
-	}
-
-	low, err := encode(r.Low())
-	if err != nil {
-		return KeyRange{}, err
-	}
-	high, err := encode(r.High())
-	if err != nil {
-		return KeyRange{}, err
-	}
-	return expr.NewRange(low, high), nil
 }

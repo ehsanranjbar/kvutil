@@ -8,7 +8,7 @@ packages:
     interfaces:
       Indexer:
       ValueRetriever:
-  github.com/ehsanranjbar/kvutil/schema:
+  github.com/ehsanranjbar/kvutil/legacy/schema:
     interfaces:
       PathExtractor:
   github.com/ehsanranjbar/kvutil/legacy/store/ext:

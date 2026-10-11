@@ -4,66 +4,71 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/ehsanranjbar/kvutil"
 	"github.com/ehsanranjbar/kvutil/catalog"
 	"github.com/ehsanranjbar/kvutil/codec"
-	"github.com/ehsanranjbar/kvutil/expr"
 	"github.com/ehsanranjbar/kvutil/index"
-	"github.com/ehsanranjbar/kvutil/index/concat"
 	"github.com/ehsanranjbar/kvutil/iters"
 	"github.com/ehsanranjbar/kvutil/kv"
 	"github.com/ehsanranjbar/kvutil/kv/memkv"
+	"github.com/ehsanranjbar/kvutil/schema"
 	extstore "github.com/ehsanranjbar/kvutil/store/ext"
 )
 
 type Book struct {
-	Title  string
-	Author string
-	Year   int
-	Tags   []string
-	ISBN   string
+	Title   string
+	Author  string
+	Year    int
+	Tags    []string
+	ISBN    string
+	InPrint bool
 }
+
+// The fields of a book that indexes are defined on and that conditions are written with.
+var (
+	// By the path of a field of the struct, which is read by reflection.
+	Author  = schema.Path[Book, string]("Author")
+	Year    = schema.Path[Book, int]("Year")
+	ISBN    = schema.Path[Book, string]("ISBN")
+	InPrint = schema.Path[Book, bool]("InPrint")
+	// A slice is each of its elements: a book is found by each of its tags.
+	Tags = schema.Path[Book, string]("Tags")
+	// By a function, for a value that is not a field of the struct as it is.
+	Decade = schema.FieldOf("Decade", func(b *Book) int { return b.Year / 10 * 10 })
+)
 
 // Example defines a store with one index of every kind and looks books up with each of them.
 func Example() {
-	schema := catalog.NewSchema()
-	books := extstore.New[int64, Book](schema.Namespace("books"))
+	sch := catalog.NewSchema()
+	books := extstore.New[int64, Book](sch.Namespace("books"))
 
 	// Any number of books can have the same author.
-	byAuthor := index.Multi(books, "by_author",
-		index.Field("Author", func(b *Book) string { return b.Author }))
-
+	byAuthor := index.Multi(books, "by_author", Author)
 	// A book is found by each of its tags, and a book without tags is not in the index.
-	byTag := index.Multi(books, "by_tag",
-		index.Each("Tags", func(b *Book) []string { return b.Tags }))
-
+	byTag := index.Multi(books, "by_tag", Tags)
 	// One book at most can have an ISBN.
-	byISBN := index.Unique(books, "by_isbn",
-		index.Field("ISBN", func(b *Book) string { return b.ISBN }))
-
+	byISBN := index.Unique(books, "by_isbn", ISBN)
 	// The title is stored with the entries, so it can be listed without reading the books.
-	byYear := index.Multi(books, "by_year",
-		index.Field("Year", func(b *Book) int { return b.Year }),
+	byYear := index.Multi(books, "by_year", Year,
 		index.Covering(func(b *Book) string { return b.Title }, nil, "Title"))
-
-	// Several fields in one key: by author, and by year from the latest for the same author.
-	indexer, err := concat.For[Book](concat.NewComponent("Author"), concat.NewComponent("Year").Desc())
-	if err != nil {
-		panic(err)
-	}
-	byAuthorYear := index.New(books, "by_author_year", indexer)
+	// Several fields in one key: by author, and from the latest year for the same author.
+	byAuthorYear := index.Composite(books, "by_author_year", schema.Fields(Author, Year.Desc()))
+	// Only the books that are in print are in the index.
+	inPrintByDecade := index.Multi(books, "in_print_by_decade", Decade, index.Where(InPrint.Eq(true)))
 
 	db := memkv.New()
-	if err := schema.Check(db); err != nil {
+	if err := sch.Check(db); err != nil {
 		panic(err)
 	}
 
-	err = db.Update(func(tx kv.Tx) error {
+	err := db.Update(func(tx kv.Tx) error {
 		store := books.Instantiate(tx)
 		for id, book := range map[int64]Book{
-			1: {Title: "Dune", Author: "Herbert", Year: 1965, Tags: []string{"scifi", "classic"}, ISBN: "111"},
-			2: {Title: "Emma", Author: "Austen", Year: 1815, Tags: []string{"classic"}, ISBN: "222"},
+			1: {Title: "Dune", Author: "Herbert", Year: 1965, Tags: []string{"scifi", "classic"}, ISBN: "111", InPrint: true},
+			2: {Title: "Emma", Author: "Austen", Year: 1815, Tags: []string{"classic"}, ISBN: "222", InPrint: true},
 			3: {Title: "Persuasion", Author: "Austen", Year: 1817, ISBN: "333"},
 			4: {Title: "Children of Dune", Author: "Herbert", Year: 1976, Tags: []string{"scifi"}, ISBN: "444"},
+			5: {Title: "The Dosadi Experiment", Author: "Herbert", Year: 1977, ISBN: "555", InPrint: true},
 		} {
 			if err := store.Set(id, &book); err != nil {
 				return err
@@ -71,7 +76,7 @@ func Example() {
 		}
 
 		// The indexes are kept up to date in the same transaction as the books.
-		err := store.Set(5, &Book{Title: "A copy", ISBN: "111"})
+		err := store.Set(6, &Book{Title: "A copy", ISBN: "111"})
 		fmt.Println("same ISBN:", errors.Is(err, index.ErrUniqueViolation))
 		return nil
 	})
@@ -79,41 +84,35 @@ func Example() {
 		panic(err)
 	}
 
-	err = db.View(func(tx kv.Tx) error {
-		// Match: the books of an author, as an iterator of their keys and of the books themselves.
-		it, err := byAuthor.Instantiate(tx).Match("Austen")
+	titles := func(it *index.Iterator[int64, Book], err error) []string {
 		if err != nil {
-			return err
+			panic(err)
 		}
 		titles, err := iters.From(it).
 			Map(func(_ int64, b *Book) (string, error) { return b.Title, nil }).
 			Values()
 		if err != nil {
-			return err
+			panic(err)
 		}
-		fmt.Println("by Austen:", titles)
+		return titles
+	}
 
-		// Each: the keys of the books with a tag.
-		it, err = byTag.Instantiate(tx).Match("scifi")
-		if err != nil {
-			return err
-		}
-		ids, err := iters.From(it).Keys()
-		if err != nil {
-			return err
-		}
-		fmt.Println("scifi:", ids)
+	err = db.View(func(tx kv.Tx) error {
+		// The books of an author.
+		fmt.Println("by Austen:", titles(byAuthor.Instantiate(tx).Match("Austen")))
 
-		// Unique: the one book with an ISBN.
+		// The books with a tag.
+		fmt.Println("scifi:", titles(byTag.Instantiate(tx).Match("scifi")))
+
+		// The one book with an ISBN, by its key.
 		id, found, err := byISBN.Instantiate(tx).Find("333")
 		if err != nil {
 			return err
 		}
 		fmt.Println("ISBN 333:", id, found)
 
-		// Range, from the latest year, with the titles read from the index alone.
-		it, err = byYear.Instantiate(tx).ReverseRange(
-			expr.NewRange(expr.NewBound(1800, false), expr.NewBound(1970, true)))
+		// A range, from the latest year, with the titles read from the index alone.
+		it, err := byYear.Instantiate(tx).ReverseRange(kvutil.From(1800).Until(1970))
 		if err != nil {
 			return err
 		}
@@ -130,20 +129,25 @@ func Example() {
 			fmt.Println("before 1970:", title)
 		}
 
-		// Conditions on the fields of a composite index. A condition that the index cannot use
-		// comes back as the residual, to be checked on the books.
-		it, residual, err := byAuthorYear.Instantiate(tx).Lookup(
-			expr.NewAssigned("Author", expr.NewExact[any]("Herbert")),
-			expr.NewAssigned("Year", expr.NewRange[any](expr.NewBound[any](1960, false), nil)),
-		)
+		// Conditions on the fields of a composite index.
+		fmt.Println("Herbert since 1970, latest first:",
+			titles(byAuthorYear.Instantiate(tx).Lookup(Author.Eq("Herbert"), Year.Gte(1970))))
+
+		// Conditions that the index cannot serve are checked on the books that it finds, so
+		// what comes back is exactly what was asked for.
+		fmt.Println("Herbert, in print, not scifi:",
+			titles(byAuthorYear.Instantiate(tx).Lookup(
+				Author.Eq("Herbert"), InPrint.Eq(true), schema.Not(Tags.Eq("scifi")))))
+
+		// How an index would serve conditions, without running them.
+		ranges, residual, err := byAuthorYear.Instantiate(tx).Plan(Author.In("Austen", "Herbert"), Tags.Eq("classic"))
 		if err != nil {
 			return err
 		}
-		ids, err = iters.From(it).Keys()
-		if err != nil {
-			return err
-		}
-		fmt.Println("Herbert since 1960, latest first:", ids, "residual:", len(residual))
+		fmt.Println("plan:", len(ranges), "ranges, then check", residual)
+
+		// The index of the books in print does not have the others.
+		fmt.Println("in print, 1970s:", titles(inPrintByDecade.Instantiate(tx).Match(1970)))
 		return nil
 	})
 	if err != nil {
@@ -153,10 +157,13 @@ func Example() {
 	// Output:
 	// same ISBN: true
 	// by Austen: [Emma Persuasion]
-	// scifi: [1 4]
+	// scifi: [Dune Children of Dune]
 	// ISBN 333: 3 true
 	// before 1970: Dune
 	// before 1970: Persuasion
 	// before 1970: Emma
-	// Herbert since 1960, latest first: [4 1] residual: 0
+	// Herbert since 1970, latest first: [The Dosadi Experiment Children of Dune]
+	// Herbert, in print, not scifi: [The Dosadi Experiment]
+	// plan: 2 ranges, then check [Tags = "classic"]
+	// in print, 1970s: [The Dosadi Experiment]
 }

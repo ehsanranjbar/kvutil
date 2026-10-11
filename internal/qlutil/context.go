@@ -4,7 +4,7 @@ import (
 	"time"
 
 	qlvalue "github.com/araddon/qlbridge/value"
-	"github.com/ehsanranjbar/kvutil/schema"
+	"github.com/ehsanranjbar/kvutil/legacy/schema"
 )
 
 // ContextWrapper is a wrapper around a type that implements the qlbridge.ContextReader interface.

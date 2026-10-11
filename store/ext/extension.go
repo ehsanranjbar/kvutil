@@ -4,7 +4,6 @@ import (
 	"github.com/ehsanranjbar/kvutil"
 	"github.com/ehsanranjbar/kvutil/catalog"
 	"github.com/ehsanranjbar/kvutil/codec"
-	"github.com/ehsanranjbar/kvutil/expr"
 	"github.com/ehsanranjbar/kvutil/kv"
 )
 
@@ -51,7 +50,7 @@ type Extensible[K, V any] interface {
 	// Getter returns what gets the records of the store in a transaction.
 	Getter(tx kv.Tx) Getter[K, V]
 	// Records iterates over the records of the store whose keys are in a range, in a transaction.
-	Records(tx kv.Tx, r expr.Range[K]) (kvutil.Iterator[K, *V], error)
+	Records(tx kv.Tx, r kvutil.Range[K]) (kvutil.Iterator[K, *V], error)
 }
 
 // Getter gets the records of a store by their keys.

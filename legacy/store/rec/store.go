@@ -14,8 +14,8 @@ import (
 	"github.com/ehsanranjbar/kvutil/legacy"
 	"github.com/ehsanranjbar/kvutil/legacy/indexing"
 	"github.com/ehsanranjbar/kvutil/legacy/iters"
+	"github.com/ehsanranjbar/kvutil/legacy/schema"
 	extstore "github.com/ehsanranjbar/kvutil/legacy/store/ext"
-	"github.com/ehsanranjbar/kvutil/schema"
 )
 
 // Record is a model for something that is serializable and has an unique id assigned to it.

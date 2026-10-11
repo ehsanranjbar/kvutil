@@ -7,9 +7,9 @@ import (
 	"reflect"
 	"time"
 
+	"github.com/ehsanranjbar/kvutil"
 	"github.com/ehsanranjbar/kvutil/catalog"
 	"github.com/ehsanranjbar/kvutil/codec"
-	"github.com/ehsanranjbar/kvutil/expr"
 	"github.com/ehsanranjbar/kvutil/kv"
 	"github.com/ehsanranjbar/kvutil/kv/prefix"
 )
@@ -190,17 +190,17 @@ func (s *Instance[K, V]) Delete(key K) error {
 
 // Iterator iterates over the records whose keys are in the range, in ascending order.
 // The zero range has every record in it. The iterator must be closed.
-func (s *Instance[K, V]) Iterator(r expr.Range[K]) (*Iterator[K, V], error) {
+func (s *Instance[K, V]) Iterator(r kvutil.Range[K]) (*Iterator[K, V], error) {
 	return s.iterator(r, false)
 }
 
 // ReverseIterator iterates over the records whose keys are in the range, in descending order.
 // The zero range has every record in it. The iterator must be closed.
-func (s *Instance[K, V]) ReverseIterator(r expr.Range[K]) (*Iterator[K, V], error) {
+func (s *Instance[K, V]) ReverseIterator(r kvutil.Range[K]) (*Iterator[K, V], error) {
 	return s.iterator(r, true)
 }
 
-func (s *Instance[K, V]) iterator(r expr.Range[K], reverse bool) (*Iterator[K, V], error) {
+func (s *Instance[K, V]) iterator(r kvutil.Range[K], reverse bool) (*Iterator[K, V], error) {
 	start, end, err := s.bounds(r)
 	if err != nil {
 		return nil, err
@@ -219,24 +219,24 @@ func (s *Instance[K, V]) iterator(r expr.Range[K], reverse bool) (*Iterator[K, V
 }
 
 // bounds returns the range of encoded keys that corresponds to a range of keys.
-func (s *Instance[K, V]) bounds(r expr.Range[K]) (start, end []byte, err error) {
-	if low := r.Low(); !low.IsEmpty() {
-		start, err = s.EncodeKey(low.Value())
+func (s *Instance[K, V]) bounds(r kvutil.Range[K]) (start, end []byte, err error) {
+	if low, exclusive, ok := r.Low(); ok {
+		start, err = s.EncodeKey(low)
 		if err != nil {
 			return nil, nil, err
 		}
-		if low.Exclusive() {
+		if exclusive {
 			// The key right after a key is the key with a zero byte after it.
 			start = append(start, 0x00)
 		}
 	}
 
-	if high := r.High(); !high.IsEmpty() {
-		end, err = s.EncodeKey(high.Value())
+	if high, exclusive, ok := r.High(); ok {
+		end, err = s.EncodeKey(high)
 		if err != nil {
 			return nil, nil, err
 		}
-		if !high.Exclusive() {
+		if !exclusive {
 			end = append(end, 0x00)
 		}
 		if len(end) == 0 {

@@ -23,13 +23,13 @@ import (
 // all the contributions of a span, in the order of their times. The cost of a change is that
 // its whole span is computed again, so the spans should not be large: WithMerge keeps them
 // small by storing the first bucket only and putting the others together from it.
-func Recompute[K, V, X, S any](
+func Recompute[K, V, G, X, S any](
 	store extstore.Extensible[K, V],
 	name string,
-	extract Extract[V, X],
+	extract Extract[V, G, X],
 	compute func(contributions iters.Seq[time.Time, X]) (S, error),
 	opts ...Option,
-) *Agg[K, V, X, S] {
+) *Agg[K, V, G, X, S] {
 	return define(store, name, "recompute", extract, opts, func(c *core[X, S], o options) kind[X, S] {
 		if o.appendOnly {
 			panic(fmt.Sprintf("agg %q: AppendOnly is for delta aggregations", name))
@@ -210,7 +210,7 @@ func (r *recomputeKind[X, S]) storedSeries(
 		}
 		defer it.Close()
 		for ; it.Valid(); it.Next() {
-			_, _, spanStart, err := splitBucketKey(it.Key())
+			_, _, spanStart, err := r.splitBucketKey(it.Key())
 			if err != nil {
 				return nil, err
 			}
@@ -226,7 +226,7 @@ func (r *recomputeKind[X, S]) storedSeries(
 	}
 	defer it.Close()
 	for ; it.Valid(); it.Next() {
-		_, _, spanStart, err := splitBucketKey(it.Key())
+		_, _, spanStart, err := r.splitBucketKey(it.Key())
 		if err != nil {
 			return nil, err
 		}
@@ -298,7 +298,7 @@ func (r *recomputeKind[X, S]) collect(db kv.DB, cursor []byte, batch int, report
 				return err
 			}
 
-			id, group, spanStart, err := splitBucketKey(marker)
+			id, group, spanStart, err := r.splitBucketKey(marker)
 			if err != nil {
 				failure = err
 				return nil
@@ -330,6 +330,11 @@ func (r *recomputeKind[X, S]) collect(db kv.DB, cursor []byte, batch int, report
 			}
 			return tx.Delete(marker)
 		})
+		if errors.Is(err, kv.ErrConflict) {
+			// The span is being written to all the time. It stays marked, so it is read from its
+			// records, and it is computed in a round in which it is left alone for long enough.
+			continue
+		}
 		if err != nil {
 			return nil, err
 		}

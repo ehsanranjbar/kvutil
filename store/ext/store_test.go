@@ -9,7 +9,6 @@ import (
 	"github.com/ehsanranjbar/kvutil"
 	"github.com/ehsanranjbar/kvutil/catalog"
 	"github.com/ehsanranjbar/kvutil/codec"
-	"github.com/ehsanranjbar/kvutil/expr"
 	"github.com/ehsanranjbar/kvutil/internal/testkv"
 	"github.com/ehsanranjbar/kvutil/kv"
 	"github.com/ehsanranjbar/kvutil/kv/memkv"
@@ -94,7 +93,7 @@ func TestStoreWithoutExtensions(t *testing.T) {
 			require.NoError(t, err)
 			require.False(t, ok)
 
-			it, err := ins.Iterator(expr.Range[int64]{})
+			it, err := ins.Iterator(kvutil.All[int64]())
 			require.NoError(t, err)
 			defer it.Close()
 			require.True(t, it.Valid())
@@ -104,7 +103,7 @@ func TestStoreWithoutExtensions(t *testing.T) {
 			it.Next()
 			require.False(t, it.Valid())
 
-			rit, err := ins.ReverseIterator(expr.Range[int64]{})
+			rit, err := ins.ReverseIterator(kvutil.All[int64]())
 			require.NoError(t, err)
 			defer rit.Close()
 			require.True(t, rit.Valid())

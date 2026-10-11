@@ -3,7 +3,7 @@ package expr_test
 import (
 	"testing"
 
-	"github.com/ehsanranjbar/kvutil/expr"
+	"github.com/ehsanranjbar/kvutil/legacy/expr"
 	"github.com/stretchr/testify/require"
 )
 

@@ -17,13 +17,13 @@ type Number interface {
 
 // Count defines an aggregation that counts the records of each group. The function returns the
 // group of a record, and whether the record is counted.
-func Count[K, V any](
+func Count[K, V, G any](
 	store extstore.Extensible[K, V],
 	name string,
-	group func(v *V) ([]byte, bool),
+	group func(v *V) (G, bool),
 	opts ...Option,
-) *Agg[K, V, int64, int64] {
-	extract := func(v *V) ([]byte, int64, bool) {
+) *Agg[K, V, G, int64, int64] {
+	extract := func(v *V) (G, int64, bool) {
 		g, ok := group(v)
 		return g, 1, ok
 	}
@@ -32,12 +32,12 @@ func Count[K, V any](
 
 // Sum defines an aggregation that sums what the records of each group contribute.
 // A sum of floating-point numbers may drift a little as records are changed and deleted.
-func Sum[K, V any, N Number](
+func Sum[K, V, G any, N Number](
 	store extstore.Extensible[K, V],
 	name string,
-	extract Extract[V, N],
+	extract Extract[V, G, N],
 	opts ...Option,
-) *Agg[K, V, N, N] {
+) *Agg[K, V, G, N, N] {
 	fold := Fold[N, N]{
 		Add:    func(sum, x N) N { return sum + x },
 		Remove: func(sum, x N) N { return sum - x },
@@ -60,12 +60,12 @@ func (a Average[N]) Value() float64 {
 }
 
 // Avg defines an aggregation that averages what the records of each group contribute.
-func Avg[K, V any, N Number](
+func Avg[K, V, G any, N Number](
 	store extstore.Extensible[K, V],
 	name string,
-	extract Extract[V, N],
+	extract Extract[V, G, N],
 	opts ...Option,
-) *Agg[K, V, N, Average[N]] {
+) *Agg[K, V, G, N, Average[N]] {
 	fold := Fold[N, Average[N]]{
 		Add:    func(a Average[N], x N) Average[N] { return Average[N]{Sum: a.Sum + x, Count: a.Count + 1} },
 		Remove: func(a Average[N], x N) Average[N] { return Average[N]{Sum: a.Sum - x, Count: a.Count - 1} },
@@ -76,34 +76,34 @@ func Avg[K, V any, N Number](
 // Min defines an aggregation of the least of what the records of each group contribute.
 // It stays right when records are changed and deleted, as it is computed from the records.
 // With several buckets, the spans of the first one must be inside the spans of the others.
-func Min[K, V any, X cmp.Ordered](
+func Min[K, V, G any, X cmp.Ordered](
 	store extstore.Extensible[K, V],
 	name string,
-	extract Extract[V, X],
+	extract Extract[V, G, X],
 	opts ...Option,
-) *Agg[K, V, X, X] {
+) *Agg[K, V, G, X, X] {
 	return extreme(store, name, "min", extract, func(a, b X) X { return min(a, b) }, opts)
 }
 
 // Max defines an aggregation of the greatest of what the records of each group contribute.
 // It stays right when records are changed and deleted, as it is computed from the records.
 // With several buckets, the spans of the first one must be inside the spans of the others.
-func Max[K, V any, X cmp.Ordered](
+func Max[K, V, G any, X cmp.Ordered](
 	store extstore.Extensible[K, V],
 	name string,
-	extract Extract[V, X],
+	extract Extract[V, G, X],
 	opts ...Option,
-) *Agg[K, V, X, X] {
+) *Agg[K, V, G, X, X] {
 	return extreme(store, name, "max", extract, func(a, b X) X { return max(a, b) }, opts)
 }
 
-func extreme[K, V any, X cmp.Ordered](
+func extreme[K, V, G any, X cmp.Ordered](
 	store extstore.Extensible[K, V],
 	name, function string,
-	extract Extract[V, X],
+	extract Extract[V, G, X],
 	pick func(a, b X) X,
 	opts []Option,
-) *Agg[K, V, X, X] {
+) *Agg[K, V, G, X, X] {
 	compute := func(contributions iters.Seq[time.Time, X]) (X, error) {
 		first := true
 		return contributions.Aggregate(*new(X), func(best X, _ time.Time, x X) X {

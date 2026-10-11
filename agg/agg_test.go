@@ -14,6 +14,7 @@ import (
 	badger "github.com/dgraph-io/badger/v4"
 	"github.com/ehsanranjbar/kvutil/agg"
 	"github.com/ehsanranjbar/kvutil/catalog"
+	"github.com/ehsanranjbar/kvutil/codec"
 	"github.com/ehsanranjbar/kvutil/internal/testkv"
 	"github.com/ehsanranjbar/kvutil/iters"
 	"github.com/ehsanranjbar/kvutil/kv"
@@ -31,12 +32,12 @@ type order struct {
 }
 
 // amount is what an order contributes to the aggregations of amounts, by its customer.
-func amount(o *order) ([]byte, int64, bool) {
-	return []byte(o.Customer), o.Amount, !o.Draft
+func amount(o *order) (string, int64, bool) {
+	return o.Customer, o.Amount, !o.Draft
 }
 
-func customer(o *order) ([]byte, bool) {
-	return []byte(o.Customer), !o.Draft
+func customer(o *order) (string, bool) {
+	return o.Customer, !o.Draft
 }
 
 func at(o *order) time.Time {
@@ -62,12 +63,12 @@ type fixture struct {
 	schema *catalog.Schema
 	orders *extstore.Store[int64, order]
 
-	total  *agg.Agg[int64, order, int64, int64]
-	count  *agg.Agg[int64, order, int64, int64]
-	avg    *agg.Agg[int64, order, int64, agg.Average[int64]]
-	max    *agg.Agg[int64, order, int64, int64]
-	min    *agg.Agg[int64, order, int64, int64]
-	median *agg.Agg[int64, order, int64, int64]
+	total  *agg.Agg[int64, order, string, int64, int64]
+	count  *agg.Agg[int64, order, string, int64, int64]
+	avg    *agg.Agg[int64, order, string, int64, agg.Average[int64]]
+	max    *agg.Agg[int64, order, string, int64, int64]
+	min    *agg.Agg[int64, order, string, int64, int64]
+	median *agg.Agg[int64, order, string, int64, int64]
 }
 
 func newFixture() *fixture {
@@ -135,7 +136,7 @@ var (
 func verify[S any](
 	t *testing.T,
 	tx kv.Tx,
-	a *agg.Agg[int64, order, int64, S],
+	a *agg.Agg[int64, order, string, int64, S],
 	orders map[int64]order,
 	want func(amounts []int64) S,
 	collected bool,
@@ -159,7 +160,7 @@ func verify[S any](
 			if collected {
 				series = ins.SeriesCollected
 			}
-			gotSeries, err := series(b, []byte(group), from, to)
+			gotSeries, err := series(b, group, from, to)
 			require.NoError(t, err)
 			require.Len(t, gotSeries, len(wantSeries), "%s %s of %q", a.Name(), b.Name(), group)
 			for i, p := range wantSeries {
@@ -177,7 +178,7 @@ func verify[S any](
 				if collected {
 					at = ins.AtCollected
 				}
-				got, ok, err := at(b, []byte(group), probe)
+				got, ok, err := at(b, group, probe)
 				require.NoError(t, err)
 				require.Equal(t, wantOK, ok, "%s %s of %q at %s", a.Name(), b.Name(), group, probe)
 				if wantOK {
@@ -354,33 +355,33 @@ func TestReadsInTheSameTransaction(t *testing.T) {
 			orders := f.orders.Instantiate(tx)
 			total, top := f.total.Instantiate(tx), f.max.Instantiate(tx)
 
-			_, ok, err := total.Get([]byte("ann"))
+			_, ok, err := total.Get("ann")
 			require.NoError(t, err)
 			require.False(t, ok)
 
 			// What a transaction has written is in what it reads.
 			require.NoError(t, orders.Set(1, &order{Customer: "ann", Amount: 5, At: day(3)}))
 			require.NoError(t, orders.Set(2, &order{Customer: "ann", Amount: 7, At: day(4)}))
-			got, ok, err := total.Get([]byte("ann"))
+			got, ok, err := total.Get("ann")
 			require.NoError(t, err)
 			require.True(t, ok)
 			require.Equal(t, int64(12), got)
 
-			got, ok, err = top.At(agg.Monthly, []byte("ann"), day(15))
+			got, ok, err = top.At(agg.Monthly, "ann", day(15))
 			require.NoError(t, err)
 			require.True(t, ok)
 			require.Equal(t, int64(7), got)
 
 			require.NoError(t, orders.Delete(2))
-			got, _, err = top.Get([]byte("ann"))
+			got, _, err = top.Get("ann")
 			require.NoError(t, err)
 			require.Equal(t, int64(5), got)
 
 			// Nothing of it is collected yet.
-			_, ok, err = total.GetCollected([]byte("ann"))
+			_, ok, err = total.GetCollected("ann")
 			require.NoError(t, err)
 			require.False(t, ok)
-			_, ok, err = top.GetCollected([]byte("ann"))
+			_, ok, err = top.GetCollected("ann")
 			require.NoError(t, err)
 			require.False(t, ok)
 			return nil
@@ -404,19 +405,19 @@ func TestSeries(t *testing.T) {
 	require.NoError(t, db.View(func(tx kv.Tx) error {
 		total := f.total.Instantiate(tx)
 
-		points, err := total.Series(agg.Daily, []byte("ann"), day(1), day(10))
+		points, err := total.Series(agg.Daily, "ann", day(1), day(10))
 		require.NoError(t, err)
 		require.Equal(t, []agg.Point[int64]{{Start: day(2), State: 3}, {Start: day(5), State: 4}}, points)
 
 		// From the span that the start is in, up to the spans that start before the end.
-		points, err = total.Series(agg.Daily, []byte("ann"), day(2).Add(23*time.Hour), day(5))
+		points, err = total.Series(agg.Daily, "ann", day(2).Add(23*time.Hour), day(5))
 		require.NoError(t, err)
 		require.Equal(t, []agg.Point[int64]{{Start: day(2), State: 3}}, points)
-		points, err = total.Series(agg.Daily, []byte("ann"), day(2), day(5).Add(time.Second))
+		points, err = total.Series(agg.Daily, "ann", day(2), day(5).Add(time.Second))
 		require.NoError(t, err)
 		require.Len(t, points, 2)
 
-		points, err = total.Series(agg.Daily, []byte("ann"), day(2), day(6), agg.FillGaps())
+		points, err = total.Series(agg.Daily, "ann", day(2), day(6), agg.FillGaps())
 		require.NoError(t, err)
 		require.Equal(t, []agg.Point[int64]{
 			{Start: day(2), State: 3},
@@ -425,25 +426,25 @@ func TestSeries(t *testing.T) {
 			{Start: day(5), State: 4},
 		}, points)
 
-		points, err = total.Series(agg.Daily, []byte("ann"), day(9), day(2))
+		points, err = total.Series(agg.Daily, "ann", day(9), day(2))
 		require.NoError(t, err)
 		require.Empty(t, points)
 
 		// All of time is one span.
-		points, err = total.Series(agg.AllTime, []byte("bob"), day(1), day(2))
+		points, err = total.Series(agg.AllTime, "bob", day(1), day(2))
 		require.NoError(t, err)
 		require.Len(t, points, 1)
 		require.Equal(t, int64(8), points[0].State)
 		require.True(t, points[0].Start.IsZero())
 
 		// A bucket that the aggregation is not kept for.
-		_, _, err = total.At(agg.Weekly, []byte("ann"), day(2))
+		_, _, err = total.At(agg.Weekly, "ann", day(2))
 		require.ErrorIs(t, err, agg.ErrNoBucket)
-		_, err = total.Series(agg.Hourly, []byte("ann"), day(1), day(2))
+		_, err = total.Series(agg.Hourly, "ann", day(1), day(2))
 		require.ErrorIs(t, err, agg.ErrNoBucket)
 		ny, err := time.LoadLocation("America/New_York")
 		require.NoError(t, err)
-		_, _, err = total.At(agg.Daily.In(ny), []byte("ann"), day(2))
+		_, _, err = total.At(agg.Daily.In(ny), "ann", day(2))
 		require.ErrorIs(t, err, agg.ErrNoBucket)
 		return nil
 	}))
@@ -471,7 +472,7 @@ func TestAppendOnly(t *testing.T) {
 	require.NoError(t, set(t, db, orders, 2, order{Customer: "ann", Amount: 1}))
 
 	require.NoError(t, db.View(func(tx kv.Tx) error {
-		got, ok, err := adds.Instantiate(tx).Get([]byte("ann"))
+		got, ok, err := adds.Instantiate(tx).Get("ann")
 		require.NoError(t, err)
 		require.True(t, ok)
 		require.Equal(t, int64(6), got)
@@ -527,7 +528,7 @@ func TestDefinitionProblems(t *testing.T) {
 }
 
 func TestCatalog(t *testing.T) {
-	define := func(buckets ...agg.Bucket) (*catalog.Schema, *agg.Agg[int64, order, int64, int64]) {
+	define := func(buckets ...agg.Bucket) (*catalog.Schema, *agg.Agg[int64, order, string, int64, int64]) {
 		schema := catalog.NewSchema()
 		orders := extstore.New[int64, order](schema.Namespace("orders"))
 		return schema, agg.Sum(orders, "total", amount, agg.ByTime(at, buckets...),
@@ -547,7 +548,7 @@ func TestCatalog(t *testing.T) {
 		GroupBy:  []string{"Customer"},
 		Time:     "At",
 		Buckets:  []string{"daily", "all"},
-		Encoding: "msgpack,msgpack",
+		Encoding: "string,msgpack,msgpack",
 	}, def.Descriptor)
 	require.Equal(t, def.Descriptor, total.Descriptor())
 
@@ -653,26 +654,26 @@ func TestCollectorPutsFailuresAside(t *testing.T) {
 	require.NoError(t, db.View(func(tx kv.Tx) error {
 		// The record that the fold could not take is put aside, with none of its states changed,
 		// and the others are collected.
-		got, ok, err := unlucky.Instantiate(tx).GetCollected([]byte("ann"))
+		got, ok, err := unlucky.Instantiate(tx).GetCollected("ann")
 		require.NoError(t, err)
 		require.True(t, ok)
 		require.Equal(t, int64(12), got)
-		_, ok, err = unlucky.Instantiate(tx).AtCollected(agg.Daily, []byte("ann"), day(2))
+		_, ok, err = unlucky.Instantiate(tx).AtCollected(agg.Daily, "ann", day(2))
 		require.NoError(t, err)
 		require.False(t, ok)
-		got, _, err = unlucky.Instantiate(tx).Get([]byte("ann"))
+		got, _, err = unlucky.Instantiate(tx).Get("ann")
 		require.NoError(t, err)
 		require.Equal(t, int64(12), got)
 
 		// The span that the function fails for stays marked, and the others are computed.
-		points, err := failing.Instantiate(tx).SeriesCollected(agg.Daily, []byte("ann"), day(1), day(9))
+		points, err := failing.Instantiate(tx).SeriesCollected(agg.Daily, "ann", day(1), day(9))
 		require.NoError(t, err)
 		require.Equal(t, []agg.Point[int64]{{Start: day(1), State: 1}, {Start: day(3), State: 1}}, points)
-		_, _, err = failing.Instantiate(tx).At(agg.Daily, []byte("ann"), day(2))
+		_, _, err = failing.Instantiate(tx).At(agg.Daily, "ann", day(2))
 		require.ErrorContains(t, err, "thirteen")
 
 		// The aggregation that has nothing wrong is not held back.
-		got, _, err = total.Instantiate(tx).GetCollected([]byte("ann"))
+		got, _, err = total.Instantiate(tx).GetCollected("ann")
 		require.NoError(t, err)
 		require.Equal(t, int64(25), got)
 		return nil
@@ -691,7 +692,7 @@ func TestCollectorPutsFailuresAside(t *testing.T) {
 	require.NoError(t, collector.Collect(context.Background()))
 	require.Empty(t, reported)
 	require.NoError(t, db.View(func(tx kv.Tx) error {
-		got, ok, err := failing.Instantiate(tx).AtCollected(agg.Daily, []byte("ann"), day(2))
+		got, ok, err := failing.Instantiate(tx).AtCollected(agg.Daily, "ann", day(2))
 		require.NoError(t, err)
 		require.True(t, ok)
 		require.Equal(t, int64(1), got)
@@ -716,7 +717,7 @@ func TestCollectorRun(t *testing.T) {
 		var ok bool
 		require.NoError(t, db.View(func(tx kv.Tx) error {
 			var err error
-			_, ok, err = total.Instantiate(tx).GetCollected([]byte("ann"))
+			_, ok, err = total.Instantiate(tx).GetCollected("ann")
 			return err
 		}))
 		return ok
@@ -761,11 +762,11 @@ func TestConcurrentWriters(t *testing.T) {
 				var last int64
 				for ctx.Err() == nil {
 					err := db.View(func(tx kv.Tx) error {
-						n, _, err := counted.Instantiate(tx).Get([]byte("ann"))
+						n, _, err := counted.Instantiate(tx).Get("ann")
 						if err != nil {
 							return err
 						}
-						sum, _, err := total.Instantiate(tx).Get([]byte("ann"))
+						sum, _, err := total.Instantiate(tx).Get("ann")
 						if err != nil {
 							return err
 						}
@@ -805,13 +806,13 @@ func TestConcurrentWriters(t *testing.T) {
 
 		check := func(collected bool) {
 			require.NoError(t, db.View(func(tx kv.Tx) error {
-				get := func(a *agg.Agg[int64, order, int64, int64]) int64 {
+				get := func(a *agg.Agg[int64, order, string, int64, int64]) int64 {
 					ins := a.Instantiate(tx)
 					read := ins.Get
 					if collected {
 						read = ins.GetCollected
 					}
-					got, ok, err := read([]byte("ann"))
+					got, ok, err := read("ann")
 					require.NoError(t, err)
 					require.True(t, ok)
 					return got
@@ -860,7 +861,7 @@ func BenchmarkWrites(b *testing.B) {
 				if i%100 == 0 {
 					// A read that takes what is not collected into account.
 					err := db.View(func(tx kv.Tx) error {
-						_, _, err := total.Instantiate(tx).Get([]byte("ann"))
+						_, _, err := total.Instantiate(tx).Get("ann")
 						return err
 					})
 					if err != nil {
@@ -873,4 +874,113 @@ func BenchmarkWrites(b *testing.B) {
 			wg.Wait()
 		})
 	}
+}
+
+type purchase struct {
+	Shop       string
+	CustomerID int64
+	Amount     int64
+}
+
+func TestTypedGroups(t *testing.T) {
+	testkv.Each(t, func(t *testing.T, db kv.DB) {
+		schema := catalog.NewSchema()
+		purchases := extstore.New[int64, purchase](schema.Namespace("purchases"))
+
+		byShop := agg.Sum(purchases, "by_shop", func(p *purchase) (string, int64, bool) {
+			return p.Shop, p.Amount, true
+		})
+		byCustomer := agg.Sum(purchases, "by_customer", func(p *purchase) (int64, int64, bool) {
+			return p.CustomerID, p.Amount, true
+		})
+		// A group of two fields is a pair of them.
+		byBoth := agg.Max(purchases, "by_both", func(p *purchase) (codec.Pair[string, int64], int64, bool) {
+			return codec.NewPair(p.Shop, p.CustomerID), p.Amount, true
+		})
+		overall := agg.Count(purchases, "overall", func(*purchase) (agg.NoGroup, bool) {
+			return agg.NoGroup{}, true
+		})
+		require.NoError(t, schema.Check(db))
+		require.Equal(t, "pair(string,int64),msgpack,msgpack", byBoth.Descriptor().Encoding)
+		require.Equal(t, "none,msgpack,msgpack", overall.Descriptor().Encoding)
+
+		write := func() {
+			require.NoError(t, db.Update(func(tx kv.Tx) error {
+				store := purchases.Instantiate(tx)
+				for id, p := range map[int64]purchase{
+					1: {Shop: "north", CustomerID: 7, Amount: 30},
+					2: {Shop: "north", CustomerID: 8, Amount: 50},
+					3: {Shop: "south", CustomerID: 7, Amount: 20},
+					// A shop whose name begins like the name of another one, and customers
+					// whose numbers have bytes in common.
+					4: {Shop: "north-east", CustomerID: -7, Amount: 1},
+					5: {Shop: "north", CustomerID: 7 + 256, Amount: 5},
+				} {
+					if err := store.Set(id, &p); err != nil {
+						return err
+					}
+				}
+				return nil
+			}))
+		}
+		check := func(collected bool) {
+			require.NoError(t, db.View(func(tx kv.Tx) error {
+				get := func(read func() (int64, bool, error)) int64 {
+					got, ok, err := read()
+					require.NoError(t, err)
+					require.True(t, ok)
+					return got
+				}
+				shops, customers, both, all := byShop.Instantiate(tx), byCustomer.Instantiate(tx), byBoth.Instantiate(tx), overall.Instantiate(tx)
+				if collected {
+					require.Equal(t, int64(85), get(func() (int64, bool, error) { return shops.GetCollected("north") }))
+					require.Equal(t, int64(50), get(func() (int64, bool, error) { return customers.GetCollected(7) }))
+					require.Equal(t, int64(30), get(func() (int64, bool, error) { return both.GetCollected(codec.NewPair("north", int64(7))) }))
+					require.Equal(t, int64(5), get(func() (int64, bool, error) { return all.GetCollected(agg.NoGroup{}) }))
+					return nil
+				}
+
+				require.Equal(t, int64(85), get(func() (int64, bool, error) { return shops.Get("north") }))
+				require.Equal(t, int64(1), get(func() (int64, bool, error) { return shops.Get("north-east") }))
+				require.Equal(t, int64(50), get(func() (int64, bool, error) { return customers.Get(7) }))
+				require.Equal(t, int64(1), get(func() (int64, bool, error) { return customers.Get(-7) }))
+				require.Equal(t, int64(5), get(func() (int64, bool, error) { return customers.Get(263) }))
+				require.Equal(t, int64(30), get(func() (int64, bool, error) { return both.Get(codec.NewPair("north", int64(7))) }))
+				require.Equal(t, int64(20), get(func() (int64, bool, error) { return both.Get(codec.NewPair("south", int64(7))) }))
+				require.Equal(t, int64(5), get(func() (int64, bool, error) { return all.Get(agg.NoGroup{}) }))
+
+				_, ok, err := shops.Get("nort")
+				require.NoError(t, err)
+				require.False(t, ok)
+				_, ok, err = both.Get(codec.NewPair("north", int64(9)))
+				require.NoError(t, err)
+				require.False(t, ok)
+				return nil
+			}))
+		}
+
+		write()
+		check(false)
+		require.NoError(t, agg.NewCollector(db, schema, agg.WithBatchSize(2)).Collect(context.Background()))
+		check(false)
+		check(true)
+	})
+}
+
+func TestGroupCodec(t *testing.T) {
+	type shop struct{ Name string }
+	newPurchases := func() *extstore.Store[int64, purchase] {
+		return extstore.New[int64, purchase](catalog.NewSchema().Namespace("purchases"))
+	}
+	byShop := func(p *purchase) (shop, int64, bool) { return shop{p.Shop}, p.Amount, true }
+
+	// A type of groups that has no key codec is a mistake in the definition.
+	require.Panics(t, func() { agg.Sum(newPurchases(), "a", byShop) })
+	require.Panics(t, func() { agg.Sum(newPurchases(), "a", byShop, agg.WithGroupCodec(codec.StringKey[string]())) })
+
+	// A key codec that is given is used.
+	total := agg.Sum(newPurchases(), "a",
+		func(p *purchase) (string, int64, bool) { return p.Shop, p.Amount, true },
+		agg.WithGroupCodec(codec.StringKey[string]()))
+	require.Equal(t, "string,msgpack,msgpack", total.Descriptor().Encoding)
 }

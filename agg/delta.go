@@ -10,7 +10,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/ehsanranjbar/kvutil/codec/lex"
 	"github.com/ehsanranjbar/kvutil/kv"
 	"github.com/ehsanranjbar/kvutil/kv/prefix"
 	extstore "github.com/ehsanranjbar/kvutil/store/ext"
@@ -34,13 +33,13 @@ type Fold[X, S any] struct {
 // and the collector folds the temporary records into the states. That costs the same however
 // many records a span has, so it suits the aggregations with large spans, like a total for all
 // of time. The fold must be able to remove what it has added, and must not depend on the order.
-func Delta[K, V, X, S any](
+func Delta[K, V, G, X, S any](
 	store extstore.Extensible[K, V],
 	name string,
-	extract Extract[V, X],
+	extract Extract[V, G, X],
 	fold Fold[X, S],
 	opts ...Option,
-) *Agg[K, V, X, S] {
+) *Agg[K, V, G, X, S] {
 	return define(store, name, "delta", extract, opts, func(c *core[X, S], o options) kind[X, S] {
 		if fold.Add == nil {
 			panic(fmt.Sprintf("agg %q: a delta aggregation needs a function to add a contribution", name))
@@ -157,18 +156,18 @@ func (d *deltaKind[X, S]) apply(t tally[S], sign byte, x X) (_ tally[S], err err
 
 // temp is a temporary record.
 type temp[X any] struct {
-	group []byte
+	group []byte // the encoded group
 	time  time.Time
 	sign  byte
 	x     X
 }
 
 func (d *deltaKind[X, S]) decodeTemp(key, value []byte) (t temp[X], err error) {
-	group, n, err := lex.ReadTerminated(key[1:])
+	n, err := d.skipGroup(key[1:])
 	if err != nil {
 		return t, err
 	}
-	rest := key[1+n:]
+	group, rest := key[1:1+n], key[1+n:]
 	if len(rest) != timeSize+idSize || len(value) < 1 {
 		return t, fmt.Errorf("agg %q: temporary record of %d and %d bytes", d.name, len(key), len(value))
 	}
@@ -205,7 +204,7 @@ func (d *deltaKind[X, S]) series(
 	}
 	defer it.Close()
 	for ; it.Valid(); it.Next() {
-		_, _, spanStart, err := splitBucketKey(it.Key())
+		_, _, spanStart, err := d.splitBucketKey(it.Key())
 		if err != nil {
 			return nil, err
 		}

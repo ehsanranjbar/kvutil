@@ -4,7 +4,7 @@ import (
 	"fmt"
 
 	"github.com/ehsanranjbar/kvutil/legacy"
-	"github.com/ehsanranjbar/kvutil/schema"
+	"github.com/ehsanranjbar/kvutil/legacy/schema"
 )
 
 // Indexer is a wrapper around an Indexer that injects custom values to the indexes.

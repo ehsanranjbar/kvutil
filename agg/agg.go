@@ -23,7 +23,6 @@ import (
 
 	"github.com/ehsanranjbar/kvutil/catalog"
 	"github.com/ehsanranjbar/kvutil/codec"
-	"github.com/ehsanranjbar/kvutil/codec/lex"
 	"github.com/ehsanranjbar/kvutil/kv"
 	"github.com/ehsanranjbar/kvutil/kv/prefix"
 	extstore "github.com/ehsanranjbar/kvutil/store/ext"
@@ -38,8 +37,22 @@ var (
 )
 
 // Extract says what a record contributes to an aggregation: a value, in a group.
-// A record that is not ok contributes nothing. An empty group is the group of everything.
-type Extract[V, X any] func(v *V) (group []byte, x X, ok bool)
+// A record that is not ok contributes nothing. The type of the groups must have a key codec:
+// it can be a number, a string or a codec.Pair of them, among others. An aggregation that
+// does not group its records has NoGroup as the type of its groups.
+type Extract[V, G, X any] func(v *V) (group G, x X, ok bool)
+
+// NoGroup is the type of the groups of an aggregation that has one state for all the records.
+type NoGroup struct{}
+
+// noGroupKey is the key codec of NoGroup, which takes no room in a key.
+type noGroupKey struct{}
+
+func (noGroupKey) Name() string                                 { return "none" }
+func (noGroupKey) Encode(NoGroup) ([]byte, error)               { return nil, nil }
+func (noGroupKey) Decode([]byte) (NoGroup, error)               { return NoGroup{}, nil }
+func (noGroupKey) Append(dst []byte, _ NoGroup) ([]byte, error) { return dst, nil }
+func (noGroupKey) Read([]byte) (NoGroup, int, error)            { return NoGroup{}, 0, nil }
 
 // Point is the state of an aggregation for the span of a bucket that starts at a time.
 type Point[S any] struct {
@@ -80,6 +93,7 @@ type options struct {
 	timeOf     any // func(*V) time.Time
 	buckets    []Bucket
 	merge      any // func(a, b S) S
+	gCodec     any // codec.KeyCodec[G]
 	xCodec     any // codec.ValueCodec[X]
 	sCodec     any // codec.ValueCodec[S]
 	appendOnly bool
@@ -114,6 +128,13 @@ func WithMerge[S any](merge func(a, b S) S) Option {
 func AppendOnly() Option {
 	return func(o *options) {
 		o.appendOnly = true
+	}
+}
+
+// WithGroupCodec sets the key codec of the groups, instead of the one that their type has by default.
+func WithGroupCodec[G any](c codec.KeyCodec[G]) Option {
+	return func(o *options) {
+		o.gCodec = c
 	}
 }
 
@@ -155,7 +176,7 @@ func option[T any](name, what string, v any) (t T) {
 
 // contribution is what a record contributes to an aggregation.
 type contribution[X any] struct {
-	group []byte
+	group []byte // the encoded group
 	time  time.Time
 	x     X
 	xbz   []byte
@@ -187,13 +208,15 @@ func appendTime(dst []byte, t time.Time) []byte {
 	return dst
 }
 
-// core is what the two kinds of aggregations have in common.
+// core is what the two kinds of aggregations have in common. It has the groups as they are
+// encoded in the keys: in the form of their key codec that marks where it ends.
 type core[X, S any] struct {
-	name    string
-	ns      *catalog.Namespace
-	buckets []Bucket
-	xCodec  codec.ValueCodec[X]
-	sCodec  codec.ValueCodec[S]
+	name      string
+	ns        *catalog.Namespace
+	buckets   []Bucket
+	skipGroup func(bz []byte) (n int, err error) // the size of the group at the front of the bytes
+	xCodec    codec.ValueCodec[X]
+	sCodec    codec.ValueCodec[S]
 }
 
 func (c *core[X, S]) bucket(id byte) (Bucket, bool) {
@@ -207,34 +230,38 @@ func (c *core[X, S]) bucket(id byte) (Bucket, bool) {
 
 // groupPrefix returns the beginning of the keys of a kind for a group.
 func groupPrefix(kind byte, group []byte) []byte {
-	return lex.AppendTerminated([]byte{kind}, group)
+	return append([]byte{kind}, group...)
 }
 
 // bucketPrefix returns the beginning of the keys of a kind for a bucket and a group.
 func bucketPrefix(kind byte, b Bucket, group []byte) []byte {
-	return lex.AppendTerminated([]byte{kind, b.ID()}, group)
+	return append([]byte{kind, b.ID()}, group...)
 }
 
 // timeRange returns the range of the keys that begin with the prefix and continue with a time
 // in [lo, hi), or with any time if all is set.
 func timeRange(prefix []byte, lo, hi time.Time, all bool) (start, end []byte) {
 	if all {
-		return prefix, kv.PrefixEnd(prefix)
+		if end = kv.PrefixEnd(prefix); end == nil {
+			// Nothing sorts after the prefix, so the keys go on to the end of the kind.
+			end = []byte{prefix[0] + 1}
+		}
+		return prefix, end
 	}
 	return appendTime(bytes.Clone(prefix), lo), appendTime(bytes.Clone(prefix), hi)
 }
 
 // splitBucketKey splits a key of a state or of a marker.
-func splitBucketKey(key []byte) (id byte, group []byte, start time.Time, err error) {
+func (c *core[X, S]) splitBucketKey(key []byte) (id byte, group []byte, start time.Time, err error) {
 	if len(key) < 2 {
-		return 0, nil, start, fmt.Errorf("agg: key of %d bytes", len(key))
+		return 0, nil, start, fmt.Errorf("agg %q: key of %d bytes", c.name, len(key))
 	}
-	group, n, err := lex.ReadTerminated(key[2:])
+	n, err := c.skipGroup(key[2:])
 	if err != nil {
 		return 0, nil, start, err
 	}
 	start, err = timeCodec.Decode(key[2+n:])
-	return key[1], group, start, err
+	return key[1], key[2 : 2+n], start, err
 }
 
 // kind is how an aggregation is kept.
@@ -252,10 +279,11 @@ type kind[X, S any] interface {
 
 // Agg is a stored aggregation of the records of a store. It is kept as an extension of the
 // store, and is instantiated for a transaction to be read.
-type Agg[K, V, X, S any] struct {
+type Agg[K, V, G, X, S any] struct {
 	*core[X, S]
 	store   extstore.Extensible[K, V]
-	extract Extract[V, X]
+	extract Extract[V, G, X]
+	gCodec  codec.KeyCodec[G]
 	timeOf  func(*V) time.Time
 	kind    kind[X, S]
 	desc    Descriptor
@@ -266,13 +294,13 @@ type Agg[K, V, X, S any] struct {
 
 // define creates an aggregation and adds it to the store. The kind is made by the function
 // once the aggregation has its namespace and its codecs.
-func define[K, V, X, S any](
+func define[K, V, G, X, S any](
 	store extstore.Extensible[K, V],
 	name, kindName string,
-	extract Extract[V, X],
+	extract Extract[V, G, X],
 	opts []Option,
 	newKind func(c *core[X, S], o options) kind[X, S],
-) *Agg[K, V, X, S] {
+) *Agg[K, V, G, X, S] {
 	var o options
 	for _, opt := range opts {
 		opt(&o)
@@ -291,10 +319,32 @@ func define[K, V, X, S any](
 		names = append(names, b.Name())
 	}
 
-	a := &Agg[K, V, X, S]{
-		core:    &core[X, S]{name: name, buckets: o.buckets},
+	gCodec := option[codec.KeyCodec[G]](name, "the group codec", o.gCodec)
+	if gCodec == nil {
+		if none, ok := any(noGroupKey{}).(codec.KeyCodec[G]); ok {
+			gCodec = none
+		} else {
+			c, err := codec.KeyFor[G]()
+			if err != nil {
+				// A mistake in the definition, which is made in code when the program starts.
+				panic(fmt.Sprintf("agg %q: the groups: %v; give the aggregation one with WithGroupCodec", name, err))
+			}
+			gCodec = c
+		}
+	}
+
+	a := &Agg[K, V, G, X, S]{
+		core: &core[X, S]{
+			name:    name,
+			buckets: o.buckets,
+			skipGroup: func(bz []byte) (int, error) {
+				_, n, err := gCodec.Read(bz)
+				return n, err
+			},
+		},
 		store:   store,
 		extract: extract,
+		gCodec:  gCodec,
 		timeOf:  option[func(*V) time.Time](name, "the function of ByTime", o.timeOf),
 		opts:    o,
 	}
@@ -303,32 +353,32 @@ func define[K, V, X, S any](
 	a.desc.Buckets = names
 	a.desc.Merged = o.merge != nil
 
-	store.AddExtension(name, maintainer[K, V, X, S]{a: a, newKind: newKind})
+	store.AddExtension(name, maintainer[K, V, G, X, S]{a: a, newKind: newKind})
 	return a
 }
 
 // Name returns the name of the aggregation.
-func (a *Agg[K, V, X, S]) Name() string {
+func (a *Agg[K, V, G, X, S]) Name() string {
 	return a.name
 }
 
 // Descriptor returns the descriptor of the aggregation.
-func (a *Agg[K, V, X, S]) Descriptor() Descriptor {
+func (a *Agg[K, V, G, X, S]) Descriptor() Descriptor {
 	return a.desc
 }
 
 // Namespace returns the namespace that the aggregation keeps its data in.
-func (a *Agg[K, V, X, S]) Namespace() *catalog.Namespace {
+func (a *Agg[K, V, G, X, S]) Namespace() *catalog.Namespace {
 	return a.ns
 }
 
 // Buckets returns the buckets that the aggregation is kept for.
-func (a *Agg[K, V, X, S]) Buckets() []Bucket {
+func (a *Agg[K, V, G, X, S]) Buckets() []Bucket {
 	return slices.Clone(a.buckets)
 }
 
 // contributionOf returns what a record contributes, or nil if it contributes nothing.
-func (a *Agg[K, V, X, S]) contributionOf(v *V) (*contribution[X], error) {
+func (a *Agg[K, V, G, X, S]) contributionOf(v *V) (*contribution[X], error) {
 	if v == nil {
 		return nil, nil
 	}
@@ -337,35 +387,48 @@ func (a *Agg[K, V, X, S]) contributionOf(v *V) (*contribution[X], error) {
 		return nil, nil
 	}
 
+	gbz, err := a.encodeGroup(group)
+	if err != nil {
+		return nil, err
+	}
 	xbz, err := a.xCodec.Encode(x)
 	if err != nil {
 		return nil, fmt.Errorf("failed to encode the contribution: %w", err)
 	}
-	c := &contribution[X]{group: group, x: x, xbz: xbz}
+	c := &contribution[X]{group: gbz, x: x, xbz: xbz}
 	if a.timeOf != nil {
 		c.time = a.timeOf(v)
 	}
 	return c, nil
 }
 
+// encodeGroup encodes a group as it is in the keys.
+func (a *Agg[K, V, G, X, S]) encodeGroup(group G) ([]byte, error) {
+	gbz, err := a.gCodec.Append(nil, group)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode the group: %w", err)
+	}
+	return gbz, nil
+}
+
 // collectName implements the collectable interface.
-func (a *Agg[K, V, X, S]) collectName() string {
+func (a *Agg[K, V, G, X, S]) collectName() string {
 	return a.ns.Path()
 }
 
 // collectBatch implements the collectable interface.
-func (a *Agg[K, V, X, S]) collectBatch(db kv.DB, cursor []byte, batch int, report func(error)) ([]byte, error) {
+func (a *Agg[K, V, G, X, S]) collectBatch(db kv.DB, cursor []byte, batch int, report func(error)) ([]byte, error) {
 	return a.kind.collect(db, cursor, batch, report)
 }
 
 // maintainer is the extension that notes the changes of the records for an aggregation.
-type maintainer[K, V, X, S any] struct {
-	a       *Agg[K, V, X, S]
+type maintainer[K, V, G, X, S any] struct {
+	a       *Agg[K, V, G, X, S]
 	newKind func(c *core[X, S], o options) kind[X, S]
 }
 
 // UseNamespace implements the extstore.NamespaceUser interface.
-func (m maintainer[K, V, X, S]) UseNamespace(ns *catalog.Namespace) {
+func (m maintainer[K, V, G, X, S]) UseNamespace(ns *catalog.Namespace) {
 	a := m.a
 	a.ns = ns
 
@@ -376,7 +439,7 @@ func (m maintainer[K, V, X, S]) UseNamespace(ns *catalog.Namespace) {
 	if a.sCodec = option[codec.ValueCodec[S]](a.name, "the state codec", a.opts.sCodec); a.sCodec == nil {
 		a.sCodec = codec.ValueFor[S](format)
 	}
-	a.desc.Encoding = a.xCodec.Name() + "," + a.sCodec.Name()
+	a.desc.Encoding = a.gCodec.Name() + "," + a.xCodec.Name() + "," + a.sCodec.Name()
 	a.kind = m.newKind(a.core, a.opts)
 
 	ns.Define(catalog.Definition{
@@ -391,26 +454,26 @@ func (m maintainer[K, V, X, S]) UseNamespace(ns *catalog.Namespace) {
 }
 
 // Instantiate implements the extstore.Extension interface.
-func (m maintainer[K, V, X, S]) Instantiate(tx kv.Tx) extstore.ExtensionInstance[K, V] {
-	return &maintenance[K, V, X, S]{a: m.a, tx: m.a.ns.Open(tx)}
+func (m maintainer[K, V, G, X, S]) Instantiate(tx kv.Tx) extstore.ExtensionInstance[K, V] {
+	return &maintenance[K, V, G, X, S]{a: m.a, tx: m.a.ns.Open(tx)}
 }
 
-type maintenance[K, V, X, S any] struct {
-	a  *Agg[K, V, X, S]
+type maintenance[K, V, G, X, S any] struct {
+	a  *Agg[K, V, G, X, S]
 	tx *prefix.Tx
 }
 
 // OnSet implements the extstore.ExtensionInstance interface.
-func (m *maintenance[K, V, X, S]) OnSet(_ K, rawKey []byte, old, new *V, _ ...any) error {
+func (m *maintenance[K, V, G, X, S]) OnSet(_ K, rawKey []byte, old, new *V, _ ...any) error {
 	return m.change(rawKey, old, new)
 }
 
 // OnDelete implements the extstore.ExtensionInstance interface.
-func (m *maintenance[K, V, X, S]) OnDelete(_ K, rawKey []byte, old *V) error {
+func (m *maintenance[K, V, G, X, S]) OnDelete(_ K, rawKey []byte, old *V) error {
 	return m.change(rawKey, old, nil)
 }
 
-func (m *maintenance[K, V, X, S]) change(rawKey []byte, old, new *V) error {
+func (m *maintenance[K, V, G, X, S]) change(rawKey []byte, old, new *V) error {
 	oc, err := m.a.contributionOf(old)
 	if err != nil {
 		return err
@@ -428,48 +491,52 @@ func (m *maintenance[K, V, X, S]) change(rawKey []byte, old, new *V) error {
 }
 
 // Instantiate creates the instance of the aggregation for a transaction.
-func (a *Agg[K, V, X, S]) Instantiate(tx kv.Tx) *Instance[K, V, X, S] {
-	return &Instance[K, V, X, S]{a: a, tx: a.ns.Open(tx)}
+func (a *Agg[K, V, G, X, S]) Instantiate(tx kv.Tx) *Instance[K, V, G, X, S] {
+	return &Instance[K, V, G, X, S]{a: a, tx: a.ns.Open(tx)}
 }
 
 // Instance is an Agg in a transaction, which it is read with.
-type Instance[K, V, X, S any] struct {
-	a  *Agg[K, V, X, S]
+type Instance[K, V, G, X, S any] struct {
+	a  *Agg[K, V, G, X, S]
 	tx *prefix.Tx
 }
 
 // Get returns the state of a group for all of time, and whether the group has any record.
 // It is exact: it takes into account what the collector has not collected yet.
-func (i *Instance[K, V, X, S]) Get(group []byte) (S, bool, error) {
+func (i *Instance[K, V, G, X, S]) Get(group G) (S, bool, error) {
 	return i.At(AllTime, group, time.Time{})
 }
 
 // GetCollected is like Get but leaves out what the collector has not collected yet,
 // which makes it cheaper and possibly out of date.
-func (i *Instance[K, V, X, S]) GetCollected(group []byte) (S, bool, error) {
+func (i *Instance[K, V, G, X, S]) GetCollected(group G) (S, bool, error) {
 	return i.AtCollected(AllTime, group, time.Time{})
 }
 
 // At returns the state of a group for the span of a bucket that a time is in, and whether the
 // group has any record in that span.
 // It is exact: it takes into account what the collector has not collected yet.
-func (i *Instance[K, V, X, S]) At(b Bucket, group []byte, t time.Time) (S, bool, error) {
+func (i *Instance[K, V, G, X, S]) At(b Bucket, group G, t time.Time) (S, bool, error) {
 	return i.at(b, group, t, false)
 }
 
 // AtCollected is like At but leaves out what the collector has not collected yet,
 // which makes it cheaper and possibly out of date.
-func (i *Instance[K, V, X, S]) AtCollected(b Bucket, group []byte, t time.Time) (S, bool, error) {
+func (i *Instance[K, V, G, X, S]) AtCollected(b Bucket, group G, t time.Time) (S, bool, error) {
 	return i.at(b, group, t, true)
 }
 
-func (i *Instance[K, V, X, S]) at(b Bucket, group []byte, t time.Time, collectedOnly bool) (state S, ok bool, err error) {
+func (i *Instance[K, V, G, X, S]) at(b Bucket, group G, t time.Time, collectedOnly bool) (state S, ok bool, err error) {
 	if err := i.check(b); err != nil {
+		return state, false, err
+	}
+	gbz, err := i.a.encodeGroup(group)
+	if err != nil {
 		return state, false, err
 	}
 
 	lo := b.Start(t)
-	points, err := i.a.kind.series(i.tx, b, group, lo, b.Next(lo), b == AllTime, collectedOnly)
+	points, err := i.a.kind.series(i.tx, b, gbz, lo, b.Next(lo), b == AllTime, collectedOnly)
 	if err != nil || len(points) == 0 {
 		return state, false, err
 	}
@@ -494,24 +561,28 @@ func FillGaps() SeriesOption {
 // from is in up to the spans that start before the time to, in the order of time.
 // Only the spans that have records in them are returned, unless FillGaps is given.
 // It is exact: it takes into account what the collector has not collected yet.
-func (i *Instance[K, V, X, S]) Series(b Bucket, group []byte, from, to time.Time, opts ...SeriesOption) ([]Point[S], error) {
+func (i *Instance[K, V, G, X, S]) Series(b Bucket, group G, from, to time.Time, opts ...SeriesOption) ([]Point[S], error) {
 	return i.series(b, group, from, to, false, opts)
 }
 
 // SeriesCollected is like Series but leaves out what the collector has not collected yet,
 // which makes it cheaper and possibly out of date.
-func (i *Instance[K, V, X, S]) SeriesCollected(b Bucket, group []byte, from, to time.Time, opts ...SeriesOption) ([]Point[S], error) {
+func (i *Instance[K, V, G, X, S]) SeriesCollected(b Bucket, group G, from, to time.Time, opts ...SeriesOption) ([]Point[S], error) {
 	return i.series(b, group, from, to, true, opts)
 }
 
-func (i *Instance[K, V, X, S]) series(
+func (i *Instance[K, V, G, X, S]) series(
 	b Bucket,
-	group []byte,
+	group G,
 	from, to time.Time,
 	collectedOnly bool,
 	opts []SeriesOption,
 ) ([]Point[S], error) {
 	if err := i.check(b); err != nil {
+		return nil, err
+	}
+	gbz, err := i.a.encodeGroup(group)
+	if err != nil {
 		return nil, err
 	}
 	var o seriesOptions
@@ -529,7 +600,7 @@ func (i *Instance[K, V, X, S]) series(
 		return nil, nil
 	}
 
-	points, err := i.a.kind.series(i.tx, b, group, lo, hi, all, collectedOnly)
+	points, err := i.a.kind.series(i.tx, b, gbz, lo, hi, all, collectedOnly)
 	if err != nil || !o.fillGaps || all {
 		return points, err
 	}
@@ -547,7 +618,7 @@ func (i *Instance[K, V, X, S]) series(
 }
 
 // check reports whether the aggregation has the bucket.
-func (i *Instance[K, V, X, S]) check(b Bucket) error {
+func (i *Instance[K, V, G, X, S]) check(b Bucket) error {
 	own, ok := i.a.bucket(b.ID())
 	if !ok || own.Name() != b.Name() {
 		return fmt.Errorf("%w: %s", ErrNoBucket, b.Name())

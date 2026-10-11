@@ -11,7 +11,6 @@ import (
 	"github.com/ehsanranjbar/kvutil"
 	"github.com/ehsanranjbar/kvutil/catalog"
 	"github.com/ehsanranjbar/kvutil/codec"
-	"github.com/ehsanranjbar/kvutil/expr"
 	"github.com/ehsanranjbar/kvutil/internal/ordmap"
 	"github.com/ehsanranjbar/kvutil/kv"
 	sstore "github.com/ehsanranjbar/kvutil/store/serialized"
@@ -89,7 +88,7 @@ func (s *Store[K, V]) Getter(tx kv.Tx) Getter[K, V] {
 }
 
 // Records implements the Extensible interface.
-func (s *Store[K, V]) Records(tx kv.Tx, r expr.Range[K]) (kvutil.Iterator[K, *V], error) {
+func (s *Store[K, V]) Records(tx kv.Tx, r kvutil.Range[K]) (kvutil.Iterator[K, *V], error) {
 	return s.data.Instantiate(tx).Iterator(r)
 }
 
@@ -178,12 +177,12 @@ func (s *Instance[K, V]) Has(key K) (bool, error) {
 }
 
 // Iterator iterates over the records whose keys are in the range, in ascending order.
-func (s *Instance[K, V]) Iterator(r expr.Range[K]) (*sstore.Iterator[K, V], error) {
+func (s *Instance[K, V]) Iterator(r kvutil.Range[K]) (*sstore.Iterator[K, V], error) {
 	return s.data.Iterator(r)
 }
 
 // ReverseIterator iterates over the records whose keys are in the range, in descending order.
-func (s *Instance[K, V]) ReverseIterator(r expr.Range[K]) (*sstore.Iterator[K, V], error) {
+func (s *Instance[K, V]) ReverseIterator(r kvutil.Range[K]) (*sstore.Iterator[K, V], error) {
 	return s.data.ReverseIterator(r)
 }
 

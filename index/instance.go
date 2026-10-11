@@ -2,8 +2,10 @@ package index
 
 import (
 	"fmt"
+	"slices"
 
 	"github.com/ehsanranjbar/kvutil/kv"
+	"github.com/ehsanranjbar/kvutil/schema"
 	extstore "github.com/ehsanranjbar/kvutil/store/ext"
 	refstore "github.com/ehsanranjbar/kvutil/store/ref"
 )
@@ -32,10 +34,15 @@ func (i *Instance[K, V]) ReverseScan(r KeyRange) (*Iterator[K, V], error) {
 // the order that they are given. A record is returned once, even if it has an entry in more
 // than one range. The iterator must be closed.
 func (i *Instance[K, V]) ScanAll(ranges []KeyRange, reverse bool) (*Iterator[K, V], error) {
+	return i.scan(ranges, reverse, nil)
+}
+
+func (i *Instance[K, V]) scan(ranges []KeyRange, reverse bool, filter []schema.Cond[V]) (*Iterator[K, V], error) {
 	it := &Iterator[K, V]{
 		ins:     i,
 		ranges:  ranges,
 		reverse: reverse,
+		filter:  filter,
 	}
 	// A record can only come up twice if it has several entries, or if there are several ranges.
 	if i.x.desc.MultiEntry || len(ranges) > 1 {
@@ -50,32 +57,50 @@ func (i *Instance[K, V]) ScanAll(ranges []KeyRange, reverse bool) (*Iterator[K, 
 	return it, nil
 }
 
-// Lookup iterates over the entries of the records that may satisfy the conditions, if the
-// indexer of the index can translate them. The conditions that the index does not enforce are
-// returned as the residual, which the records must still be checked against.
-func (i *Instance[K, V]) Lookup(conds ...any) (it *Iterator[K, V], residual []any, err error) {
-	l, ok := i.x.indexer.(Lookuper)
+// Lookup iterates over the records of the index that satisfy all the conditions, in ascending
+// order of the keys of the index. The index is used for the conditions that it can serve, and
+// the records that it finds are checked against the others, so the result is exact.
+// It fails if the indexer of the index cannot translate conditions.
+func (i *Instance[K, V]) Lookup(conds ...schema.Cond[V]) (*Iterator[K, V], error) {
+	return i.lookup(conds, false)
+}
+
+// ReverseLookup is like Lookup, in descending order of the keys of the index.
+func (i *Instance[K, V]) ReverseLookup(conds ...schema.Cond[V]) (*Iterator[K, V], error) {
+	return i.lookup(conds, true)
+}
+
+func (i *Instance[K, V]) lookup(conds []schema.Cond[V], reverse bool) (*Iterator[K, V], error) {
+	l, ok := i.x.indexer.(Lookuper[V])
 	if !ok {
-		return nil, nil, fmt.Errorf("index %q cannot be looked up with conditions", i.x.name)
+		return nil, fmt.Errorf("index %q cannot be looked up with conditions", i.x.name)
 	}
 
 	ranges, residual, err := l.Lookup(conds...)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
+	if reverse {
+		slices.Reverse(ranges)
+	}
+	return i.scan(ranges, reverse, residual)
+}
 
-	it, err = i.ScanAll(ranges, false)
-	if err != nil {
-		return nil, nil, err
+// Plan returns how the index would serve conditions: the ranges of keys that it would read and
+// the conditions that it would have to check on the records that it finds.
+func (i *Instance[K, V]) Plan(conds ...schema.Cond[V]) (ranges []KeyRange, residual []schema.Cond[V], err error) {
+	l, ok := i.x.indexer.(Lookuper[V])
+	if !ok {
+		return nil, nil, fmt.Errorf("index %q cannot be looked up with conditions", i.x.name)
 	}
-	return it, residual, nil
+	return l.Lookup(conds...)
 }
 
 // bounds returns the range of stored keys that corresponds to a range of index keys.
 func bounds(r KeyRange) (start, end []byte) {
-	if low := r.Low(); !low.IsEmpty() {
-		start = low.Value()
-		if low.Exclusive() {
+	if low, exclusive, ok := r.Low(); ok {
+		start = low
+		if exclusive {
 			// Past all the keys that begin with the bound. If there is nothing past them the
 			// range is empty, which a start that is its own end stands for.
 			start = kv.PrefixEnd(start)
@@ -85,9 +110,9 @@ func bounds(r KeyRange) (start, end []byte) {
 		}
 	}
 
-	if high := r.High(); !high.IsEmpty() {
-		end = high.Value()
-		if !high.Exclusive() {
+	if high, exclusive, ok := r.High(); ok {
+		end = high
+		if !exclusive {
 			end = kv.PrefixEnd(end)
 		} else if len(end) == 0 {
 			return []byte{0x00}, []byte{0x00}
@@ -103,10 +128,12 @@ type Iterator[K, V any] struct {
 	ranges  []KeyRange
 	reverse bool
 
-	next int                 // the next range to open
-	cur  *refstore.Iterator  // the iterator of the current range
-	seen map[string]struct{} // the primary keys that were returned, if they have to be remembered
-	err  error
+	next   int                 // the next range to open
+	cur    *refstore.Iterator  // the iterator of the current range
+	seen   map[string]struct{} // the primary keys that were returned, if they have to be remembered
+	filter []schema.Cond[V]    // the conditions that the records are checked against
+	record *V                  // the record of the current entry, once it is read
+	err    error
 }
 
 // settle moves to the first entry, from where the iterator is, that belongs to a record that
@@ -128,26 +155,55 @@ func (it *Iterator[K, V]) settle() {
 			continue
 		}
 
+		it.record = nil
 		if !it.cur.Valid() {
 			it.err = it.cur.Close()
 			it.cur = nil
 			continue
 		}
-		if it.seen == nil {
-			return
+
+		if it.seen != nil {
+			pk, err := it.cur.PrimaryKey()
+			if err != nil {
+				it.err = err
+				return
+			}
+			if _, ok := it.seen[string(pk)]; ok {
+				it.cur.Next()
+				continue
+			}
+			it.seen[string(pk)] = struct{}{}
 		}
 
-		pk, err := it.cur.PrimaryKey()
+		ok, err := it.matches()
 		if err != nil {
 			it.err = err
 			return
 		}
-		if _, ok := it.seen[string(pk)]; !ok {
-			it.seen[string(pk)] = struct{}{}
+		if ok {
 			return
 		}
 		it.cur.Next()
 	}
+}
+
+// matches reports whether the record of the current entry satisfies the conditions that the
+// index does not enforce.
+func (it *Iterator[K, V]) matches() (bool, error) {
+	if len(it.filter) == 0 {
+		return true, nil
+	}
+
+	record, err := it.Value()
+	if err != nil {
+		return false, err
+	}
+	for _, cond := range it.filter {
+		if ok, err := cond.Match(record); !ok || err != nil {
+			return false, err
+		}
+	}
+	return true, nil
 }
 
 // Valid implements the kvutil.Iterator interface.
@@ -185,6 +241,10 @@ func (it *Iterator[K, V]) Key() (key K, err error) {
 
 // Value returns the record that the current entry belongs to, which it gets from the store.
 func (it *Iterator[K, V]) Value() (*V, error) {
+	if it.record != nil {
+		return it.record, nil
+	}
+
 	key, err := it.Key()
 	if err != nil {
 		return nil, err
@@ -193,7 +253,8 @@ func (it *Iterator[K, V]) Value() (*V, error) {
 	if it.ins.getter == nil {
 		it.ins.getter = it.ins.x.store.Getter(it.ins.tx)
 	}
-	return it.ins.getter.Get(key)
+	it.record, err = it.ins.getter.Get(key)
+	return it.record, err
 }
 
 // IndexKey returns the key of the current entry.

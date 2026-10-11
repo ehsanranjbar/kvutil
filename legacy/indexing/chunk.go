@@ -5,8 +5,8 @@ import (
 
 	badger "github.com/dgraph-io/badger/v4"
 	"github.com/ehsanranjbar/kvutil/codec/lex"
-	"github.com/ehsanranjbar/kvutil/expr"
 	"github.com/ehsanranjbar/kvutil/legacy"
+	"github.com/ehsanranjbar/kvutil/legacy/expr"
 	"github.com/ehsanranjbar/kvutil/legacy/iters"
 	refstore "github.com/ehsanranjbar/kvutil/legacy/store/ref"
 )

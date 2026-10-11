@@ -25,7 +25,7 @@ func Example() {
 	schema := catalog.NewSchema()
 	sales := extstore.New[int64, Sale](schema.Namespace("sales"))
 
-	byShop := func(s *Sale) ([]byte, int64, bool) { return []byte(s.Shop), s.Amount, true }
+	byShop := func(s *Sale) (string, int64, bool) { return s.Shop, s.Amount, true }
 	when := func(s *Sale) time.Time { return s.At }
 
 	// A sum can take a sale back out, so it is folded from what the sales add and remove.
@@ -34,6 +34,9 @@ func Example() {
 	// The largest sale cannot be found by taking a sale out, so it is computed from the sales of
 	// a day. The months are put together from the days.
 	largest := agg.Max(sales, "largest", byShop, agg.ByTime(when, agg.Daily, agg.Monthly))
+
+	// An aggregation of all the sales together has no groups.
+	sold := agg.Count(sales, "sold", func(*Sale) (agg.NoGroup, bool) { return agg.NoGroup{}, true })
 
 	// Any function of the sales of a span can be an aggregation.
 	spread := agg.Recompute(sales, "spread", byShop,
@@ -79,7 +82,7 @@ func Example() {
 
 	read := func(title string) {
 		err := db.View(func(tx kv.Tx) error {
-			north := []byte("north")
+			const north = "north"
 
 			days, err := revenue.Instantiate(tx).Series(agg.Daily, north, date(time.March, 1), date(time.March, 3), agg.FillGaps())
 			if err != nil {
@@ -106,7 +109,11 @@ func Example() {
 			if err != nil {
 				return err
 			}
-			fmt.Printf("; March=%d, all=%d, largest in March=%d, spread in March=%d\n", march, total, top, gap)
+			count, _, err := sold.Instantiate(tx).Get(agg.NoGroup{})
+			if err != nil {
+				return err
+			}
+			fmt.Printf("; March=%d, all=%d, largest in March=%d, spread in March=%d; %d sales in all\n", march, total, top, gap, count)
 			return nil
 		})
 		if err != nil {
@@ -138,7 +145,7 @@ func Example() {
 	read("changed")
 
 	// Output:
-	// written: by day Mar 1=80 Mar 2=20 Mar 3=0; March=100, all=170, largest in March=50, spread in March=30
-	// collected: by day Mar 1=80 Mar 2=20 Mar 3=0; March=100, all=170, largest in March=50, spread in March=30
-	// changed: by day Mar 1=0 Mar 2=20 Mar 3=50; March=70, all=140, largest in March=50, spread in March=30
+	// written: by day Mar 1=80 Mar 2=20 Mar 3=0; March=100, all=170, largest in March=50, spread in March=30; 5 sales in all
+	// collected: by day Mar 1=80 Mar 2=20 Mar 3=0; March=100, all=170, largest in March=50, spread in March=30; 5 sales in all
+	// changed: by day Mar 1=0 Mar 2=20 Mar 3=50; March=70, all=140, largest in March=50, spread in March=30; 4 sales in all
 }

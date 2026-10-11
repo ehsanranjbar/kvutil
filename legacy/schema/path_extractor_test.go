@@ -5,7 +5,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/ehsanranjbar/kvutil/schema"
+	"github.com/ehsanranjbar/kvutil/legacy/schema"
 	"github.com/stretchr/testify/require"
 )
 

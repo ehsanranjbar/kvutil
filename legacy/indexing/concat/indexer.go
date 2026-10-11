@@ -10,10 +10,10 @@ import (
 	"github.com/ehsanranjbar/kvutil/codec"
 	"github.com/ehsanranjbar/kvutil/codec/be"
 	"github.com/ehsanranjbar/kvutil/codec/lex"
-	"github.com/ehsanranjbar/kvutil/expr"
 	"github.com/ehsanranjbar/kvutil/legacy"
+	"github.com/ehsanranjbar/kvutil/legacy/expr"
 	"github.com/ehsanranjbar/kvutil/legacy/iters"
-	"github.com/ehsanranjbar/kvutil/schema"
+	"github.com/ehsanranjbar/kvutil/legacy/schema"
 )
 
 // Indexer is an indexer for a struct type that generates keys base on struct fields for a btree index.

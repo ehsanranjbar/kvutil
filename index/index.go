@@ -9,9 +9,10 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/ehsanranjbar/kvutil"
 	"github.com/ehsanranjbar/kvutil/catalog"
-	"github.com/ehsanranjbar/kvutil/expr"
 	"github.com/ehsanranjbar/kvutil/kv"
+	"github.com/ehsanranjbar/kvutil/schema"
 	extstore "github.com/ehsanranjbar/kvutil/store/ext"
 	refstore "github.com/ehsanranjbar/kvutil/store/ref"
 )
@@ -40,16 +41,16 @@ type Indexer[V any] interface {
 }
 
 // KeyRange is a range of index keys. A bound may be the beginning of a key, in which case it
-// stands for all the keys that begin with it: an inclusive bound has them in the range and an
-// exclusive bound has them out of it. A nil bound leaves that side unbounded.
-type KeyRange = expr.Range[[]byte]
+// stands for all the keys that begin with it: a bound that is in the range has them in the
+// range and a bound that is out of it has them out of it.
+type KeyRange = kvutil.Range[[]byte]
 
 // Lookuper is implemented by the indexers that can translate conditions into ranges of keys.
-type Lookuper interface {
-	// Lookup returns the ranges of index keys that have every record that satisfies the
+type Lookuper[V any] interface {
+	// Lookup returns the ranges of index keys that have every record that satisfies all the
 	// conditions. The conditions that the ranges do not enforce are returned as the residual,
 	// which the records must still be checked against.
-	Lookup(conds ...any) (ranges []KeyRange, residual []any, err error)
+	Lookup(conds ...schema.Cond[V]) (ranges []KeyRange, residual []schema.Cond[V], err error)
 }
 
 // Operator is a kind of condition that an index can serve.
@@ -78,6 +79,11 @@ type Descriptor struct {
 	Lossy bool
 	// Covered are the fields that are stored with the entries.
 	Covered []string
+	// Where is the condition that a record must satisfy to be in the index, as text.
+	// It is empty if every record is in the index.
+	Where string
+	// Condition is the condition of Where itself, as a schema.Cond of the type of the records.
+	Condition any
 	// Encoding identifies how the keys and the values of the entries are encoded.
 	// An index whose encoding changes must be built again.
 	Encoding string
@@ -105,6 +111,7 @@ func (d Descriptor) attributes() map[string]string {
 		"fields":   strings.Join(fields, ","),
 		"unique":   strconv.FormatBool(d.Unique),
 		"covered":  strings.Join(d.Covered, ","),
+		"where":    d.Where,
 		"encoding": d.Encoding,
 	}
 }
