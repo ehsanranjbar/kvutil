@@ -1,0 +1,212 @@
+package kvutil_test
+
+import (
+	"fmt"
+	"time"
+
+	"github.com/ehsanranjbar/kvutil"
+	"github.com/ehsanranjbar/kvutil/agg"
+	"github.com/ehsanranjbar/kvutil/field"
+	"github.com/ehsanranjbar/kvutil/index"
+	"github.com/ehsanranjbar/kvutil/iterutil"
+	"github.com/ehsanranjbar/kvutil/kv"
+	"github.com/ehsanranjbar/kvutil/kv/memkv"
+	"github.com/ehsanranjbar/kvutil/kv/prefix"
+	"github.com/ehsanranjbar/kvutil/query/ql"
+	"github.com/ehsanranjbar/kvutil/schema"
+	"github.com/ehsanranjbar/kvutil/store/record"
+	"github.com/ehsanranjbar/kvutil/store/typed"
+)
+
+// The lowest layer is bytes in transactions, the same for every engine.
+func Example_bytes() {
+	db := memkv.New() // or badgerkv.Open(badger.DefaultOptions(dir))
+
+	err := db.Update(func(tx kv.Tx) error {
+		// A part of the keys as a keyspace of its own.
+		users := prefix.New(tx, []byte("users/"))
+		if err := users.Set([]byte("ann"), []byte("admin")); err != nil {
+			return err
+		}
+		return users.Set([]byte("bob"), []byte("guest"))
+	})
+	if err != nil {
+		panic(err)
+	}
+
+	err = db.View(func(tx kv.Tx) error {
+		it, err := tx.Iterator([]byte("users/"), kv.PrefixEnd([]byte("users/")))
+		if err != nil {
+			return err
+		}
+		defer it.Close()
+
+		for ; it.Valid(); it.Next() {
+			value, err := it.Value()
+			if err != nil {
+				return err
+			}
+			fmt.Printf("%s = %s\n", it.Key(), value)
+		}
+		return nil
+	})
+	if err != nil {
+		panic(err)
+	}
+
+	// Output:
+	// users/ann = admin
+	// users/bob = guest
+}
+
+type City struct {
+	Country    string
+	Population int
+}
+
+// A typed store has keys and values of Go types. It is defined once, in a namespace of a
+// schema, and is instantiated for each transaction.
+func Example_typedStore() {
+	sch := schema.New()
+	cities := typed.New[string, City](sch.Namespace("cities"))
+
+	db := memkv.New()
+	// The definitions are checked against the ones that the database was written with.
+	if err := sch.Check(db); err != nil {
+		panic(err)
+	}
+
+	err := db.Update(func(tx kv.Tx) error {
+		store := cities.Instantiate(tx)
+		for name, city := range map[string]City{
+			"lyon":  {Country: "FR", Population: 520_000},
+			"paris": {Country: "FR", Population: 2_100_000},
+			"rome":  {Country: "IT", Population: 2_800_000},
+		} {
+			if err := store.Set(name, &city); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		panic(err)
+	}
+
+	err = db.View(func(tx kv.Tx) error {
+		// The keys sort as their values do, so a range of keys is a range of the store.
+		it, err := cities.Instantiate(tx).Iterator(kvutil.From("m"))
+		if err != nil {
+			return err
+		}
+		for name, city := range iterutil.Of[string, *City](it).All(&err) {
+			fmt.Println(name, city.Country, city.Population)
+		}
+		return err
+	})
+	if err != nil {
+		panic(err)
+	}
+
+	// Output:
+	// paris FR 2100000
+	// rome IT 2800000
+}
+
+type Order struct {
+	ID       int64
+	Customer string
+	Total    int64
+	At       time.Time
+}
+
+func (o *Order) GetId() int64   { return o.ID }
+func (o *Order) SetId(id int64) { o.ID = id }
+
+// A record store keeps values that know their ids. Indexes and aggregations are defined on
+// it, and are kept up to date in the transactions that write the records.
+func Example_records() {
+	sch := schema.New()
+
+	var last int64
+	orders := record.New[int64, Order](sch.Namespace("orders")).
+		WithIDFunc(func(*Order) (int64, error) { last++; return last, nil })
+
+	customer := field.Path[Order, string]("Customer")
+	byCustomer := index.On(orders, "by_customer", customer)
+
+	revenue := agg.Sum(orders, "revenue",
+		func(o *Order) (string, int64, bool) { return o.Customer, o.Total, true },
+		agg.ByTime(func(o *Order) time.Time { return o.At }, agg.Daily, agg.AllTime))
+
+	db := memkv.New()
+	if err := sch.Check(db); err != nil {
+		panic(err)
+	}
+
+	day := func(d int) time.Time { return time.Date(2026, time.March, d, 9, 0, 0, 0, time.UTC) }
+	err := db.Update(func(tx kv.Tx) error {
+		store := orders.Instantiate(tx)
+		for _, o := range []*Order{
+			{Customer: "ann", Total: 30, At: day(1)},
+			{Customer: "bob", Total: 20, At: day(1)},
+			{Customer: "ann", Total: 70, At: day(2)},
+		} {
+			if err := store.Set(o); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		panic(err)
+	}
+
+	err = db.View(func(tx kv.Tx) error {
+		// By the index.
+		it, err := byCustomer.Instantiate(tx).Match("ann")
+		if err != nil {
+			return err
+		}
+		ids, err := iterutil.Of[int64, *Order](it).Keys()
+		if err != nil {
+			return err
+		}
+		fmt.Println("orders of ann:", ids)
+
+		// By conditions, which are also what the text of a query becomes.
+		c, err := ql.For(orders).Parse(`Customer = "ann" AND Total >= 50`)
+		if err != nil {
+			return err
+		}
+		it, err = byCustomer.Instantiate(tx).Lookup(c)
+		if err != nil {
+			return err
+		}
+		ids, err = iterutil.Of[int64, *Order](it).Keys()
+		if err != nil {
+			return err
+		}
+		fmt.Println(c, "->", ids)
+
+		// The aggregation, for a day and for all of time.
+		first, _, err := revenue.Instantiate(tx).At(agg.Daily, "ann", day(1))
+		if err != nil {
+			return err
+		}
+		total, _, err := revenue.Instantiate(tx).Get("ann")
+		if err != nil {
+			return err
+		}
+		fmt.Println("revenue of ann:", first, "on the first day,", total, "in all")
+		return nil
+	})
+	if err != nil {
+		panic(err)
+	}
+
+	// Output:
+	// orders of ann: [1 3]
+	// (Customer = "ann") and (Total >= 50) -> [3]
+	// revenue of ann: 30 on the first day, 100 in all
+}

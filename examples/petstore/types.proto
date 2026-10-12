@@ -7,6 +7,8 @@ message PetRecord {
     int64 categoryId = 2;
     string name = 3;
     Status status = 4;
+    // The time that the pet was added at, in seconds since the Unix epoch.
+    int64 createdAt = 5;
 }
 
 message Pet {
@@ -16,6 +18,7 @@ message Pet {
     repeated string photoUrls = 4;
     repeated Tag tags = 5;
     Status status = 6;
+    int64 createdAt = 7;
 }
 
 message Category {

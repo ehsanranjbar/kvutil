@@ -30,12 +30,7 @@ func main() {
 	srv := NewServer(db)
 	e := echo.New()
 	e.Use(middleware.Logger())
-	e.POST("/pet/:petId/uploadImage", srv.UploadImage)
-	e.GET("/image/:id", srv.GetImage)
-	e.POST("/pet", srv.AddPet)
-	e.GET("/pet/:id", srv.GetPet)
-	e.GET("/pet", srv.GetPets)
-	e.DELETE("/pet/:id", srv.DeletePet)
+	srv.Register(e)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
