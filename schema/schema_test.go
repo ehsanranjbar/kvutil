@@ -321,3 +321,32 @@ func TestPrefixAllocator(t *testing.T) {
 		require.Error(t, sch.Validate())
 	})
 }
+
+func TestNamespaceDefinitions(t *testing.T) {
+	sch := schema.New()
+	pets := sch.Namespace("pets")
+	pets.Define(schema.Definition{Kind: "store"})
+	pets.Sub("data").Define(schema.Definition{Kind: "data", Keys: true})
+	exts := pets.Sub("ext")
+	exts.Sub("by_name").Define(schema.Definition{Kind: "index", Keys: true})
+	exts.Sub("by_age").Define(schema.Definition{Kind: "index", Keys: true})
+	sch.Namespace("owners").Define(schema.Definition{Kind: "store"})
+	require.NoError(t, sch.Validate())
+
+	paths := func(defs []*schema.Definition) []string {
+		var paths []string
+		for _, def := range defs {
+			paths = append(paths, def.Kind+" "+def.Namespace().Path())
+		}
+		return paths
+	}
+
+	// What is defined in a namespace and under it, and nothing of the others.
+	require.Equal(t,
+		[]string{"store pets", "data pets/data", "index pets/ext/by_name", "index pets/ext/by_age"},
+		paths(pets.Definitions()))
+	require.Equal(t,
+		[]string{"index pets/ext/by_name", "index pets/ext/by_age"},
+		paths(exts.Definitions()))
+	require.Empty(t, sch.Namespace("empty").Definitions())
+}

@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/ehsanranjbar/kvutil/iterutil"
+	"github.com/ehsanranjbar/kvutil/kv"
 	"github.com/stretchr/testify/require"
 )
 
@@ -188,3 +189,162 @@ func TestAdvancedIterator(t *testing.T) {
 		require.ErrorIs(t, err, errFailure)
 	})
 }
+
+func TestLookup(t *testing.T) {
+	// The names of the even numbers only, as a store that has no record for the others.
+	names := func(v string) (string, error) {
+		var k int
+		if _, err := fmt.Sscanf(v, "n%d", &k); err != nil {
+			return "", err
+		}
+		if k%2 != 0 {
+			return "", fmt.Errorf("number %d: %w", k, kv.ErrNotFound)
+		}
+		return fmt.Sprint("even", k), nil
+	}
+
+	base := newNumbers(6)
+	found := iterutil.Of(base).Lookup(names)
+	var keys []int
+	var values []string
+	for ; found.Valid(); found.Next() {
+		key, err := found.Key()
+		require.NoError(t, err)
+		value, err := found.Value()
+		require.NoError(t, err)
+		keys, values = append(keys, key), append(values, value)
+	}
+	require.NoError(t, found.Err())
+	require.NoError(t, found.Close())
+	require.Equal(t, []int{0, 2, 4}, keys)
+	require.Equal(t, []string{"even0", "even2", "even4"}, values)
+	require.Equal(t, 1, base.closed)
+
+	// Nothing is found, and nothing is left to find.
+	none := iterutil.Of(newNumbers(4)).Lookup(func(string) (int, error) { return 0, kv.ErrNotFound })
+	require.False(t, none.Valid())
+	none.Next()
+	require.False(t, none.Valid())
+	require.NoError(t, none.Err())
+
+	// An error other than a record that is not there stops the iterator.
+	_, err := iterutil.Of(newNumbers(4)).Lookup(func(v string) (int, error) {
+		if v == "n2" {
+			return 0, errFailure
+		}
+		return len(v), nil
+	}).Values()
+	require.ErrorIs(t, err, errFailure)
+
+	failing := newNumbers(4)
+	failing.failAt = 1
+	_, err = iterutil.Of(failing).Lookup(names).Keys()
+	require.ErrorIs(t, err, errFailure)
+}
+
+func TestFlatMap(t *testing.T) {
+	var inners []*numbers
+	// Every number k has the numbers below it, and the odd ones have no iterator at all.
+	below := func(k int, _ string) (iterutil.Iterator[int, string], error) {
+		if k%2 != 0 {
+			return nil, nil
+		}
+		inner := newNumbers(k)
+		inners = append(inners, inner)
+		return inner, nil
+	}
+
+	base := newNumbers(5)
+	keys, err := iterutil.Of(base).FlatMap(below).Keys()
+	require.NoError(t, err)
+	// 0 has none, 2 has 0 and 1, 4 has 0 to 3.
+	require.Equal(t, []int{0, 1, 0, 1, 2, 3}, keys)
+	require.Equal(t, 1, base.closed)
+	require.Len(t, inners, 3)
+	for _, inner := range inners {
+		require.Equal(t, 1, inner.closed)
+	}
+
+	values, err := iterutil.Of(newNumbers(3)).FlatMap(below).Limit(1).Values()
+	require.NoError(t, err)
+	require.Equal(t, []string{"n0"}, values)
+
+	// The types of the keys and the values can change.
+	pairs, err := iterutil.Of(newNumbers(3)).
+		FlatMap(func(k int, v string) (iterutil.Iterator[string, int], error) {
+			return iterutil.Of[int, string](newNumbers(k)).Map(func(int, string) (int, error) { return k, nil }).
+				FlatMap(func(_ int, n int) (iterutil.Iterator[string, int], error) {
+					return &one[string, int]{key: v, value: n}, nil
+				}), nil
+		}).
+		Aggregate("", func(s string, k string, v int) string { return s + fmt.Sprint(k, "=", v, " ") })
+	require.NoError(t, err)
+	require.Equal(t, "n1=1 n2=2 n2=2 ", pairs)
+
+	// An iterator that is closed early closes the one that it is in the middle of.
+	inners = nil
+	base = newNumbers(5)
+	it := iterutil.Of(base).FlatMap(below)
+	for ; it.Valid(); it.Next() {
+		if k, _ := it.Key(); k == 1 {
+			break
+		}
+	}
+	require.NoError(t, it.Close())
+	require.False(t, it.Valid())
+	require.Equal(t, 1, base.closed)
+	for _, inner := range inners {
+		require.Equal(t, 1, inner.closed)
+	}
+
+	t.Run("Errors", func(t *testing.T) {
+		// Of the function.
+		_, err := iterutil.Of(newNumbers(3)).
+			FlatMap(func(k int, _ string) (iterutil.Iterator[int, string], error) {
+				if k == 1 {
+					return nil, errFailure
+				}
+				return newNumbers(1), nil
+			}).Keys()
+		require.ErrorIs(t, err, errFailure)
+
+		// Of the base iterator.
+		failing := newNumbers(4)
+		failing.failAt = 2
+		_, err = iterutil.Of(failing).FlatMap(below).Keys()
+		require.ErrorIs(t, err, errFailure)
+
+		// Of an iterator that the function returns, which stops what comes after it too.
+		var inner *numbers
+		got, err := iterutil.Of(newNumbers(3)).
+			FlatMap(func(k int, _ string) (iterutil.Iterator[int, string], error) {
+				if k != 1 {
+					return newNumbers(2), nil
+				}
+				inner = newNumbers(3)
+				return iterutil.Of[int, string](inner).Lookup(func(v string) (string, error) {
+					if v == "n1" {
+						return "", errFailure
+					}
+					return v, nil
+				}), nil
+			}).Values()
+		require.ErrorIs(t, err, errFailure)
+		// What came before the failure, and nothing of the iterator of 2.
+		require.Equal(t, []string{"n0", "n1", "n0"}, got)
+		require.Equal(t, 1, inner.closed)
+	})
+}
+
+// one iterates over one record.
+type one[K, V any] struct {
+	key   K
+	value V
+	done  bool
+}
+
+func (it *one[K, V]) Valid() bool       { return !it.done }
+func (it *one[K, V]) Next()             { it.done = true }
+func (it *one[K, V]) Key() (K, error)   { return it.key, nil }
+func (it *one[K, V]) Value() (V, error) { return it.value, nil }
+func (it *one[K, V]) Close() error      { return nil }

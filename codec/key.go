@@ -130,6 +130,8 @@ func errShort(name string, got, want int) error {
 // keyCodecProvider is implemented by the types of this package that know their own key codec.
 type keyCodecProvider interface {
 	keyCodec() (any, error)
+	// anyKeyCodec returns the same codec as a codec of any value, which must be of the type.
+	anyKeyCodec() (KeyCodec[any], error)
 }
 
 // IntKey returns the key codec of an integer type. The keys have a fixed width and sort

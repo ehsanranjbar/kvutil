@@ -17,6 +17,7 @@ require (
 	github.com/bits-and-blooms/bitset v1.12.0 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
+	github.com/dchest/siphash v1.2.1 // indirect
 	github.com/dgraph-io/ristretto/v2 v2.2.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
@@ -24,10 +25,14 @@ require (
 	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/golang/protobuf v1.5.2 // indirect
 	github.com/google/flatbuffers v25.2.10+incompatible // indirect
+	github.com/jmespath/go-jmespath v0.0.0-20180206201540-c2b33e8439af // indirect
 	github.com/klauspost/compress v1.18.0 // indirect
+	github.com/leekchan/timeutil v0.0.0-20150802142658-28917288c48d // indirect
 	github.com/lytics/datemath v0.0.0-20180727225141-3ada1c10b5de // indirect
 	github.com/mb0/glob v0.0.0-20160210091149-1eb79d2de6c4 // indirect
 	github.com/mschoch/smat v0.2.0 // indirect
+	github.com/mssola/user_agent v0.5.0 // indirect
+	github.com/pborman/uuid v1.2.0 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/stretchr/objx v0.5.2 // indirect
 	github.com/vmihailenco/tagparser/v2 v2.0.0 // indirect

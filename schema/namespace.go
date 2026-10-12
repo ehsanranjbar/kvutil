@@ -152,6 +152,27 @@ func (ns *Namespace) Definition() *Definition {
 	return ns.def
 }
 
+// Definitions returns what is defined in the namespace and in the namespaces under it,
+// parents before their children: a store before its indexes.
+func (ns *Namespace) Definitions() []*Definition {
+	s := ns.schema
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var defs []*Definition
+	var walk func(n *Namespace)
+	walk = func(n *Namespace) {
+		if n.def != nil {
+			defs = append(defs, n.def)
+		}
+		for _, child := range n.children {
+			walk(child)
+		}
+	}
+	walk(ns)
+	return defs
+}
+
 // Cascade records that writing to this namespace may write to another one too,
 // like deleting a record that deletes the records that belong to it.
 func (ns *Namespace) Cascade(to *Namespace) {

@@ -11,6 +11,7 @@ import (
 
 	"github.com/ehsanranjbar/kvutil"
 	"github.com/ehsanranjbar/kvutil/cond"
+	"github.com/ehsanranjbar/kvutil/field"
 	"github.com/ehsanranjbar/kvutil/kv"
 	"github.com/ehsanranjbar/kvutil/schema"
 	extstore "github.com/ehsanranjbar/kvutil/store/ext"
@@ -173,6 +174,20 @@ func (x *Index[K, V]) Indexer() Indexer[V] {
 	return x.indexer
 }
 
+// Fields returns the fields that the index finds the records by, in the order that they have
+// in its keys. It returns nil if the indexer of the index is not one of fields.
+func (x *Index[K, V]) Fields() []field.Component[V] {
+	if f, ok := x.indexer.(fielded[V]); ok {
+		return f.Fields()
+	}
+	return nil
+}
+
+// fielded is implemented by the indexers whose keys are made of fields.
+type fielded[V any] interface {
+	Fields() []field.Component[V]
+}
+
 // Namespace returns the namespace that the index keeps its entries in.
 func (x *Index[K, V]) Namespace() *schema.Namespace {
 	return x.refs.Namespace()
@@ -201,6 +216,7 @@ func (m maintainer[K, V]) UseNamespace(ns *schema.Namespace) {
 		ValueType:  reflect.TypeFor[V]().String(),
 		Attributes: x.desc.attributes,
 		Descriptor: x.desc,
+		Object:     x,
 	}
 	if x.desc.Unique {
 		x.refs = refstore.NewUnique(ns, def)

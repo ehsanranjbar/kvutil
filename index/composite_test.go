@@ -5,6 +5,7 @@ import (
 	"cmp"
 	"math/rand/v2"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/ehsanranjbar/kvutil"
@@ -477,4 +478,64 @@ func TestUniqueComposite(t *testing.T) {
 		return nil
 	})
 	require.NoError(t, err)
+}
+
+func TestFields(t *testing.T) {
+	owner := field.Path[pet, string]("Owner")
+	age := field.Path[pet, int]("Age")
+	tags := field.Path[pet, string]("Tags")
+
+	sch := schema.New()
+	pets := extstore.New[int64, pet](sch.Namespace("pets"))
+	byOwner := index.On(pets, "by_owner", owner)
+	byOwnerAge := index.Composite(pets, "by_owner_age", field.List(owner, age.Desc()),
+		// The options wrap the indexer, which still has its fields.
+		index.Where(age.Gte(1)),
+		index.Covering(func(p *pet) string { return p.Name }, nil, "Name"))
+	custom := index.New(pets, "custom", byChipLength{})
+	require.NoError(t, sch.Validate())
+
+	paths := func(parts []field.Component[pet]) []string {
+		var paths []string
+		for _, part := range parts {
+			path := part.Path()
+			if part.Descending() {
+				path += " desc"
+			}
+			paths = append(paths, path)
+		}
+		return paths
+	}
+	require.Equal(t, []string{"Owner"}, paths(byOwner.Fields()))
+	require.Equal(t, []string{"Owner", "Age desc"}, paths(byOwnerAge.Fields()))
+	require.Equal(t, []string{"Tags"}, paths(index.ByFields[pet](tags).Fields()))
+	// An indexer that is not one of fields has none.
+	require.Nil(t, custom.Fields())
+
+	// The fields are what conditions are written with, whatever their types are.
+	untyped, ok := byOwnerAge.Fields()[1].(field.Untyped[pet])
+	require.True(t, ok)
+	cnd, err := untyped.EqAny("3")
+	require.NoError(t, err)
+	require.Equal(t, age.Eq(3).Values, cnd.Values)
+
+	// The indexes of a store are found through the schema, as the things that have the fields.
+	var found []string
+	for _, def := range pets.Namespace().Definitions() {
+		if x, ok := def.Object.(interface{ Fields() []field.Component[pet] }); ok {
+			found = append(found, def.Namespace().Name()+": "+strings.Join(paths(x.Fields()), ", "))
+		}
+	}
+	require.Equal(t, []string{"by_owner: Owner", "by_owner_age: Owner, Age desc", "custom: "}, found)
+}
+
+// byChipLength is an indexer that is not made of fields.
+type byChipLength struct{}
+
+func (byChipLength) Index(p *pet) ([]index.Entry, error) {
+	return []index.Entry{{Key: []byte{byte(len(p.Chip))}}}, nil
+}
+
+func (byChipLength) Descriptor() index.Descriptor {
+	return index.Descriptor{Encoding: "chip-length"}
 }

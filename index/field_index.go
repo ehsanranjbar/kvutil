@@ -78,6 +78,14 @@ func (c *coveringIndexer[V, C]) Descriptor() Descriptor {
 	return desc
 }
 
+// Fields returns the fields of the wrapped indexer, if it is one of fields.
+func (c *coveringIndexer[V, C]) Fields() []field.Component[V] {
+	if f, ok := c.Indexer.(fielded[V]); ok {
+		return f.Fields()
+	}
+	return nil
+}
+
 // Ranges implements the RangePlanner interface, if the wrapped indexer does.
 func (c *coveringIndexer[V, C]) Ranges(conds ...cond.Cond[V]) ([]Bounds, []cond.Cond[V], error) {
 	l, ok := c.Indexer.(RangePlanner[V])

@@ -27,6 +27,15 @@ func (Pair[A, B]) keyCodec() (any, error) {
 	return PairKey(first, second), nil
 }
 
+// anyKeyCodec implements the keyCodecProvider interface.
+func (p Pair[A, B]) anyKeyCodec() (KeyCodec[any], error) {
+	c, err := p.keyCodec()
+	if err != nil {
+		return nil, err
+	}
+	return anyKeyOf(c.(KeyCodec[Pair[A, B]])), nil
+}
+
 // PairKey returns the key codec of the pairs of two types, given the key codecs of the two.
 func PairKey[A, B any](first KeyCodec[A], second KeyCodec[B]) KeyCodec[Pair[A, B]] {
 	return pairKey[A, B]{first: first, second: second}

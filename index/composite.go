@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/ehsanranjbar/kvutil"
@@ -33,6 +34,11 @@ func ByFields[V any](parts ...field.Component[V]) *FieldsIndexer[V] {
 		paths[part.Path()] = struct{}{}
 	}
 	return &FieldsIndexer[V]{parts: parts}
+}
+
+// Fields returns the fields of the indexer, in the order that they have in the keys.
+func (x *FieldsIndexer[V]) Fields() []field.Component[V] {
+	return slices.Clone(x.parts)
 }
 
 // Index implements the Indexer interface.
@@ -285,6 +291,14 @@ func (c *conditional[V]) Descriptor() Descriptor {
 	desc.Where = c.cnd.String()
 	desc.Condition = c.cnd
 	return desc
+}
+
+// Fields returns the fields of the wrapped indexer, if it is one of fields.
+func (c *conditional[V]) Fields() []field.Component[V] {
+	if f, ok := c.Indexer.(fielded[V]); ok {
+		return f.Fields()
+	}
+	return nil
 }
 
 // Ranges implements the RangePlanner interface, if the wrapped indexer does.

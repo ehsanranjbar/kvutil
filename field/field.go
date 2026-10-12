@@ -20,10 +20,12 @@ type Field[V, F any] struct {
 	multi bool
 	desc  bool
 	codec codec.KeyCodec[F]
+	// The type of the values, which is F unless the field was found by Reflect.
+	typ reflect.Type
 }
 
 func newField[V, F any](path string, get func(*V) []F, multi bool, c []codec.KeyCodec[F]) Field[V, F] {
-	f := Field[V, F]{path: path, get: get, multi: multi}
+	f := Field[V, F]{path: path, get: get, multi: multi, typ: reflect.TypeFor[F]()}
 	switch len(c) {
 	case 0:
 		kc, err := codec.KeyFor[F]()
@@ -61,41 +63,11 @@ func Each[V, F any](path string, get func(*V) []F, c ...codec.KeyCodec[F]) Field
 // as a value. It panics if the struct has no such field, if the field is of another type,
 // or if the type has no key codec and none is given.
 func Path[V, F any](path string, c ...codec.KeyCodec[F]) Field[V, F] {
-	rt := reflect.TypeFor[V]()
+	value, t, err := Accessor[V](path)
+	if err != nil {
+		panic(err.Error())
+	}
 	ft := reflect.TypeFor[F]()
-
-	var index []int
-	t := rt
-	for _, part := range strings.Split(path, ".") {
-		for t.Kind() == reflect.Pointer {
-			t = t.Elem()
-		}
-		if t.Kind() != reflect.Struct {
-			panic(fmt.Sprintf("field %q: %s has no fields", path, t))
-		}
-		sf, ok := t.FieldByName(part)
-		if !ok {
-			panic(fmt.Sprintf("field %q: %s has no field %s", path, t, part))
-		}
-		if !sf.IsExported() {
-			panic(fmt.Sprintf("field %q: the field %s of %s is not exported", path, part, t))
-		}
-		index = append(index, sf.Index...)
-		t = sf.Type
-	}
-
-	// value returns the field of a record, unless a pointer on the way to it is nil.
-	value := func(v *V) (reflect.Value, bool) {
-		rv := reflect.ValueOf(v).Elem()
-		for rv.Kind() == reflect.Pointer {
-			if rv.IsNil() {
-				return rv, false
-			}
-			rv = rv.Elem()
-		}
-		fv, err := rv.FieldByIndexErr(index)
-		return fv, err == nil
-	}
 
 	switch {
 	case t == ft:
@@ -129,7 +101,104 @@ func Path[V, F any](path string, c ...codec.KeyCodec[F]) Field[V, F] {
 			return values
 		}, true, c)
 	}
-	panic(fmt.Sprintf("field %q: the field of %s is a %s, not a %s", path, rt, t, ft))
+	panic(fmt.Sprintf("field %q: the field of %s is a %s, not a %s", path, reflect.TypeFor[V](), t, ft))
+}
+
+// Accessor returns the function that reads the field of a struct at a path by reflection, and
+// the type of that field. The parts of the path are the names of the fields, with dots between
+// them. The function reports whether the field can be reached in a record, which it cannot be
+// behind a pointer that is nil. It returns an error if the struct has no such field.
+func Accessor[V any](path string) (get func(*V) (reflect.Value, bool), t reflect.Type, err error) {
+	var index []int
+	t = reflect.TypeFor[V]()
+	for _, part := range strings.Split(path, ".") {
+		for t.Kind() == reflect.Pointer {
+			t = t.Elem()
+		}
+		if t.Kind() != reflect.Struct {
+			return nil, nil, fmt.Errorf("field %q: %s has no fields", path, t)
+		}
+		sf, ok := t.FieldByName(part)
+		if !ok {
+			return nil, nil, fmt.Errorf("field %q: %s has no field %s", path, t, part)
+		}
+		if !sf.IsExported() {
+			return nil, nil, fmt.Errorf("field %q: the field %s of %s is not exported", path, part, t)
+		}
+		index = append(index, sf.Index...)
+		t = sf.Type
+	}
+
+	return func(v *V) (reflect.Value, bool) {
+		rv := reflect.ValueOf(v).Elem()
+		for rv.Kind() == reflect.Pointer {
+			if rv.IsNil() {
+				return rv, false
+			}
+			rv = rv.Elem()
+		}
+		fv, err := rv.FieldByIndexErr(index)
+		return fv, err == nil
+	}, t, nil
+}
+
+// Reflect defines a field by the path of a field of a struct, like Path does, for a field
+// whose type is only known when the program runs: one that is named in the text of a query.
+// The values of the field are of the type that Type returns. Like with Path, the field of the
+// struct may be a pointer to its values or a slice of them. The field has the key codec that
+// KeyFor returns for the type of its values, so it compares as a field that is defined with
+// Path does. It returns an error if the struct has no such field, or if the type has no key codec.
+func Reflect[V any](path string) (Field[V, any], error) {
+	value, t, err := Accessor[V](path)
+	if err != nil {
+		return Field[V, any]{}, err
+	}
+
+	var (
+		f Field[V, any]
+		c codec.KeyCodec[any]
+	)
+	if c, err = codec.KeyForType(t); err == nil {
+		f = newField(path, func(v *V) []any {
+			fv, ok := value(v)
+			if !ok {
+				return nil
+			}
+			return []any{fv.Interface()}
+		}, false, []codec.KeyCodec[any]{c})
+	} else if t.Kind() == reflect.Pointer {
+		t = t.Elem()
+		if c, err = codec.KeyForType(t); err == nil {
+			f = newField(path, func(v *V) []any {
+				fv, ok := value(v)
+				if !ok || fv.IsNil() {
+					return nil
+				}
+				return []any{fv.Elem().Interface()}
+			}, false, []codec.KeyCodec[any]{c})
+		}
+	} else if t.Kind() == reflect.Slice {
+		t = t.Elem()
+		if c, err = codec.KeyForType(t); err == nil {
+			f = newField(path, func(v *V) []any {
+				fv, ok := value(v)
+				if !ok {
+					return nil
+				}
+				values := make([]any, fv.Len())
+				for i := range values {
+					values[i] = fv.Index(i).Interface()
+				}
+				return values
+			}, true, []codec.KeyCodec[any]{c})
+		}
+	}
+	if err != nil {
+		return Field[V, any]{}, fmt.Errorf("field %q: %w", path, err)
+	}
+
+	f.typ = t
+	return f, nil
 }
 
 // Desc returns the field with its values sorting from the greatest to the least in the keys
@@ -152,6 +221,12 @@ func (f Field[V, F]) Descending() bool {
 // Multi reports whether a record may have several values for the field.
 func (f Field[V, F]) Multi() bool {
 	return f.multi
+}
+
+// Type returns the type of the values of the field. It is F, unless the field was found by
+// Reflect, whose values are of a type that is only known when the program runs.
+func (f Field[V, F]) Type() reflect.Type {
+	return f.typ
 }
 
 // Codec returns the key codec of the values of the field.
