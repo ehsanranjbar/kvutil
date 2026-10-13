@@ -30,6 +30,9 @@ type File = record.Object[uuid.UUID, []byte]
 type DB struct {
 	*badgerkv.DB
 
+	// Migrated is what was done to the database when it was opened.
+	Migrated *schema.Report
+
 	sequences []*badger.Sequence
 	stop      context.CancelFunc
 	stopped   chan struct{}
@@ -92,8 +95,10 @@ func NewDB(opt badger.Options) (*DB, error) {
 	// protobuf encode themselves, and the files are in the default format.
 	db.categories = record.New[int64, types.Category](sch.Namespace("categories")).
 		WithIDFunc(badgerkv.SequenceID[int64, types.Category](categoryIDs))
-	db.pets = record.New[int64, types.PetRecord](sch.Namespace("pets")).
+	// The pets are of the second version: see migratePets.
+	db.pets = record.New[int64, types.PetRecord](sch.Namespace("pets", schema.Version(2))).
 		WithIDFunc(badgerkv.SequenceID[int64, types.PetRecord](petIDs))
+	migratePets(db.pets)
 	db.images = record.New[uuid.UUID, File](sch.Namespace("images")).
 		WithIDFunc(func(*File) (uuid.UUID, error) { return uuid.New(), nil })
 
@@ -119,9 +124,15 @@ func NewDB(opt badger.Options) (*DB, error) {
 		agg.WithMerge(func(a, b int64) int64 { return a + b }),
 		agg.Describe("count", "", "CreatedAt"))
 
-	// The definitions are checked against the ones that the database was written with.
-	if err := sch.Check(base); err != nil {
-		return nil, fmt.Errorf("the database does not fit its definitions: %w", err)
+	// The database is brought to these definitions before anything uses it: the pets of an
+	// older version are migrated, and an index or an aggregation that the database has not
+	// seen is built from the pets that are there.
+	db.Migrated, err = sch.Migrate(context.Background(), base)
+	if err != nil {
+		return nil, fmt.Errorf("failed to migrate the database: %w", err)
+	}
+	if report := db.Migrated.String(); report != "" {
+		log.Println("migrated the database:\n" + report)
 	}
 
 	ctx, stop := context.WithCancel(context.Background())

@@ -1,6 +1,7 @@
 package kvutil_test
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -71,8 +72,9 @@ func Example_typedStore() {
 	cities := typed.New[string, City](sch.Namespace("cities"))
 
 	db := memkv.New()
-	// The definitions are checked against the ones that the database was written with.
-	if err := sch.Check(db); err != nil {
+	// Once, when the program starts: the database is brought to what is defined, and a
+	// definition that is not the one that its data was written with is an error.
+	if _, err := sch.Migrate(context.Background(), db); err != nil {
 		panic(err)
 	}
 

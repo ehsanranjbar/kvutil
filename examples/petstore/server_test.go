@@ -13,7 +13,12 @@ import (
 	"time"
 
 	badger "github.com/dgraph-io/badger/v4"
+	"github.com/ehsanranjbar/kvutil/examples/petstore/types"
 	"github.com/ehsanranjbar/kvutil/kv"
+	"github.com/ehsanranjbar/kvutil/kv/badgerkv"
+	"github.com/ehsanranjbar/kvutil/relation"
+	"github.com/ehsanranjbar/kvutil/schema"
+	"github.com/ehsanranjbar/kvutil/store/record"
 	echo "github.com/labstack/echo/v4"
 )
 
@@ -296,4 +301,122 @@ func TestReopen(t *testing.T) {
 	if days := get[[]AddedCount](c, "/stats/added?by=month"); len(days) == 0 || days[len(days)-1].Pets != 3 {
 		t.Fatalf("got %+v", days)
 	}
+	// A database of the version of the program has nothing to be done to.
+	if report := db.Migrated.String(); report != "" {
+		t.Fatalf("got the report %q", report)
+	}
+}
+
+// writeFirstVersion writes a database as the first version of the program did: with pets that
+// have no time that they were added at, and without the index and the aggregations.
+func writeFirstVersion(t *testing.T, opt badger.Options) {
+	t.Helper()
+
+	base, err := badgerkv.Open(opt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer base.Close()
+
+	names, err := schema.NewNameRegistry(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sch := schema.New(schema.WithPrefixAllocator(names))
+	categories := record.New[int64, types.Category](sch.Namespace("categories"))
+	pets := record.New[int64, types.PetRecord](sch.Namespace("pets"))
+	relation.Associate(sch.Namespace("category_pets"), categories, pets).
+		WithParentID(func(p *types.PetRecord) (int64, bool) { return p.CategoryId, true })
+	if _, err := sch.Migrate(t.Context(), base); err != nil {
+		t.Fatal(err)
+	}
+
+	err = base.Update(func(tx kv.Tx) error {
+		if err := categories.Instantiate(tx).Set(&types.Category{Id: 100, Name: "dogs"}); err != nil {
+			return err
+		}
+		for id, status := range map[int64]types.Status{100: types.Status_AVAILABLE, 101: types.Status_SOLD} {
+			p := &types.PetRecord{Id: id, CategoryId: 100, Name: fmt.Sprint("pet", id), Status: status}
+			if err := pets.Instantiate(tx).Set(p); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestUpgrade checks that a database of the version of the program before this one is brought
+// to this one when it is opened: its pets are migrated, and the index and the aggregations
+// that it did not have are built from them.
+func TestUpgrade(t *testing.T) {
+	opt := badger.DefaultOptions(t.TempDir()).WithLogger(nil)
+	writeFirstVersion(t, opt)
+
+	before := time.Now().Unix()
+	db, err := NewDB(opt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := db.Migrated.String()
+	for _, line := range []string{
+		`migrated unit "pets" from version 1 to 2`,
+		`built index "pets/ext/by_status"`,
+		`built agg "pets/ext/per_category"`,
+		`built agg "pets/ext/added"`,
+	} {
+		if !strings.Contains(report, line) {
+			t.Fatalf("the report has no %q:\n%s", line, report)
+		}
+	}
+	c := newClient(t, db)
+
+	// The pets have the time of the upgrade.
+	pets := get[[]petJSON](c, "/pet")
+	equal(t, "all", names(pets), []string{"pet100", "pet101"})
+	for _, p := range pets {
+		var createdAt int64
+		fmt.Sscan(p.CreatedAt, &createdAt)
+		if createdAt < before || createdAt > time.Now().Unix() {
+			t.Fatalf("%s was added at %q", p.Name, p.CreatedAt)
+		}
+	}
+
+	// The index and the aggregations know of the pets that were there before them.
+	equal(t, "available", names(get[[]petJSON](c, "/pet?status=available")), []string{"pet100"})
+	equal(t, "sold", names(get[[]petJSON](c, "/pet?status=sold")), []string{"pet101"})
+	type count struct {
+		Name string
+		Pets int64
+	}
+	if counts := get[[]count](c, "/stats/categories"); len(counts) != 1 || counts[0] != (count{"dogs", 2}) {
+		t.Fatalf("got %+v", counts)
+	}
+	today := time.Now().UTC().Format(dateLayout)
+	if days := get[[]AddedCount](c, "/stats/added?from="+today+"&to="+today); len(days) != 1 || days[0].Pets != 2 {
+		t.Fatalf("got %+v", days)
+	}
+
+	// And they are kept up to date from then on.
+	c.addPet("new", "SOLD", map[string]any{"id": 100})
+	equal(t, "sold", names(get[[]petJSON](c, "/pet?status=sold")), []string{"new", "pet101"})
+	if counts := get[[]count](c, "/stats/categories"); counts[0].Pets != 3 {
+		t.Fatalf("got %+v", counts)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// The next time there is nothing to do.
+	db, err = NewDB(opt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if report := db.Migrated.String(); report != "" {
+		t.Fatalf("got the report %q", report)
+	}
+	equal(t, "all", names(get[[]petJSON](newClient(t, db), "/pet")), []string{"new", "pet100", "pet101"})
 }

@@ -27,7 +27,8 @@ index  agg  relation
 store/record      records that know their ids
 store/ext         a typed store that extensions are told of every write of
 store/typed       keys and values of Go types
-schema            namespaces, definitions, and a check of them against the database
+migrate           migrations of the records of a store from the version before
+schema            namespaces, definitions and their versions, and what brings a database to them
 codec             order-preserving keys, values in a default format
 kv                bytes in transactions: the interface of an engine
 kv/badgerkv  kv/memkv  kv/prefix
@@ -81,9 +82,10 @@ values are in the default format of the schema (msgpack, unless the type encodes
 sch := schema.New()
 cities := typed.New[string, City](sch.Namespace("cities"))
 
-// Once, when the program starts: the definitions are checked against the ones that the
-// database was written with, so a changed codec cannot corrupt it silently.
-if err := sch.Check(db); err != nil {
+// Once, when the program starts: the database is brought to what is defined, and a definition
+// that is not the one that its data was written with is an error, so a changed codec cannot
+// corrupt it silently.
+if _, err := sch.Migrate(ctx, db); err != nil {
     panic(err)
 }
 
@@ -164,6 +166,53 @@ err = pets.Instantiate(tx).Set(&Pet{Name: "kit"}, ownership.Under(ownerID))
 children, err := ownership.Instantiate(tx).Children(ownerID)
 ```
 
+## Versions and migrations
+
+The data of a store has a version, which the database records. When the records must be
+converted for the next version of a program to read them, the version is raised and a migration
+says how, as a part of that program. The type that the records had stays in the code next to it.
+
+```go
+users := typed.New[int64, User](sch.Namespace("users", schema.Version(2)))
+
+// UserV1 is a user as version 1 wrote it.
+type UserV1 struct {
+    Name string
+}
+
+migrate.Records(users, 1, func(id int64, old *UserV1) (*User, error) {
+    var u User
+    fmt.Sscan(old.Name, &u.First, &u.Last)
+    return &u, nil // nil deletes the record
+})
+
+report, err := sch.Migrate(ctx, db) // when the program starts, before it uses the database
+fmt.Println(report)                 // migrated unit "users" from version 1 to 2
+```
+
+`Migrate` does what the database needs and nothing else:
+
+| The database has | What `Migrate` does |
+| --- | --- |
+| Nothing of a store | Records it, with its version |
+| An older version | Runs the migrations, a version at a time. One that is missing is an error |
+| A newer version | Fails: the program is older than its data |
+| The same version and another definition | Fails for a store: something changed without a version |
+| No index or aggregation that is defined, or another definition of it | Builds it from the records |
+| An index or aggregation that is not defined any more | Leaves it and marks it, so that it is built again if it comes back |
+| A store that is not defined any more | Fails, unless `sch.Retire("users")` says that its data is to be deleted |
+
+Records are converted in batches, and the place that a migration has come to is saved with
+every batch, so one that is interrupted goes on and converts no record twice. The indexes and
+the aggregations of a store are built again after its migration, so they need none of their own:
+adding, changing or removing an index is only a change of the code. `migrate.Custom` is for
+what is not one record becoming one record. A value that only gets new fields needs no version
+in the formats that leave out what they do not know, like the default one.
+
+`sch.Check(db)` is for the programs that must not change a database and for the databases that
+are always new, like the ones of tests: it records what is new and fails where `Migrate` would
+have work to do.
+
 ## Conditions as text
 
 `query/ql` turns text into the conditions that the indexes take. Comparisons of a field with
@@ -201,15 +250,16 @@ An engine that does not have a capability returns `kv.ErrUnsupported` for it.
 ## What is not there yet
 
 - A planner that chooses the indexes of a query, and queries as text beyond conditions.
-- Building an index for the records that were written before it was defined. An aggregation
-  has `agg.Rebuild` for that.
+- Building an index while the program writes to its store: `Migrate` is alone with the data.
+- A migration that changes the keys of the records, other than by hand in `migrate.Custom`.
 - Records that expire in stores with indexes or aggregations.
 - A second engine besides Badger and the in-memory one.
 
 ## Example
 
 [examples/petstore](examples/petstore) is a small HTTP server on Badger with record stores,
-relations that cascade, an index, two aggregations and a running collector.
+relations that cascade, an index, two aggregations, a running collector, and a migration from
+the version of its pets before.
 
 ```sh
 cd examples/petstore && go run .
@@ -217,7 +267,8 @@ cd examples/petstore && go run .
 
 The examples of the packages, which are run as tests, show each of them in more detail:
 [index](index/example_test.go), [agg](agg/example_test.go), [relation](relation/example_test.go),
-[store/record](store/record/example_test.go), [query/ql](query/ql/example_test.go).
+[store/record](store/record/example_test.go), [migrate](migrate/example_test.go),
+[query/ql](query/ql/example_test.go).
 
 ## Tests
 
