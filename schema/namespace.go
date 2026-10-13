@@ -2,6 +2,7 @@ package schema
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"fmt"
 	"maps"
@@ -24,10 +25,20 @@ type Namespace struct {
 	children []*Namespace
 	def      *Definition
 	cascades []*Namespace
+
+	// version is the version of a namespace at the root, and of everything under it.
+	version uint64
+	// migrations are the migrations of a namespace at the root, by the versions that they
+	// are from.
+	migrations map[uint64]Migration
+	// dependent is set for a namespace whose definitions depend on the data of another one.
+	dependent bool
 }
 
 type namespaceOptions struct {
-	prefix []byte
+	prefix    []byte
+	version   uint64
+	dependent bool
 }
 
 // NamespaceOption is an option of a namespace.
@@ -38,6 +49,26 @@ type NamespaceOption func(*namespaceOptions)
 func WithPrefix(prefix []byte) NamespaceOption {
 	return func(o *namespaceOptions) {
 		o.prefix = bytes.Clone(prefix)
+	}
+}
+
+// Version sets the version of a namespace at the root of a schema, which is the version of the
+// data of everything that is defined in it and under it: a store with its indexes. It is 1 by
+// default. The version is raised when the data must be converted for the program to read it,
+// and a migration from every version before it says how; see Migrate.
+func Version(version uint64) NamespaceOption {
+	return func(o *namespaceOptions) {
+		o.version = version
+	}
+}
+
+// Dependent marks a namespace as the place of things that depend on data that is kept
+// somewhere else, like the extensions of a store. A definition that is added to it when the
+// data is already there must say how it is built from the data, with the Rebuild of its
+// definition, or that it starts empty.
+func Dependent() NamespaceOption {
+	return func(o *namespaceOptions) {
+		o.dependent = true
 	}
 }
 
@@ -53,8 +84,19 @@ func (ns *Namespace) Sub(name string, opts ...NamespaceOption) *Namespace {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	child := &Namespace{schema: s, parent: ns, name: name}
+	child := &Namespace{schema: s, parent: ns, name: name, dependent: ns.dependent || o.dependent}
 	path := child.Path()
+
+	switch {
+	case o.version == 0:
+		if ns.parent == nil {
+			child.version = 1
+		}
+	case ns.parent != nil:
+		s.fail("namespace %q: only a namespace at the root of the schema has a version", path)
+	default:
+		child.version = o.version
+	}
 
 	own := o.prefix
 	switch {
@@ -99,6 +141,41 @@ func (ns *Namespace) Schema() *Schema {
 // Name returns the name of the namespace in its parent.
 func (ns *Namespace) Name() string {
 	return ns.name
+}
+
+// Unit returns the namespace at the root of the schema that this one is in or is itself.
+// It is what has a version and what is migrated as a whole.
+func (ns *Namespace) Unit() *Namespace {
+	for ns.parent != nil && ns.parent.parent != nil {
+		ns = ns.parent
+	}
+	return ns
+}
+
+// Version returns the version of the data of the namespace, which is the one of its unit.
+func (ns *Namespace) Version() uint64 {
+	return ns.Unit().version
+}
+
+// AddMigration adds the migration that converts the data of the unit of the namespace from a
+// version to the next one. A problem with it, like a second migration from the same version,
+// is reported by the Validate of the schema.
+func (ns *Namespace) AddMigration(from uint64, m Migration) {
+	s := ns.schema
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	unit := ns.Unit()
+	switch {
+	case from == 0:
+		s.fail("namespace %q: there is no version 0 to migrate from", unit.Path())
+	case unit.migrations[from] != nil:
+		s.fail("namespace %q has more than one migration from version %d", unit.Path(), from)
+	}
+	if unit.migrations == nil {
+		unit.migrations = map[uint64]Migration{}
+	}
+	unit.migrations[from] = m
 }
 
 // Path returns the names of the namespace and of the namespaces that it is under, joined by slashes.
@@ -243,6 +320,14 @@ type Definition struct {
 	// Object is the thing itself, for whoever needs more of it than its description,
 	// like what runs the background work of the things of a kind.
 	Object any
+	// Rebuild builds the stored data of the thing again from the data that it is derived
+	// from, for something that keeps nothing of its own, like an index. Migrate calls it for
+	// a definition that is new, that has changed, or whose data was migrated, so such a
+	// thing needs no migrations. It is nil for what cannot be built again, like a store.
+	Rebuild func(ctx context.Context, db kv.DB) error
+	// StartEmpty says that the thing has nothing to know of the data that was there before
+	// it was defined. It is for a definition without Rebuild in a Dependent namespace.
+	StartEmpty bool
 
 	ns *Namespace
 }

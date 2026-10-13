@@ -193,8 +193,8 @@ func TestCheck(t *testing.T) {
 		changed.Namespace("owners").Define(schema.Definition{Kind: "index", Keys: true})
 		require.ErrorIs(t, changed.Check(db), schema.ErrChanged)
 
-		// A definition that is gone from the code is not a problem.
-		require.NoError(t, define(attrs).Check(db))
+		// Data that the program does not define any more is not left without a word.
+		require.ErrorIs(t, define(attrs).Check(db), schema.ErrUnknown)
 	})
 }
 

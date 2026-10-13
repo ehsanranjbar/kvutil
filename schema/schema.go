@@ -3,17 +3,12 @@
 package schema
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"sync"
 
 	"github.com/ehsanranjbar/kvutil/codec"
-	"github.com/ehsanranjbar/kvutil/kv"
 )
-
-// ErrChanged is returned by Check for a definition that is not the one the data was written with.
-var ErrChanged = errors.New("schema: definition has changed")
 
 // reservedName is the name of the namespace that the schema keeps its own records in.
 const reservedName = "_schema"
@@ -33,6 +28,7 @@ type Schema struct {
 	root      *Namespace
 	meta      *Namespace
 	errs      []error
+	retired   []string
 }
 
 // Option is an option of a Schema.
@@ -125,44 +121,6 @@ func (s *Schema) Validate() error {
 		if err := def.Validate(); err != nil {
 			errs = append(errs, err)
 		}
-	}
-	return errors.Join(errs...)
-}
-
-// Check validates the schema and compares it with the database. A definition that the database
-// has not seen is recorded. A definition that is not the one that the database has recorded,
-// for example because the codec of a store was replaced, is reported with ErrChanged, as the
-// data that is already there was written by the other one.
-// It is meant to be called once when a program starts, after everything is defined.
-func (s *Schema) Check(db kv.DB) error {
-	if err := s.Validate(); err != nil {
-		return err
-	}
-
-	var errs []error
-	err := db.Update(func(tx kv.Tx) error {
-		errs = nil
-		meta := s.meta.Open(tx)
-		for _, def := range s.Definitions() {
-			key := append([]byte("f/"), def.ns.Path()...)
-			want := def.fingerprint()
-
-			got, err := meta.Get(key)
-			switch {
-			case errors.Is(err, kv.ErrNotFound):
-				if err := meta.Set(key, want); err != nil {
-					return err
-				}
-			case err != nil:
-				return err
-			case !bytes.Equal(got, want):
-				errs = append(errs, fmt.Errorf("%w: %s %q", ErrChanged, def.Kind, def.ns.Path()))
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		return err
 	}
 	return errors.Join(errs...)
 }

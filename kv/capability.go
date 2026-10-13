@@ -1,6 +1,11 @@
 package kv
 
-import "time"
+import (
+	"bytes"
+	"context"
+	"errors"
+	"time"
+)
 
 // TTLWriter is an optional capability of a transaction to write keys that expire.
 type TTLWriter interface {
@@ -63,4 +68,51 @@ func NewBulkWriter(db DB) (BulkWriter, error) {
 		return b.NewBulkWriter(), nil
 	}
 	return nil, ErrUnsupported
+}
+
+// deleteBatch is the number of keys that DeleteRange deletes in a transaction.
+const deleteBatch = 1000
+
+// DeleteRange deletes the keys of a range. It drops the range if the DB can, and deletes the
+// keys a batch at a time if it cannot, so it is not atomic: when it fails or is interrupted,
+// a part of the keys may be gone.
+func DeleteRange(ctx context.Context, db DB, start, end []byte) error {
+	err := DropRange(db, start, end)
+	if !errors.Is(err, ErrUnsupported) {
+		return err
+	}
+
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		n := 0
+		err := db.Update(func(tx Tx) error {
+			n = 0
+			it, err := tx.Iterator(start, end)
+			if err != nil {
+				return err
+			}
+			defer it.Close()
+
+			var keys [][]byte
+			for ; it.Valid() && n < deleteBatch; it.Next() {
+				n++
+				keys = append(keys, bytes.Clone(it.Key()))
+			}
+			for _, key := range keys {
+				if err := tx.Delete(key); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+		if n < deleteBatch {
+			return nil
+		}
+	}
 }
