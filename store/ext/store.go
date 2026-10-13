@@ -108,6 +108,11 @@ func (s *Store[K, V]) Namespace() *schema.Namespace {
 	return s.ns
 }
 
+// DataNamespace returns the namespace that the records are kept in, under the one of the store.
+func (s *Store[K, V]) DataNamespace() *schema.Namespace {
+	return s.data.Namespace()
+}
+
 // Data returns the serialized store that holds the records.
 func (s *Store[K, V]) Data() *typed.Store[K, V] {
 	return s.data

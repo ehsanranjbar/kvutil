@@ -139,6 +139,11 @@ func (s *Store[I, T]) Namespace() *schema.Namespace {
 	return s.base.Namespace()
 }
 
+// DataNamespace returns the namespace that the records are kept in, under the one of the store.
+func (s *Store[I, T]) DataNamespace() *schema.Namespace {
+	return s.base.DataNamespace()
+}
+
 // Instantiate creates the instance of the store for a transaction.
 func (s *Store[I, T]) Instantiate(tx kv.Tx) *Instance[I, T] {
 	return &Instance[I, T]{

@@ -74,6 +74,12 @@ func (s *Store[K, V]) Namespace() *schema.Namespace {
 	return s.ns
 }
 
+// DataNamespace returns the namespace that the records are kept in, which is the namespace of
+// the store itself.
+func (s *Store[K, V]) DataNamespace() *schema.Namespace {
+	return s.ns
+}
+
 // KeyCodec returns the key codec of the store.
 func (s *Store[K, V]) KeyCodec() codec.KeyCodec[K] {
 	return s.keyCodec
