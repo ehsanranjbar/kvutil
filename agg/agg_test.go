@@ -559,11 +559,11 @@ func TestCatalog(t *testing.T) {
 
 	// An aggregation with other buckets has to be built again.
 	changed, _ := define(agg.Daily, agg.Weekly, agg.AllTime)
-	require.ErrorIs(t, changed.Check(db), schema.ErrChanged)
+	require.ErrorIs(t, changed.Check(db), schema.ErrNeedsMigration)
 	ny, err := time.LoadLocation("America/New_York")
 	require.NoError(t, err)
 	changed, _ = define(agg.Daily.In(ny), agg.AllTime)
-	require.ErrorIs(t, changed.Check(db), schema.ErrChanged)
+	require.ErrorIs(t, changed.Check(db), schema.ErrNeedsMigration)
 }
 
 func TestRebuild(t *testing.T) {

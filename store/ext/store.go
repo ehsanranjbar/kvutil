@@ -61,7 +61,9 @@ func NewWithCodecs[K, V any](
 		ValueType: reflect.TypeFor[V]().String(),
 	})
 	s.data = typed.NewWithCodecs(ns.Sub("data", schema.WithPrefix(dataPrefix)), keyCodec, valueCodec)
-	s.extNS = ns.Sub("ext", schema.WithPrefix(extPrefix))
+	// What the extensions keep depends on the records: an extension that is added to a store
+	// that has records must say what it makes of them.
+	s.extNS = ns.Sub("ext", schema.WithPrefix(extPrefix), schema.Dependent())
 	return s
 }
 

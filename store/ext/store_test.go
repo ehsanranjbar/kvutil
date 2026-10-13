@@ -1,6 +1,7 @@
 package ext_test
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"testing"
@@ -409,5 +410,141 @@ func TestDefinitionProblems(t *testing.T) {
 		require.NoError(t, sch.Validate())
 		require.Equal(t, "string", store.KeyCodec().Name())
 		require.Equal(t, "json", store.ValueCodec().Name())
+	})
+}
+
+// names is an extension that keeps the names of the pets in a namespace that it defines.
+type names struct {
+	recorder
+	define func(names *names, def *schema.Definition)
+	store  *extstore.Store[int64, pet]
+}
+
+func (n *names) UseNamespace(ns *schema.Namespace) {
+	n.ns = ns
+	def := schema.Definition{Kind: "names", Keys: true}
+	if n.define != nil {
+		n.define(n, &def)
+	}
+	ns.Define(def)
+}
+
+// rebuild writes the names of the pets that the store has.
+func (n *names) rebuild(ctx context.Context, db kv.DB) error {
+	return db.Update(func(tx kv.Tx) error {
+		it, err := n.store.Records(tx, kvutil.All[int64]())
+		if err != nil {
+			return err
+		}
+		defer it.Close()
+
+		for ; it.Valid(); it.Next() {
+			key, err := it.Key()
+			if err != nil {
+				return err
+			}
+			p, err := it.Value()
+			if err != nil {
+				return err
+			}
+			rawKey, err := n.store.KeyCodec().Encode(key)
+			if err != nil {
+				return err
+			}
+			if err := n.ns.Open(tx).Set(rawKey, []byte(p.Name)); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// TestExtensionOfAStoreWithRecords checks that an extension that keeps data, and that is added
+// to a store that has records, must say what it makes of them.
+func TestExtensionOfAStoreWithRecords(t *testing.T) {
+	testkv.Each(t, func(t *testing.T, db kv.DB) {
+		ctx := context.Background()
+		var events []string
+		program := func(define func(*names, *schema.Definition)) (*schema.Schema, *extstore.Store[int64, pet], *names) {
+			sch := schema.New()
+			store := extstore.New[int64, pet](sch.Namespace("pets"))
+			if define == nil {
+				return sch, store, nil
+			}
+			n := &names{recorder: recorder{name: "names", events: &events}, define: define, store: store}
+			store.AddExtension("names", n)
+			return sch, store, n
+		}
+		count := func(n *names) (count int) {
+			require.NoError(t, db.View(func(tx kv.Tx) error {
+				it, err := n.ns.Open(tx).Iterator(nil, nil)
+				require.NoError(t, err)
+				defer it.Close()
+				for ; it.Valid(); it.Next() {
+					count++
+				}
+				return nil
+			}))
+			return count
+		}
+
+		sch, store, _ := program(nil)
+		_, err := sch.Migrate(ctx, db)
+		require.NoError(t, err)
+		require.NoError(t, db.Update(func(tx kv.Tx) error {
+			if err := store.Instantiate(tx).Set(1, &pet{Name: "rex"}); err != nil {
+				return err
+			}
+			return store.Instantiate(tx).Set(2, &pet{Name: "tom"})
+		}))
+
+		// It says nothing.
+		plain := func(*names, *schema.Definition) {}
+		sch, _, _ = program(plain)
+		_, err = sch.Migrate(ctx, db)
+		require.ErrorIs(t, err, schema.ErrCannotBuild)
+		require.ErrorContains(t, err, `names "pets/ext/names"`)
+		require.ErrorIs(t, sch.Check(db), schema.ErrCannotBuild)
+
+		// It is built from the records, like an index.
+		sch, _, n := program(func(n *names, def *schema.Definition) { def.Rebuild = n.rebuild })
+		require.ErrorIs(t, sch.Check(db), schema.ErrNeedsMigration)
+		report, err := sch.Migrate(ctx, db)
+		require.NoError(t, err)
+		require.Equal(t, `built names "pets/ext/names"`, report.String())
+		require.Equal(t, 2, count(n))
+
+		// Or it has nothing to know of the records that were there before it, in a database
+		// that has not seen it.
+		db2 := testkv.NewMem(t)
+		sch, store, _ = program(nil)
+		_, err = sch.Migrate(ctx, db2)
+		require.NoError(t, err)
+		require.NoError(t, db2.Update(func(tx kv.Tx) error {
+			return store.Instantiate(tx).Set(1, &pet{Name: "rex"})
+		}))
+		sch, store, n = program(func(_ *names, def *schema.Definition) { def.StartEmpty = true })
+		report, err = sch.Migrate(ctx, db2)
+		require.NoError(t, err)
+		require.Equal(t, `recorded names "pets/ext/names"`, report.String())
+		require.NoError(t, db2.Update(func(tx kv.Tx) error {
+			return store.Instantiate(tx).Set(2, &pet{Name: "tom"})
+		}))
+		require.NoError(t, db2.View(func(tx kv.Tx) error {
+			it, err := n.ns.Open(tx).Iterator(nil, nil)
+			require.NoError(t, err)
+			defer it.Close()
+			require.True(t, it.Valid())
+			value, err := it.Value()
+			require.NoError(t, err)
+			require.Equal(t, "tom", string(value))
+			it.Next()
+			require.False(t, it.Valid())
+			return nil
+		}))
+
+		// With a store that is new, it needs to say nothing.
+		sch, _, _ = program(plain)
+		require.NoError(t, sch.Check(testkv.NewMem(t)))
 	})
 }

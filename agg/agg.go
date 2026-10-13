@@ -14,6 +14,7 @@ package agg
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"reflect"
@@ -450,6 +451,11 @@ func (m maintainer[K, V, G, X, S]) UseNamespace(ns *schema.Namespace) {
 		Attributes: a.desc.attributes,
 		Descriptor: a.desc,
 		Object:     a,
+		// An aggregation is derived from the records, so it is built for the ones that
+		// are there when it is defined, and again when it or the records have changed.
+		Rebuild: func(ctx context.Context, db kv.DB) error {
+			return Rebuild(ctx, db, a)
+		},
 	})
 }
 

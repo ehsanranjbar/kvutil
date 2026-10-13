@@ -3,6 +3,7 @@ package index
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"reflect"
@@ -217,6 +218,11 @@ func (m maintainer[K, V]) UseNamespace(ns *schema.Namespace) {
 		Attributes: x.desc.attributes,
 		Descriptor: x.desc,
 		Object:     x,
+		// An index is derived from the records, so it is built for the ones that are there
+		// when it is defined, and again when it or the records have changed.
+		Rebuild: func(ctx context.Context, db kv.DB) error {
+			return Rebuild(ctx, db, x)
+		},
 	}
 	if x.desc.Unique {
 		x.refs = refstore.NewUnique(ns, def)

@@ -423,7 +423,7 @@ func TestCatalog(t *testing.T) {
 		} {
 			changed := schema.New()
 			change(define(changed))
-			require.ErrorIs(t, changed.Check(db), schema.ErrChanged, name)
+			require.ErrorIs(t, changed.Check(db), schema.ErrNeedsMigration, name)
 		}
 	})
 

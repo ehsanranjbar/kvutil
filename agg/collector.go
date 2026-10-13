@@ -157,11 +157,7 @@ func Rebuild[K, V, G, X, S any](ctx context.Context, db kv.DB, a *Aggregation[K,
 
 	// Everything that the aggregation has stored goes first.
 	r := a.ns.Range()
-	err := kv.DropRange(db, r.Start, r.End)
-	if errors.Is(err, kv.ErrUnsupported) {
-		err = clearRange(ctx, db, r, c.batch)
-	}
-	if err != nil {
+	if err := kv.DeleteRange(ctx, db, r.Start, r.End); err != nil {
 		return fmt.Errorf("failed to clear %s: %w", a.collectName(), err)
 	}
 
@@ -220,41 +216,4 @@ func Rebuild[K, V, G, X, S any](ctx context.Context, db kv.DB, a *Aggregation[K,
 	}
 
 	return c.collect(ctx, []collectable{a})
-}
-
-// clearRange deletes the keys of a range, a batch at a time.
-func clearRange(ctx context.Context, db kv.DB, r kv.KeyRange, batch int) error {
-	for {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-
-		n := 0
-		err := db.Update(func(tx kv.Tx) error {
-			n = 0
-			it, err := tx.Iterator(r.Start, r.End)
-			if err != nil {
-				return err
-			}
-			defer it.Close()
-
-			var keys [][]byte
-			for ; it.Valid() && n < batch; it.Next() {
-				n++
-				keys = append(keys, append([]byte(nil), it.Key()...))
-			}
-			for _, key := range keys {
-				if err := tx.Delete(key); err != nil {
-					return err
-				}
-			}
-			return nil
-		})
-		if err != nil {
-			return err
-		}
-		if n < batch {
-			return nil
-		}
-	}
 }

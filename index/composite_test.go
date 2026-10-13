@@ -457,7 +457,7 @@ func TestWhere(t *testing.T) {
 	// An index with another condition has other records in it, so it has to be built again.
 	changed := schema.New()
 	index.On(extstore.New[int64, pet](changed.Namespace("pets")), "old_by_name", nameField, index.Where(ageField.Gte(11)))
-	require.ErrorIs(t, changed.Check(db), schema.ErrChanged)
+	require.ErrorIs(t, changed.Check(db), schema.ErrNeedsMigration)
 }
 
 func TestUniqueComposite(t *testing.T) {
