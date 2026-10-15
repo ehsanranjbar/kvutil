@@ -548,3 +548,54 @@ func TestExtensionOfAStoreWithRecords(t *testing.T) {
 		require.NoError(t, sch.Check(testkv.NewMem(t)))
 	})
 }
+
+// TestRetireExtension checks that the data of an extension that cannot be built again, and that
+// is not added to its store any more, is retired by the name of the extension.
+func TestRetireExtension(t *testing.T) {
+	testkv.Each(t, func(t *testing.T, db kv.DB) {
+		ctx := context.Background()
+		var events []string
+
+		sch := schema.New()
+		store := extstore.New[int64, pet](sch.Namespace("pets"))
+		n := &names{recorder: recorder{name: "names", events: &events}}
+		store.AddExtension("names", n)
+		_, err := sch.Migrate(ctx, db)
+		require.NoError(t, err)
+		require.NoError(t, db.Update(func(tx kv.Tx) error {
+			return store.Instantiate(tx).Set(1, &pet{Name: "rex"})
+		}))
+
+		// Without the extension, its data is not left without a word, which says what deletes it.
+		without := func(retire bool) *schema.Schema {
+			sch := schema.New()
+			store := extstore.New[int64, pet](sch.Namespace("pets"))
+			if retire {
+				store.RetireExtension("names")
+			}
+			return sch
+		}
+		_, err = without(false).Migrate(ctx, db)
+		require.ErrorIs(t, err, schema.ErrUnknown)
+		require.ErrorContains(t, err, `names "pets/ext/names" is in the database: RetireExtension("names") of the store "pets" deletes it`)
+
+		report, err := without(true).Migrate(ctx, db)
+		require.NoError(t, err)
+		require.Equal(t, `retired names "pets/ext/names"`, report.String())
+		require.NoError(t, db.View(func(tx kv.Tx) error {
+			it, err := n.ns.Open(tx).Iterator(nil, nil)
+			require.NoError(t, err)
+			defer it.Close()
+			require.False(t, it.Valid())
+			return nil
+		}))
+		require.NoError(t, without(false).Check(db))
+
+		// An extension that is added cannot be retired.
+		both := schema.New()
+		store = extstore.New[int64, pet](both.Namespace("pets"))
+		store.AddExtension("names", &names{recorder: recorder{name: "names", events: &events}})
+		store.RetireExtension("names")
+		require.ErrorContains(t, both.Validate(), "retired and defined")
+	})
+}

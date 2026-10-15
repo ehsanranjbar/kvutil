@@ -198,9 +198,16 @@ built index "pets/ext/olds"`, migrated(t, db, v2.sch))
 		require.Equal(t, `built index "pets/ext/olds"`, migrated(t, db, v3.sch))
 		v3.verify(t, db, 3)
 
-		// A program without the indexes writes pets, which the indexes do not get to know of.
+		// A program without the indexes deletes them, as it would not keep them up to date.
 		v4 := newKennel(false, 0)
-		require.Contains(t, migrated(t, db, v4.sch), `stale index "pets/ext/by_name"`)
+		require.Contains(t, migrated(t, db, v4.sch), `dropped index "pets/ext/by_name"`)
+		require.NoError(t, db.View(func(tx kv.Tx) error {
+			it, err := v2.byName.Namespace().Open(tx).Iterator(nil, nil)
+			require.NoError(t, err)
+			defer it.Close()
+			require.False(t, it.Valid())
+			return nil
+		}))
 		require.NoError(t, db.Update(func(tx kv.Tx) error {
 			store := v4.pets.Instantiate(tx)
 			for id := int64(1); id <= 200; id++ {

@@ -74,6 +74,14 @@ func (s *Store[K, V]) WithExtension(name string, ext Extension[K, V]) *Store[K, 
 	return s
 }
 
+// RetireExtension says that the data of an extension that is not added to the store any more
+// is to be deleted from the database; see schema.Migrate. The name is the one that the
+// extension was added with. It is for an extension that keeps data that cannot be built again:
+// an index or an aggregation that is not defined any more is deleted without it.
+func (s *Store[K, V]) RetireExtension(name string) {
+	s.extNS.Retire(name)
+}
+
 // AddExtension implements the Extensible interface. It is WithExtension without a result.
 func (s *Store[K, V]) AddExtension(name string, ext Extension[K, V]) {
 	// A name that is taken is reported by the schema. The extension is given its namespace

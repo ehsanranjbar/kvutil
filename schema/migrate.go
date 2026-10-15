@@ -96,15 +96,36 @@ func (m *Migrator) Step(cursor []byte, fn func(tx kv.Tx) error) error {
 	return nil
 }
 
-// Retire says that something that the program does not define any more is to be deleted from
-// the database: Migrate deletes its data and what is recorded of it, with everything under
-// it. The path is the one of its namespace, like "pets" or "pets/ext/by_owner".
-// Without it, an index or an aggregation that is not defined any more is left where it is,
-// and data that cannot be built again is an error.
-func (s *Schema) Retire(path string) {
+// Retire says that a unit that the program does not define any more is to be deleted from the
+// database: Migrate deletes its data, with everything that was under it, and forgets its
+// version. The name is the one that its namespace had at the root of the schema, like "owners".
+// Without it, data that the program does not define is ErrUnknown.
+//
+// A name that is defined is reported by Validate. A name that the database does not have is
+// nothing to do, so the call can stay for as long as a database of the version that had the
+// unit may be met. Nothing needs to be retired for an index or an aggregation, which Migrate
+// deletes when it is not defined any more; see Namespace.Retire for anything else.
+func (s *Schema) Retire(name string) {
+	s.root.Retire(name)
+}
+
+// Retire says that what was defined in the namespace of a name under this one, and is not
+// defined any more, is to be deleted from the database, with everything that was under it.
+// It is for data that cannot be built again, like the one of an extension of a store, which
+// the stores retire by the name of the extension. A name that is defined is reported by Validate.
+func (ns *Namespace) Retire(name string) {
+	s := ns.schema
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	path := name
+	if ns.parent != nil {
+		path = ns.Path() + "/" + name
+	}
+	if name == "" || strings.Contains(name, "/") {
+		s.fail("cannot retire %q: a name must not be empty or have a slash in it", path)
+		return
+	}
 	s.retired = append(s.retired, path)
 }
 
@@ -116,10 +137,10 @@ const (
 	Migrated = "migrated"
 	// Built is for something that was built from the data that it is derived from.
 	Built = "built"
-	// Stale is for something that the program does not define any more and that is left in
-	// the database, to be built again if it is defined again.
-	Stale = "stale"
-	// Retired is for something whose data was deleted.
+	// Dropped is for something that was derived from other data and is not defined any more,
+	// whose data was deleted. It is built again if it is defined again.
+	Dropped = "dropped"
+	// Retired is for something that was retired, whose data was deleted.
 	Retired = "retired"
 )
 
@@ -187,8 +208,8 @@ func (s *Schema) Check(db kv.DB) error {
 // definition has changed, and when the data of its unit was migrated.
 //
 // For what the database has and the program does not define: something that is derived is
-// left there and marked, so that it is built again if it is defined again, as it was not kept
-// up to date in the meantime. Anything else is ErrUnknown. Retire deletes either.
+// deleted, and is built again if it is defined again. Anything else is ErrUnknown, unless it
+// is retired, which deletes it.
 //
 // A migration or a build that is interrupted goes on, or starts again, the next time.
 // When Migrate fails, nothing of what it did before is taken back.
@@ -211,7 +232,10 @@ type work struct {
 	needsRun []string
 }
 
+// retirement is something whose data is to be deleted: something that was retired, or
+// something derived that is not defined any more.
 type retirement struct {
+	what   string
 	path   string
 	kind   string
 	prefix []byte
@@ -245,14 +269,6 @@ func (s *Schema) sync(ctx context.Context, db kv.DB, run bool) (*Report, error) 
 		byUnit[unit] = append(byUnit[unit], def)
 		defined[def.ns.Path()] = def
 	}
-	for _, path := range retired {
-		for defPath := range defined {
-			if under(defPath, path) {
-				return nil, fmt.Errorf("schema: %q is retired and defined", defPath)
-			}
-		}
-	}
-
 	var w *work
 	err := db.Update(func(tx kv.Tx) error {
 		w = &work{units: map[string]unitState{}, defs: map[string]defState{}, settle: map[*Namespace][]*Definition{}}
@@ -264,7 +280,7 @@ func (s *Schema) sync(ctx context.Context, db kv.DB, run bool) (*Report, error) 
 		for _, unit := range units {
 			s.compare(w, stored, unit, byUnit[unit], run)
 		}
-		s.compareUnknown(w, stored, defined, retired)
+		s.compareUnknown(w, stored, defined, retired, run)
 
 		if len(w.errs) > 0 {
 			return nil
@@ -302,7 +318,7 @@ func (s *Schema) sync(ctx context.Context, db kv.DB, run bool) (*Report, error) 
 		if err := s.retire(ctx, db, r); err != nil {
 			return &w.report, err
 		}
-		w.report.Actions = append(w.report.Actions, Action{What: Retired, Kind: r.kind, Path: r.path})
+		w.report.Actions = append(w.report.Actions, Action{What: r.what, Kind: r.kind, Path: r.path})
 	}
 	// A unit that is retired as a whole is forgotten, with its version.
 	err = db.Update(func(tx kv.Tx) error {
@@ -443,7 +459,7 @@ func (s *Schema) cannotBuild(w *work, def *Definition) bool {
 
 // compareUnknown finds what is to be done for what the database has and the program does
 // not define.
-func (s *Schema) compareUnknown(w *work, stored *storedState, defined map[string]*Definition, retired []string) {
+func (s *Schema) compareUnknown(w *work, stored *storedState, defined map[string]*Definition, retired []string, run bool) {
 	paths := make([]string, 0, len(stored.defs))
 	for path := range stored.defs {
 		paths = append(paths, path)
@@ -456,20 +472,39 @@ func (s *Schema) compareUnknown(w *work, stored *storedState, defined map[string
 		}
 		was := stored.defs[path]
 
-		if slices.ContainsFunc(retired, func(r string) bool { return under(path, r) }) {
-			w.needsRun = append(w.needsRun, fmt.Sprintf("%s %q is to be retired", was.Kind, path))
-			w.retire = append(w.retire, retirement{path: path, kind: was.Kind, prefix: was.Prefix})
-			continue
-		}
 		switch {
+		case slices.ContainsFunc(retired, func(r string) bool { return under(path, r) }):
+			w.needsRun = append(w.needsRun, fmt.Sprintf("%s %q is to be retired", was.Kind, path))
+			w.retire = append(w.retire, retirement{what: Retired, path: path, kind: was.Kind, prefix: was.Prefix})
+
 		case !was.Derived:
-			w.fail(ErrUnknown, "%s %q is in the database: Retire deletes it", was.Kind, path)
-		case was.State != stateStale:
-			// Its data is not kept up to date from now on.
-			was.State = stateStale
-			w.defs[path] = was
-			w.report.Actions = append(w.report.Actions, Action{What: Stale, Kind: was.Kind, Path: path})
+			w.fail(ErrUnknown, "%s %q is in the database: %s", was.Kind, path, howToRetire(path))
+
+		default:
+			// What is derived is not kept up to date from now on, so it is of no use. Migrate
+			// deletes it. Check leaves it, marked, so that it is built again if it is defined
+			// again; a program that does not define it does not need it to be gone.
+			if run {
+				w.retire = append(w.retire, retirement{what: Dropped, path: path, kind: was.Kind, prefix: was.Prefix})
+			} else if was.State != stateStale {
+				was.State = stateStale
+				w.defs[path] = was
+			}
 		}
+	}
+}
+
+// howToRetire says what retires something that is at a path.
+func howToRetire(path string) string {
+	parts := strings.Split(path, "/")
+	switch {
+	case len(parts) == 1:
+		return fmt.Sprintf("Retire(%q) of the schema deletes it", path)
+	case len(parts) == 3 && parts[1] == "ext":
+		return fmt.Sprintf("RetireExtension(%q) of the store %q deletes it", parts[2], parts[0])
+	default:
+		i := strings.LastIndex(path, "/")
+		return fmt.Sprintf("Retire(%q) of the namespace %q deletes it", path[i+1:], path[:i])
 	}
 }
 

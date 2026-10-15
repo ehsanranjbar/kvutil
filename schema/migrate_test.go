@@ -401,78 +401,92 @@ func TestMigrateDropped(t *testing.T) {
 		set(t, db, by, "1", "name:rex")
 		set(t, db, owners, "9", "ann")
 
-		// An index that is not defined any more is left where it is, by both.
+		// An index that is not defined any more is deleted: the program would not keep it up
+		// to date, so it is of no use. Nothing needs to be said of it.
 		v2 := func() *program {
 			p := newProgram(1, "v1")
 			p.Namespace("owners").Define(schema.Definition{Kind: "store", Keys: true})
 			return p
 		}
-		require.Equal(t, []string{`stale index "pets/ext/by_name"`}, migrate(t, db, v2().Schema))
+		require.Equal(t, []string{`dropped index "pets/ext/by_name"`}, migrate(t, db, v2().Schema))
+		require.Empty(t, dump(t, db, by))
 		require.Empty(t, migrate(t, db, v2().Schema))
 		require.NoError(t, v2().Check(db))
-		require.Equal(t, []string{"1=name:rex"}, dump(t, db, by))
 
-		// The program without the index does not keep it up to date, so it is not what the
-		// records would give when it is defined again: it is built again.
+		// When it is defined again, it is built from the records as they are then.
 		set(t, db, v1.data, "2", "tom")
-		back := newProgram(1, "v1")
-		back.index("by_name", "name")
-		back.Namespace("owners").Define(schema.Definition{Kind: "store", Keys: true})
-		require.ErrorIs(t, back.Check(db), schema.ErrNeedsMigration)
-		require.Equal(t, []string{`built index "pets/ext/by_name"`}, migrate(t, db, back.Schema))
+		back := func() *program {
+			p := newProgram(1, "v1")
+			p.index("by_name", "name")
+			p.Namespace("owners").Define(schema.Definition{Kind: "store", Keys: true})
+			return p
+		}
+		require.ErrorIs(t, back().Check(db), schema.ErrNeedsMigration)
+		require.Equal(t, []string{`built index "pets/ext/by_name"`}, migrate(t, db, back().Schema))
 		require.Equal(t, []string{"1=name:rex", "2=name:tom"}, dump(t, db, by))
 
-		// Check marks it too, as a program that only checks does not keep it up to date either.
+		// A program that only checks leaves it where it is, marked, as it cannot delete it.
+		// It is built again when it is defined again, and deleted by Migrate when it is not.
 		require.NoError(t, v2().Check(db))
-		back = newProgram(1, "v1")
-		back.index("by_name", "name")
-		back.Namespace("owners").Define(schema.Definition{Kind: "store", Keys: true})
-		require.ErrorIs(t, back.Check(db), schema.ErrNeedsMigration)
-		migrate(t, db, back.Schema)
+		require.Equal(t, []string{"1=name:rex", "2=name:tom"}, dump(t, db, by))
+		require.ErrorIs(t, back().Check(db), schema.ErrNeedsMigration)
+		require.NoError(t, v2().Check(db))
+		require.Equal(t, []string{`dropped index "pets/ext/by_name"`}, migrate(t, db, v2().Schema))
+		require.Empty(t, dump(t, db, by))
+		migrate(t, db, back().Schema)
 
-		// A store that is not defined any more is not left without a word.
+		// A store that is not defined any more is not left without a word, which says what
+		// deletes it.
 		gone := newProgram(1, "v1")
 		gone.index("by_name", "name")
 		_, err := gone.Migrate(context.Background(), db)
 		require.ErrorIs(t, err, schema.ErrUnknown)
-		require.ErrorContains(t, err, `store "owners"`)
+		require.ErrorContains(t, err, `store "owners" is in the database: Retire("owners") of the schema deletes it`)
 		require.ErrorIs(t, gone.Check(db), schema.ErrUnknown)
 		require.Equal(t, []string{"9=ann"}, dump(t, db, owners))
 
-		// Retiring deletes the data, of an index and of a whole unit, with their records.
+		// Retiring it by its name deletes its data and what is recorded of it.
 		retiring := func() *program {
 			p := newProgram(1, "v1")
+			p.index("by_name", "name")
 			p.Retire("owners")
-			p.Retire("pets/ext/by_name")
 			return p
 		}
 		require.ErrorIs(t, retiring().Check(db), schema.ErrNeedsMigration)
 		require.Equal(t, []string{"9=ann"}, dump(t, db, owners))
-		require.Equal(t, []string{
-			`retired store "owners"`,
-			`retired index "pets/ext/by_name"`,
-		}, migrate(t, db, retiring().Schema))
+		require.Equal(t, []string{`retired store "owners"`}, migrate(t, db, retiring().Schema))
 		require.Empty(t, dump(t, db, owners))
-		require.Empty(t, dump(t, db, by))
 		require.Equal(t, []string{"1=rex", "2=tom"}, dump(t, db, v1.data))
+		require.Equal(t, []string{"1=name:rex", "2=name:tom"}, dump(t, db, by))
 
 		// What is retired and gone is nothing to do, and the program can forget of it.
 		require.Empty(t, migrate(t, db, retiring().Schema))
 		require.NoError(t, retiring().Check(db))
-		require.NoError(t, newProgram(1, "v1").Check(db))
+		forgot := newProgram(1, "v1")
+		forgot.index("by_name", "name")
+		require.NoError(t, forgot.Check(db))
 
 		// A unit that was retired starts again as a new one, of any version.
 		again := newProgram(1, "v1")
+		again.index("by_name", "name")
 		again.Namespace("owners", schema.Version(7)).Define(schema.Definition{Kind: "store", Keys: true})
 		require.Equal(t, []string{`recorded store "owners"`}, migrate(t, db, again.Schema))
 
-		// Something cannot be retired and defined.
-		both := newProgram(1, "v1")
-		both.index("by_name", "name")
-		both.Retire("pets/ext")
-		_, err = both.Migrate(context.Background(), db)
-		require.ErrorContains(t, err, "retired and defined")
-		require.Error(t, both.Check(db))
+		// Something cannot be retired and defined, and a name is not a path.
+		for name, define := range map[string]func(p *program){
+			"Unit":      func(p *program) { p.Retire("pets") },
+			"Namespace": func(p *program) { p.pets.Retire("ext") },
+			"Path":      func(p *program) { p.Retire("pets/ext/by_old") },
+			"Empty":     func(p *program) { p.Retire("") },
+		} {
+			p := newProgram(1, "v1")
+			p.index("by_name", "name")
+			define(p)
+			require.Error(t, p.Validate(), name)
+			_, err = p.Migrate(context.Background(), db)
+			require.Error(t, err, name)
+			require.Error(t, p.Check(db), name)
+		}
 	})
 }
 

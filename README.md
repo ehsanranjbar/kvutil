@@ -207,15 +207,17 @@ fmt.Println(report)                 // migrated unit "users" from version 1 to 2
 | A newer version | Fails: the program is older than its data |
 | The same version and another definition | Fails for a store: something changed without a version |
 | No index or aggregation that is defined, or another definition of it | Builds it from the records |
-| An index or aggregation that is not defined any more | Leaves it and marks it, so that it is built again if it comes back |
-| A store that is not defined any more | Fails, unless `sch.Retire("users")` says that its data is to be deleted |
+| An index or aggregation that is not defined any more | Deletes it, as nothing keeps it up to date; it is built again if it comes back |
+| A store that is not defined any more | Fails, unless `sch.Retire("users")`, with the name that it had, says that its data is to be deleted |
 
 Records are converted in batches, and the place that a migration has come to is saved with
 every batch, so one that is interrupted goes on and converts no record twice. The indexes and
 the aggregations of a store are built again after its migration, so they need none of their own:
-adding, changing or removing an index is only a change of the code. `migrate.Custom` is for
-what is not one record becoming one record. A value that only gets new fields needs no version
-in the formats that leave out what they do not know, like the default one.
+adding, changing or removing an index is only a change of the code. Data that cannot be built
+again is retired by the name that it was defined with: `sch.Retire("users")` for a store, and
+`store.RetireExtension("audit")` for an extension of a store that keeps data of its own.
+`migrate.Custom` is for what is not one record becoming one record. A value that only gets new
+fields needs no version in the formats that leave out what they do not know, like the default one.
 
 `sch.Check(db)` is for the programs that must not change a database and for the databases that
 are always new, like the ones of tests: it records what is new and fails where `Migrate` would

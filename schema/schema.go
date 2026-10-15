@@ -5,6 +5,7 @@ package schema
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/ehsanranjbar/kvutil/codec"
@@ -112,9 +113,18 @@ func (s *Schema) fail(format string, args ...any) {
 func (s *Schema) Validate() error {
 	s.mu.Lock()
 	errs := append([]error(nil), s.errs...)
+	retired := append([]string(nil), s.retired...)
 	s.mu.Unlock()
 
 	for _, def := range s.Definitions() {
+		// What is retired is not what is defined.
+		path := def.ns.Path()
+		for _, r := range retired {
+			if path == r || strings.HasPrefix(path, r+"/") {
+				errs = append(errs, fmt.Errorf("schema: %q is retired and defined", path))
+			}
+		}
+
 		if def.Validate == nil {
 			continue
 		}

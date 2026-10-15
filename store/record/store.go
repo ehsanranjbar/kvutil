@@ -139,6 +139,12 @@ func (s *Store[I, T]) Namespace() *schema.Namespace {
 	return s.base.Namespace()
 }
 
+// RetireExtension says that the data of an extension that is not added to the store any more
+// is to be deleted from the database. See the RetireExtension of the ext store.
+func (s *Store[I, T]) RetireExtension(name string) {
+	s.base.RetireExtension(name)
+}
+
 // DataNamespace returns the namespace that the records are kept in, under the one of the store.
 func (s *Store[I, T]) DataNamespace() *schema.Namespace {
 	return s.base.DataNamespace()
