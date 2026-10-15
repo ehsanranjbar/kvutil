@@ -37,6 +37,11 @@ type Collector struct {
 	interval time.Duration
 	onError  func(error)
 	mu       sync.Mutex
+
+	// What a collector that was spawned is stopped with, and what tells that it has stopped.
+	spawned sync.Mutex
+	cancel  context.CancelFunc
+	stopped chan struct{}
 }
 
 // CollectorOption is an option of a Collector.
@@ -146,6 +151,56 @@ func (c *Collector) Run(ctx context.Context) error {
 			return ctx.Err()
 		case <-ticker.C:
 		}
+	}
+}
+
+// Spawn runs the collector in the background, as Run does, until Shutdown is called or the
+// context is done. A collector that is running already is left running, and one that was
+// shut down can be spawned again.
+func (c *Collector) Spawn(ctx context.Context) {
+	c.spawned.Lock()
+	defer c.spawned.Unlock()
+
+	if c.stopped != nil {
+		select {
+		case <-c.stopped:
+			// It has stopped by itself, with its context.
+		default:
+			return
+		}
+	}
+
+	ctx, cancel := context.WithCancel(ctx)
+	stopped := make(chan struct{})
+	c.cancel, c.stopped = cancel, stopped
+	go func() {
+		defer close(stopped)
+		defer cancel()
+		_ = c.Run(ctx)
+	}()
+}
+
+// Shutdown stops a collector that was spawned, and returns once it has stopped. The collector
+// is not cut off: the batch that it is collecting is finished and written, and what is left
+// stays noted for the next collector, so nothing is lost and no state is half written.
+//
+// If the context is done before the collector has stopped, Shutdown returns the error of the
+// context; the collector still stops after its batch. Shutting down a collector that is not
+// running does nothing.
+func (c *Collector) Shutdown(ctx context.Context) error {
+	c.spawned.Lock()
+	cancel, stopped := c.cancel, c.stopped
+	c.spawned.Unlock()
+
+	if stopped == nil {
+		return nil
+	}
+	cancel()
+	select {
+	case <-stopped:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 

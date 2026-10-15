@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"time"
@@ -33,9 +34,8 @@ type DB struct {
 	// Migrated is what was done to the database when it was opened.
 	Migrated *schema.Report
 
-	sequences []*badger.Sequence
-	stop      context.CancelFunc
-	stopped   chan struct{}
+	// The collector folds what the writes left for the aggregations into their states.
+	collector *agg.Collector
 
 	categories *record.Store[int64, types.Category]
 	pets       *record.Store[int64, types.PetRecord]
@@ -57,10 +57,22 @@ type DB struct {
 
 // NewDB opens the database and defines everything that is in it.
 func NewDB(opt badger.Options) (*DB, error) {
+	// The DB looks after Badger: it collects the garbage of the value log in the background,
+	// and releases the sequences that it gives out when it is closed.
 	base, err := badgerkv.Open(opt)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open the database: %w", err)
 	}
+	db, err := define(base)
+	if err != nil {
+		return nil, errors.Join(err, base.Close())
+	}
+	return db, nil
+}
+
+// define defines everything that is in the database, brings the database to it, and starts
+// what runs in the background.
+func define(base *badgerkv.DB) (*DB, error) {
 	db := &DB{DB: base}
 
 	// The names of the namespaces are given short prefixes, which are kept in the database.
@@ -70,16 +82,14 @@ func NewDB(opt badger.Options) (*DB, error) {
 	}
 	sch := schema.New(schema.WithPrefixAllocator(names))
 
-	// The ids are taken from sequences of Badger, which the general interface does not
-	// have: the Badger database is always at hand for what is specific to it.
+	// The ids are taken from sequences of Badger, which the general interface does not have.
 	sequences := sch.Namespace("sequences")
 	sequences.Define(schema.Definition{Kind: "sequences", Keys: true})
 	sequence := func(name string) (*badger.Sequence, error) {
-		seq, err := base.Badger().GetSequence(append(sequences.Prefix(), name...), 10)
+		seq, err := base.Sequence(append(sequences.Prefix(), name...), 10)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get the sequence of %s: %w", name, err)
 		}
-		db.sequences = append(db.sequences, seq)
 		return seq, nil
 	}
 	categoryIDs, err := sequence("categories")
@@ -135,53 +145,24 @@ func NewDB(opt badger.Options) (*DB, error) {
 		log.Println("migrated the database:\n" + report)
 	}
 
-	ctx, stop := context.WithCancel(context.Background())
-	db.stop, db.stopped = stop, make(chan struct{}, 2)
-
-	// The collector folds what the writes left for the aggregations into their states.
-	// Reading an aggregation does not wait for it.
-	collector := agg.NewCollector(base, sch,
+	// Reading an aggregation does not wait for the collector, which runs in the background.
+	db.collector = agg.NewCollector(base, sch,
 		agg.WithInterval(time.Second),
 		agg.WithErrorHandler(func(err error) { log.Println("collector:", err) }))
-	go func() {
-		defer func() { db.stopped <- struct{}{} }()
-		if err := collector.Run(ctx); err != nil && ctx.Err() == nil {
-			log.Println("collector:", err)
-		}
-	}()
-
-	// The garbage collection of the value log is specific to Badger too.
-	go func() {
-		defer func() { db.stopped <- struct{}{} }()
-
-		ticker := time.NewTicker(5 * time.Minute)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				for base.Badger().RunValueLogGC(0.7) == nil {
-				}
-			}
-		}
-	}()
+	db.collector.Spawn(context.Background())
 
 	return db, nil
 }
 
-// Close stops what runs in the background and closes the database.
-func (db *DB) Close() error {
-	db.stop()
-	<-db.stopped
-	<-db.stopped
+// closeTimeout is how long Close waits for the collector to finish the batch that it is in.
+const closeTimeout = 10 * time.Second
 
-	for _, seq := range db.sequences {
-		if err := seq.Release(); err != nil {
-			return err
-		}
-	}
-	return db.DB.Close()
+// Close stops the collector, after the batch that it is in, and closes the database.
+func (db *DB) Close() error {
+	ctx, cancel := context.WithTimeout(context.Background(), closeTimeout)
+	defer cancel()
+	err := db.collector.Shutdown(ctx)
+	return errors.Join(err, db.DB.Close())
 }
 
 // CreateCategory creates a new category.

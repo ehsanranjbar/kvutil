@@ -145,9 +145,17 @@ part of the records (`index.Where`), and can carry values to read without the re
 checks the others on what it finds. The results of several indexes are combined with
 `index.Intersect`, `Union` and `Except`, or as bitmaps.
 
-**Aggregations** never make two writers conflict: a write leaves a small note, and
-`agg.NewCollector(db, sch).Run(ctx)` folds the notes into the states in the background. Reads
-are exact all the same, as they take the notes into account. There are two kinds: `agg.Delta`
+**Aggregations** never make two writers conflict: a write leaves a small note, and a collector
+folds the notes into the states in the background. Reads are exact all the same, as they take
+the notes into account.
+
+```go
+collector := agg.NewCollector(db, sch)
+collector.Spawn(ctx)          // runs in the background
+defer collector.Shutdown(ctx) // stops after the batch that it is in, so nothing is half written
+```
+
+There are two kinds: `agg.Delta`
 for what a record can be taken back out of (`Count`, `Sum`, `Avg`), and `agg.Recompute` for any
 function of the records of a span (`Min`, `Max`, a median). Both can be kept by spans of time,
 like days, weeks and months.
@@ -240,8 +248,9 @@ reach:
 | Keys that expire | `kv.SetWithTTL`, and `SetWithTTL` of a typed store. Not for a store with indexes or aggregations, which would not be told |
 | `DropPrefix` | `kv.DropRange` |
 | `WriteBatch` | `kv.NewBulkWriter` |
-| Sequences | `db.Badger().GetSequence`, and `badgerkv.SequenceID` to take the ids of records from one |
-| Garbage collection of the value log, backup and restore, `Flatten`, `Subscribe`, `Stream`, merge operators | `db.Badger()` |
+| Garbage collection of the value log | Done by the DB that `badgerkv.Open` opens, every 5 minutes; `badgerkv.WithValueLogGC` and `WithoutValueLogGC` change that, and `db.RunValueLogGC()` runs it now |
+| Sequences | `db.Sequence`, which the DB releases when it is closed, and `badgerkv.SequenceID` to take the ids of records from one |
+| Backup and restore, `Flatten`, `Subscribe`, `Stream`, merge operators | `db.Badger()` |
 | The versions of a key, the metadata of an item, managed timestamps | `badgerkv.Unwrap(tx)`, which returns the transaction of Badger |
 | The user metadata byte | Not used |
 

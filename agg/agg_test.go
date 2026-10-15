@@ -731,6 +731,101 @@ func TestCollectorRun(t *testing.T) {
 	require.ErrorIs(t, agg.NewCollector(db, sch).Collect(ctx), context.Canceled)
 }
 
+// slowDB is a database whose writing transactions take a while.
+type slowDB struct {
+	kv.DB
+	delay time.Duration
+}
+
+func (s slowDB) Update(fn func(kv.Tx) error) error {
+	time.Sleep(s.delay)
+	return s.DB.Update(fn)
+}
+
+func TestCollectorSpawn(t *testing.T) {
+	db := memkv.New()
+	sch := schema.New()
+	orders := extstore.New[int64, order](sch.Namespace("orders"))
+	total := agg.Sum(orders, "total", amount)
+	require.NoError(t, sch.Check(db))
+
+	collected := func() (sum int64) {
+		require.NoError(t, db.View(func(tx kv.Tx) error {
+			var err error
+			sum, _, err = total.Instantiate(tx).GetCollected("ann")
+			return err
+		}))
+		return sum
+	}
+	collects := func(want int64) {
+		t.Helper()
+		require.Eventually(t, func() bool { return collected() == want }, 5*time.Second, 2*time.Millisecond)
+	}
+	ctx := context.Background()
+
+	// Shutting down a collector that was never spawned does nothing.
+	c := agg.NewCollector(db, sch, agg.WithInterval(2*time.Millisecond))
+	require.NoError(t, c.Shutdown(ctx))
+
+	// A collector that is spawned collects, and spawning it again leaves it as it is.
+	c.Spawn(ctx)
+	c.Spawn(ctx)
+	require.NoError(t, set(t, db, orders, 1, order{Customer: "ann", Amount: 5}))
+	collects(5)
+
+	// Once it is shut down it collects no more, however often it is shut down.
+	require.NoError(t, c.Shutdown(ctx))
+	require.NoError(t, c.Shutdown(ctx))
+	require.NoError(t, set(t, db, orders, 2, order{Customer: "ann", Amount: 7}))
+	time.Sleep(30 * time.Millisecond)
+	require.Equal(t, int64(5), collected())
+
+	// What was not collected is still noted, for the collector when it is spawned again.
+	c.Spawn(ctx)
+	collects(12)
+
+	// It stops with its context too, and can be spawned again after that.
+	parent, cancel := context.WithCancel(ctx)
+	require.NoError(t, c.Shutdown(ctx))
+	c.Spawn(parent)
+	require.NoError(t, set(t, db, orders, 3, order{Customer: "ann", Amount: 1}))
+	collects(13)
+	cancel()
+	time.Sleep(10 * time.Millisecond)
+	require.NoError(t, set(t, db, orders, 4, order{Customer: "ann", Amount: 1}))
+	time.Sleep(30 * time.Millisecond)
+	require.Equal(t, int64(13), collected())
+	c.Spawn(ctx)
+	collects(14)
+	require.NoError(t, c.Shutdown(ctx))
+
+	t.Run("WhileCollecting", func(t *testing.T) {
+		// A collector that is in the middle of a batch finishes it. Whoever shuts it down
+		// can stop waiting for that, and the collector stops all the same.
+		slow := agg.NewCollector(slowDB{DB: db, delay: 150 * time.Millisecond}, sch, agg.WithInterval(time.Millisecond))
+		for id := int64(10); id < 20; id++ {
+			require.NoError(t, set(t, db, orders, id, order{Customer: "ann", Amount: 1}))
+		}
+		slow.Spawn(ctx)
+		time.Sleep(20 * time.Millisecond)
+
+		impatient, cancel := context.WithTimeout(ctx, 5*time.Millisecond)
+		defer cancel()
+		require.ErrorIs(t, slow.Shutdown(impatient), context.DeadlineExceeded)
+		require.NoError(t, slow.Shutdown(ctx))
+
+		// The batch was written whole, and the aggregation is what the orders give.
+		require.NoError(t, db.View(func(tx kv.Tx) error {
+			sum, _, err := total.Instantiate(tx).Get("ann")
+			require.NoError(t, err)
+			require.Equal(t, int64(24), sum)
+			return nil
+		}))
+		require.NoError(t, agg.NewCollector(db, sch).Collect(ctx))
+		require.Equal(t, int64(24), collected())
+	})
+}
+
 // TestConcurrentWriters has many transactions write into one group at the same time, with the
 // retries of conflicts turned off: writing to an aggregation must not make them conflict.
 func TestConcurrentWriters(t *testing.T) {

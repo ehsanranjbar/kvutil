@@ -4,6 +4,7 @@ package badgerkv
 import (
 	"bytes"
 	"errors"
+	"time"
 
 	badger "github.com/dgraph-io/badger/v4"
 	"github.com/ehsanranjbar/kvutil/kv"
@@ -15,10 +16,17 @@ const DefaultMaxRetries = 10
 type options struct {
 	prefetch   int
 	maxRetries int
+	gc         bool
+	gcInterval time.Duration
+	gcRatio    float64
 }
 
 func newOptions(opts []Option) options {
-	o := options{maxRetries: DefaultMaxRetries}
+	o := options{
+		maxRetries: DefaultMaxRetries,
+		gcInterval: DefaultGCInterval,
+		gcRatio:    DefaultGCDiscardRatio,
+	}
 	for _, opt := range opts {
 		opt(&o)
 	}
@@ -44,27 +52,35 @@ func WithMaxRetries(n int) Option {
 	}
 }
 
-// DB is a badger database as a kv.DB.
+// DB is a badger database as a kv.DB. It also looks after the database: it collects the
+// garbage of the value log in the background, and releases the sequences that it has given
+// out when it is closed.
 type DB struct {
 	db   *badger.DB
 	opts options
+	m    maintenance
 }
 
-// Open opens a badger database.
+// Open opens a badger database. The DB collects the garbage of its value log every
+// DefaultGCInterval, unless an option says otherwise.
 func Open(opt badger.Options, opts ...Option) (*DB, error) {
 	db, err := badger.Open(opt)
 	if err != nil {
 		return nil, err
 	}
-	return Wrap(db, opts...), nil
+	// The garbage is collected unless the options say that it is not.
+	return Wrap(db, append([]Option{WithValueLogGC(DefaultGCInterval, DefaultGCDiscardRatio)}, opts...)...), nil
 }
 
-// Wrap wraps a badger database that is already open.
+// Wrap wraps a badger database that is already open. The DB does not collect the garbage of
+// the value log, unless WithValueLogGC is given.
 func Wrap(db *badger.DB, opts ...Option) *DB {
-	return &DB{
+	d := &DB{
 		db:   db,
 		opts: newOptions(opts),
 	}
+	d.start()
+	return d
 }
 
 // Badger returns the underlying badger database, for the operations that kv does not cover.
@@ -72,9 +88,11 @@ func (d *DB) Badger() *badger.DB {
 	return d.db
 }
 
-// Close closes the database.
+// Close stops what the DB runs in the background, releases the sequences that it has given
+// out, and closes the database. Closing it again does nothing but closing the database again.
 func (d *DB) Close() error {
-	return d.db.Close()
+	err := d.shutdown()
+	return errors.Join(err, d.db.Close())
 }
 
 // View implements the kv.DB interface.
