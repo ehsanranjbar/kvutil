@@ -15,9 +15,13 @@ import (
 // It knows how to take its values from a record and how to encode them so that they sort as
 // they compare. A record may have no value for a field, or several.
 type Field[V, F any] struct {
-	path  string
-	get   func(*V) []F
-	multi bool
+	path string
+	get  func(*V) []F
+	// compute is the function of a computed field, which may fail. It is set instead of get.
+	compute func(*V) ([]F, error)
+	// version identifies what a computed field computes, when that cannot be seen in its path.
+	version string
+	multi   bool
 	// always is set if every record has exactly one value.
 	always bool
 	desc   bool
@@ -58,6 +62,45 @@ func Of[V, F any](path string, get func(*V) F, c ...codec.KeyCodec[F]) Field[V, 
 // It panics if the type of the values has no key codec and none is given.
 func Each[V, F any](path string, get func(*V) []F, c ...codec.KeyCodec[F]) Field[V, F] {
 	return newField(path, get, true, c)
+}
+
+// Computed defines a field by a function that returns the value of a record, or no value for a
+// record that has none, and that can fail. Of and Each cannot: a failure of the function that
+// they take is a mistake of the program. A computed field is for a function that depends on what
+// the record holds, like an expression that is evaluated on it.
+//
+// An error of the function comes out of Keys, so that setting a record in a store with an index
+// on the field fails, rather than the record being left out of the index. Values and AnyValues
+// have no value for a record whose function fails, and the comparisons of the field return the
+// error from their Match. The field is not Always, as a record may have no value. The function
+// returns at most one value, and it is an error if it returns several: ComputedEach is for them.
+// It panics if the type has no key codec and none is given.
+//
+// The function must return the same for the same record, as the entries of an index are
+// computed again to remove them. If what it computes changes, give the field a new version with
+// WithVersion, so that an index on it is built again.
+func Computed[V, F any](path string, get func(*V) ([]F, error), c ...codec.KeyCodec[F]) Field[V, F] {
+	f := newField[V, F](path, nil, false, c)
+	f.compute = func(v *V) ([]F, error) {
+		values, err := get(v)
+		if err != nil {
+			return nil, err
+		}
+		if len(values) > 1 {
+			return nil, fmt.Errorf("field %s: %d values for one record, which a field of one value cannot have", path, len(values))
+		}
+		return values, nil
+	}
+	return f
+}
+
+// ComputedEach defines a field like Computed does, for a function that returns several values
+// for a record. A record is found by each of them, and a record with no value is not found by
+// the field, as with Each.
+func ComputedEach[V, F any](path string, get func(*V) ([]F, error), c ...codec.KeyCodec[F]) Field[V, F] {
+	f := newField[V, F](path, nil, true, c)
+	f.compute = get
+	return f
 }
 
 // Path defines a field by the path of a field of a struct, which is read by reflection.
@@ -285,9 +328,36 @@ func (f Field[V, F]) CodecName() string {
 	return f.codec.Name()
 }
 
-// Values returns the values that a record has for the field.
+// WithVersion returns the field with a version, which identifies what it computes. The version
+// is a part of what an index on the field is identified by: the index is built again when the
+// version changes. It is for a field that is computed by a function whose code the path cannot
+// tell the changes of.
+func (f Field[V, F]) WithVersion(version string) Field[V, F] {
+	f.version = version
+	return f
+}
+
+// Version returns the version of the field, which is empty if it has none.
+func (f Field[V, F]) Version() string {
+	return f.version
+}
+
+// Values returns the values that a record has for the field. A computed field whose function
+// fails for the record has none.
 func (f Field[V, F]) Values(v *V) []F {
-	return f.get(v)
+	values, err := f.values(v)
+	if err != nil {
+		return nil
+	}
+	return values
+}
+
+// values returns the values that a record has for the field, or the error of a computed field.
+func (f Field[V, F]) values(v *V) ([]F, error) {
+	if f.compute != nil {
+		return f.compute(v)
+	}
+	return f.get(v), nil
 }
 
 // Encode encodes a value of the field in the form that marks where it ends, and that sorts as
@@ -302,7 +372,10 @@ func (f Field[V, F]) Encode(value F) ([]byte, error) {
 
 // ascending returns the encoded values that a record has for the field.
 func (f Field[V, F]) ascending(v *V) ([][]byte, error) {
-	values := f.get(v)
+	values, err := f.values(v)
+	if err != nil {
+		return nil, err
+	}
 	keys := make([][]byte, 0, len(values))
 	for _, value := range values {
 		key, err := f.Encode(value)

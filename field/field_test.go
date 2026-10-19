@@ -1,6 +1,7 @@
 package field_test
 
 import (
+	"errors"
 	"math/rand/v2"
 	"testing"
 
@@ -281,6 +282,121 @@ func TestComparisonsKnowIfTheFieldHasSeveralValues(t *testing.T) {
 }
 
 // TestAlways checks which fields every record has exactly one value for.
+var errNegative = errors.New("negative year")
+
+func TestComputed(t *testing.T) {
+	// A field that has no value for a record, one that fails, and one that has a value.
+	age := field.Computed("Age", func(b *Book) ([]int, error) {
+		switch {
+		case b.Year < 0:
+			return nil, errNegative
+		case b.Year == 0:
+			return nil, nil
+		}
+		return []int{2000 - b.Year}, nil
+	})
+	require.Equal(t, "Age", age.Path())
+	require.Equal(t, "int", age.CodecName())
+	require.False(t, age.Multi())
+	require.False(t, age.Always(), "a computed field may have no value")
+	require.Empty(t, age.Version())
+
+	require.Equal(t, []int{35}, age.Values(sample))
+	require.Equal(t, []any{35}, age.AnyValues(sample))
+	keys, err := age.Keys(sample)
+	require.NoError(t, err)
+	want, err := field.Of("Age", func(*Book) int { return 35 }).Keys(sample)
+	require.NoError(t, err)
+	require.Equal(t, want, keys)
+
+	none := &Book{}
+	require.Empty(t, age.Values(none))
+	keys, err = age.Keys(none)
+	require.NoError(t, err)
+	require.Empty(t, keys)
+	c := age.Eq(35)
+	ok, err := c.Match(none)
+	require.NoError(t, err)
+	require.False(t, ok)
+
+	// The error comes out of the keys, which an index writes with, and of a comparison, and the
+	// field has no values then.
+	failing := &Book{Year: -1}
+	_, err = age.Keys(failing)
+	require.ErrorIs(t, err, errNegative)
+	_, err = age.Desc().Keys(failing)
+	require.ErrorIs(t, err, errNegative)
+	require.Empty(t, age.Values(failing))
+	require.Empty(t, age.AnyValues(failing))
+	for _, c := range []*cond.Comparison[Book]{age.Eq(1), age.In(1, 2), age.Gt(1), age.Between(1, 5)} {
+		ok, err := c.Match(failing)
+		require.ErrorIs(t, err, errNegative, c.String())
+		require.False(t, ok)
+	}
+	ok, err = cond.Not[Book](age.Eq(1)).Match(failing)
+	require.ErrorIs(t, err, errNegative)
+	require.False(t, ok)
+	c2, err := age.EqAny(35)
+	require.NoError(t, err)
+	ok, err = c2.Match(sample)
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	// More than one value is not what a field of one value has.
+	two := field.Computed("Two", func(*Book) ([]int, error) { return []int{1, 2}, nil })
+	_, err = two.Keys(sample)
+	require.Error(t, err)
+	require.Empty(t, two.Values(sample))
+
+	// A key codec can be given, and a type that has none needs one.
+	given := field.Computed("Given", func(*Book) ([]string, error) { return []string{"a"}, nil }, codec.StringKey[string]())
+	require.Equal(t, "string", given.Codec().Name())
+	require.Panics(t, func() {
+		field.Computed("Bad", func(*Book) ([]Author, error) { return nil, nil })
+	})
+	require.Panics(t, func() {
+		field.ComputedEach("Bad", func(*Book) ([]Author, error) { return nil, nil })
+	})
+}
+
+func TestComputedEach(t *testing.T) {
+	upper := field.ComputedEach("Upper", func(b *Book) ([]string, error) {
+		if b.Title == "boom" {
+			return nil, errNegative
+		}
+		values := make([]string, len(b.Tags))
+		for i, tag := range b.Tags {
+			values[i] = tag + "!"
+		}
+		return values, nil
+	})
+	require.True(t, upper.Multi())
+	require.False(t, upper.Always())
+	require.Equal(t, []string{"scifi!", "classic!"}, upper.Values(sample))
+	keys, err := upper.Keys(sample)
+	require.NoError(t, err)
+	require.Len(t, keys, 2)
+	require.Empty(t, upper.Values(&Book{}))
+	_, err = upper.Keys(&Book{Title: "boom"})
+	require.ErrorIs(t, err, errNegative)
+	ok, err := upper.Eq("scifi!").Match(sample)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.True(t, upper.Eq("x").Multi)
+}
+
+func TestFieldVersion(t *testing.T) {
+	f := field.Computed("F", func(*Book) ([]int, error) { return []int{1}, nil })
+	v := f.WithVersion("3")
+	require.Equal(t, "3", v.Version())
+	require.Empty(t, f.Version(), "a field is not changed by its version")
+	require.Equal(t, "F", v.Path())
+	require.Equal(t, f.Values(sample), v.Values(sample))
+	// Any field can have one.
+	require.Equal(t, "7", title.WithVersion("7").Version())
+	require.Equal(t, "7", title.WithVersion("7").Desc().Version())
+}
+
 func TestAlways(t *testing.T) {
 	require.True(t, title.Always())
 	require.True(t, title.Desc().Always())

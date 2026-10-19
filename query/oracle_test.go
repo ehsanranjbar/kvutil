@@ -64,7 +64,11 @@ func compare[F any](rng *rand.Rand, f field.Field[Item, F], pick picker[F]) cond
 
 // randomLeaf returns a random condition that is not made of others.
 func randomLeaf(rng *rand.Rand) cond.Cond[Item] {
-	switch rng.IntN(14) {
+	switch rng.IntN(17) {
+	case 13:
+		return compare(rng, total, pickInt(14))
+	case 14:
+		return compare(rng, upperTag, pickText("T", 4))
 	case 0, 1:
 		return compare(rng, group, func(rng *rand.Rand) string { return []string{"a", "b", "c", "d", "z"}[rng.IntN(5)] })
 	case 2, 3:
@@ -122,7 +126,7 @@ func randomCond(rng *rand.Rand, depth int) cond.Cond[Item] {
 // orderFields are the fields that a random query is ordered by.
 var orderFields = []field.Component[Item]{
 	group, rank, rank.Desc(), score, score.Desc(), label, label.Desc(), code, code.Desc(),
-	note, note.Desc(), weight, weight.Desc(), extra, extra.Desc(),
+	note, note.Desc(), weight, weight.Desc(), extra, extra.Desc(), total, total.Desc(),
 }
 
 // indexOrders are orders that the indexes of the store give, forward or in reverse.
@@ -130,6 +134,7 @@ var indexOrders = [][]field.Component[Item]{
 	{rank}, {rank.Desc()}, {code}, {code.Desc()}, {note}, {note.Desc()}, {label},
 	{group}, {group, rank.Desc()}, {group.Desc(), rank}, {group, code.Desc()}, {group.Desc(), code},
 	{score, label}, {score.Desc(), label.Desc()}, {score.Desc(), label}, {rank, code}, {rank, score},
+	{total}, {total.Desc()}, {score}, {score.Desc()},
 }
 
 // spec is a random query.
@@ -154,8 +159,69 @@ func randomIndexSpec(rng *rand.Rand) spec {
 	g := func() string { return []string{"a", "b", "c", "d"}[rng.IntN(4)] }
 	c := func() string { return fmt.Sprintf("i%04d", 1+rng.IntN(itemCount)) }
 
+	// The groups that the condition of the index of some of the items is about.
+	ab := func() string { return []string{"a", "b"}[rng.IntN(2)] }
+
 	var s spec
-	switch rng.IntN(9) {
+	// The cases for the indexes of some of the items and of expressions are three times as likely.
+	which := rng.IntN(27)
+	if which > 14 {
+		which = 9 + (which-15)%6
+	}
+	switch which {
+	case 9:
+		// Only the items that are ready, which the index of them is read for.
+		s.conds = []cond.Cond[Item]{ready.Eq(true)}
+		if rng.IntN(2) == 0 {
+			s.conds = append(s.conds, rank.Gte(rng.IntN(10)))
+		}
+		s.order = [][]field.Component[Item]{{rank}, {rank.Desc()}, {rank, code}}[rng.IntN(3)]
+	case 10:
+		// Conditions that imply the SQL condition of an index: a group of two and a rank.
+		if rng.IntN(2) == 0 {
+			s.conds = []cond.Cond[Item]{group.Eq(ab())}
+		} else {
+			s.conds = []cond.Cond[Item]{group.In("a", "b")}
+		}
+		s.conds = append(s.conds, []cond.Cond[Item]{rank.Gte(3 + rng.IntN(7)), rank.Gt(2 + rng.IntN(7)), rank.Eq(3 + rng.IntN(7))}[rng.IntN(3)])
+		if rng.IntN(4) > 0 {
+			s.conds = append(s.conds, score.Eq(rng.IntN(5)))
+		}
+		s.order = [][]field.Component[Item]{{score}, {score.Desc()}, {score, code}}[rng.IntN(3)]
+	case 11:
+		// Nearly: a group or a rank that the condition of the index does not allow.
+		s.conds = []cond.Cond[Item]{group.In(ab(), "c"), rank.Gte(3 + rng.IntN(7)), score.Eq(rng.IntN(5))}
+		if rng.IntN(2) == 0 {
+			s.conds = []cond.Cond[Item]{group.Eq(ab()), rank.Gte(rng.IntN(4)), score.Eq(rng.IntN(5))}
+		}
+		s.order = [][]field.Component[Item]{{score}, {score.Desc()}}[rng.IntN(2)]
+	case 12:
+		// An expression of the item.
+		switch rng.IntN(3) {
+		case 0:
+			s.conds = []cond.Cond[Item]{total.Eq(rng.IntN(14))}
+		case 1:
+			s.conds = []cond.Cond[Item]{total.Gte(rng.IntN(14)), total.Lt(rng.IntN(14))}
+		default:
+			s.conds = []cond.Cond[Item]{total.In(rng.IntN(14), rng.IntN(14), rng.IntN(14))}
+		}
+		s.order = [][]field.Component[Item]{{total}, {total.Desc()}, {rank}, {code}}[rng.IntN(4)]
+	case 13:
+		// An expression of the several values of an item, and the items that are ready.
+		s.conds = []cond.Cond[Item]{upperTag.Eq(fmt.Sprintf("T%d", rng.IntN(4)))}
+		if rng.IntN(3) == 0 {
+			s.conds = append(s.conds, cond.Or[Item](
+				cond.And[Item](ready.Eq(true), rank.Eq(rng.IntN(10))),
+				cond.And[Item](ready.Eq(true), rank.Eq(rng.IntN(10)))))
+		}
+		s.order = [][]field.Component[Item]{{rank}, {code}}[rng.IntN(2)]
+	case 14:
+		// A disjunction whose branches all say that the items are ready.
+		s.conds = []cond.Cond[Item]{cond.Or[Item](
+			cond.And[Item](ready.Eq(true), rank.Eq(rng.IntN(10))),
+			cond.And[Item](ready.Eq(true), score.Lt(rng.IntN(5))),
+			ready.Eq(true))}
+		s.order = [][]field.Component[Item]{{rank}, {rank.Desc()}}[rng.IntN(2)]
 	case 0:
 		s.conds = []cond.Cond[Item]{group.Eq(g())}
 		s.order = [][]field.Component[Item]{{rank.Desc()}, {rank}, {code.Desc()}, {code}}[rng.IntN(4)]
@@ -200,7 +266,7 @@ func randomIndexSpec(rng *rand.Rand) spec {
 func randomSpec(rng *rand.Rand) spec {
 	var s spec
 	switch {
-	case rng.IntN(4) == 0:
+	case rng.IntN(3) == 0:
 		s = randomIndexSpec(rng)
 	case rng.IntN(3) == 0:
 		// A few comparisons, which indexes serve.
@@ -379,17 +445,42 @@ func (f *fixture) keys(t *testing.T, db kv.DB, q *query.Query[int64, Item]) []in
 // queryCount is the number of random queries.
 const queryCount = 300
 
+// conditionalIndexes are the indexes of some of the items, with what it takes for an item to be
+// in them.
+var conditionalIndexes = map[string]func(it *Item) bool{
+	"ready_by_rank": func(it *Item) bool { return it.Ready },
+	"ab_by_score":   func(it *Item) bool { return (it.Group == "a" || it.Group == "b") && it.Rank >= 3 },
+}
+
+// requireImplied checks that every item that satisfies the conditions of the spec is one that
+// an index of some of the items has, which is what makes it right to read the index.
+func (f *fixture) requireImplied(t *testing.T, s spec, index, msg string) {
+	t.Helper()
+
+	in, ok := conditionalIndexes[index]
+	if !ok {
+		return
+	}
+	for _, id := range f.expect(t, spec{conds: s.conds}) {
+		require.True(t, in(f.items[id]), "%s: item %d satisfies the conditions and is not in %s", msg, id, index)
+	}
+}
+
 // TestAgreesWithBruteForce checks the results of random queries, with the plan that the planner
 // chooses and with every plan that can be forced, against checking and sorting all the items.
 func TestAgreesWithBruteForce(t *testing.T) {
 	testkv.Each(t, func(t *testing.T, db kv.DB) {
 		f := newFixture(t, db)
-		indexes := []string{"by_group_rank", "by_score_label", "by_code", "by_group_code", "by_tag_rank", "by_note", "ready_by_rank"}
+		indexes := []string{
+			"by_group_rank", "by_score_label", "by_code", "by_group_code", "by_tag_rank", "by_note",
+			"ready_by_rank", "ab_by_score", "by_total", "by_upper_tag",
+		}
 
 		var (
 			rng      = rand.New(rand.NewPCG(1, 2))
 			shapes   = map[string]int{}
 			forced   = map[string]int{}
+			chosen   = map[string]int{}
 			nonEmpty int
 		)
 		for n := range queryCount {
@@ -405,7 +496,12 @@ func TestAgreesWithBruteForce(t *testing.T) {
 			q := s.query(base)
 			explain, err := q.Explain()
 			require.NoError(t, err, desc)
-			require.NotContains(t, explain, "ready_by_rank", desc)
+			for _, name := range indexes {
+				if strings.Contains(explain, "IndexLookup "+name) {
+					chosen[name]++
+					f.requireImplied(t, s, name, desc+"\n"+explain)
+				}
+			}
 			if strings.HasPrefix(explain, "Limit") && strings.Contains(explain, "└─ IndexLookup") &&
 				strings.Contains(explain, "(in order of") {
 				shapes["a limit over an index in order"]++
@@ -437,13 +533,9 @@ func TestAgreesWithBruteForce(t *testing.T) {
 					forced[name+" refused"]++
 					continue
 				}
-				if name == "ready_by_rank" {
-					// The index of some of the items can be asked for, and never serves.
-					require.Equal(t, "Empty", explain, desc)
-					continue
-				}
 				if explain != "Empty" {
 					require.Contains(t, explain, "IndexLookup "+name, desc)
+					f.requireImplied(t, s, name, desc+"\n"+explain)
 				}
 				forced[name]++
 				for _, shape := range []string{"reversed", "in order of"} {
@@ -454,6 +546,8 @@ func TestAgreesWithBruteForce(t *testing.T) {
 				f.requireResult(t, s, f.keys(t, db, forcedQuery), desc+"\n"+explain)
 			}
 		}
+
+		t.Logf("plans %v, chosen %v, forced %v", shapes, chosen, forced)
 
 		// The queries ask for a good deal of everything.
 		require.Greater(t, nonEmpty, queryCount/3)
@@ -471,7 +565,14 @@ func TestAgreesWithBruteForce(t *testing.T) {
 		for _, name := range indexes[:6] {
 			require.Greater(t, forced[name], 10, "%s in %v", name, forced)
 		}
-		require.Greater(t, forced["ready_by_rank refused"], queryCount*2/3)
+		// The indexes of some of the items are read when the conditions imply theirs, forced or
+		// chosen, and refused when they do not; the indexes of expressions are read when a
+		// condition needs a value of the expression.
+		for _, name := range indexes[6:] {
+			require.Greater(t, forced[name], 10, "%s in %v", name, forced)
+			require.Greater(t, forced[name+" refused"], 10, "%s in %v", name, forced)
+			require.Greater(t, chosen[name], 5, "%s in %v", name, chosen)
+		}
 	})
 }
 

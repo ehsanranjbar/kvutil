@@ -128,10 +128,25 @@ func TestPlans(t *testing.T) {
 			"Sort by Extra desc, Label\n└─ StoreScan"},
 		{"top without an index", from().Where(extra.Lt(3)).OrderBy(weight).Limit(7),
 			"Limit 7\n└─ TopN by Weight\n   └─ StoreScan, then check [Extra < 3]"},
-		{"an index of some records is not read", from().Where(rank.Gt(3), ready.Eq(true)),
-			`StoreScan, then check [Rank > 3; Ready = true]`},
-		{"an index of some records is not read for its order", from().Where(ready.Eq(true)).OrderBy(rank),
-			"Sort by Rank\n└─ StoreScan, then check [Ready = true]"},
+
+		// An index of some of the records is read by a query that asks for them only.
+		{"an index of some records, when the query is about them", from().Where(rank.Gt(3), ready.Eq(true)),
+			`IndexLookup ready_by_rank: 1 range, then check [Ready = true]`},
+		{"an index of some records, for its order", from().Where(ready.Eq(true)).OrderBy(rank),
+			"IndexLookup ready_by_rank (in order of Rank): 1 range, then check [Ready = true]"},
+		{"an index of some records is not read when the query is not about them", from().Where(rank.Gt(3)),
+			`StoreScan, then check [Rank > 3]`},
+		{"an index of some records is not read for the others", from().Where(rank.Gt(3), ready.Eq(false)),
+			`StoreScan, then check [Rank > 3; Ready = false]`},
+		{"an index of some records is not read for a disjunction", from().Where(cond.Or[Item](ready.Eq(true), rank.Eq(3))).OrderBy(rank),
+			"Sort by Rank\n└─ StoreScan, then check [(Ready = true) or (Rank = 3)]"},
+		{"an index of some records is not read for a negation", from().Where(cond.Not[Item](ready.Eq(false))).OrderBy(rank),
+			"Sort by Rank\n└─ StoreScan, then check [not (Ready = false)]"},
+		{"an index of some records is read for a disjunction of them", from().Where(cond.Or[Item](
+			cond.And[Item](ready.Eq(true), rank.Eq(3)), cond.And[Item](ready.Eq(true), rank.Eq(4)))).OrderBy(rank),
+			"IndexLookup ready_by_rank (in order of Rank): 1 range, then check [((Ready = true) and (Rank = 3)) or ((Ready = true) and (Rank = 4))]"},
+		{"an index of some records is not read when it is not cheaper", from().Where(ready.Eq(true), code.Eq("i0007")),
+			`IndexLookup by_code: 1 range, then check [Ready = true]`},
 
 		// What no record can satisfy.
 		{"two values", from().Where(code.Eq("i0001"), code.Eq("i0002")), `Empty`},
@@ -200,7 +215,10 @@ func TestHintsThatCannotBeFollowed(t *testing.T) {
 		"a negation needs no value":     from().Where(cond.Not[Item](label.Eq("l1")), score.Eq(2)).Using("by_score_label"),
 		"a disjunction needs no value":  from().Where(cond.Or[Item](label.Eq("l1"), label.Eq("l2")), score.Eq(2)).Using("by_score_label"),
 		"an index of some records":      from().Where(rank.Eq(3)).Using("ready_by_rank"),
-		"an index of some, and its own": from().Where(rank.Eq(3), ready.Eq(true)).Using("ready_by_rank"),
+		"an index of others":            from().Where(rank.Eq(3), ready.Eq(false)).Using("ready_by_rank"),
+		"an index of some, or others":   from().Where(cond.Or[Item](ready.Eq(true), rank.Eq(3))).Using("ready_by_rank"),
+		"an index of some, not others":  from().Where(cond.Not[Item](ready.Eq(false))).Using("ready_by_rank"),
+		"an index of some, in no order": from().OrderBy(rank).Using("ready_by_rank"),
 		"an unknown index with no rows": from().Where(rank.Gt(5), rank.Lt(3)).Using("nope"),
 		"an unknown index, no limit":    from().Where(group.Eq("a")).Limit(0).Using("nope"),
 	} {

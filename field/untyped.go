@@ -33,7 +33,7 @@ type Untyped[V any] interface {
 
 // AnyValues implements the Untyped interface.
 func (f Field[V, F]) AnyValues(v *V) []any {
-	values := f.get(v)
+	values := f.Values(v)
 	result := make([]any, len(values))
 	for i, value := range values {
 		result[i] = value

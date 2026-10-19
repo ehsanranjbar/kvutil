@@ -55,7 +55,10 @@ func notACondition(e rsql.Expr, k kind) error {
 }
 
 // Match implements the cond.Cond interface.
-func (e *evaluated[V]) Match(v *V) (bool, error) {
+func (e *evaluated[V]) Match(v *V) (ok bool, err error) {
+	// A function that fails ends the evaluation with its error.
+	defer recoverFailure(&err)
+
 	switch result := e.eval(v).(type) {
 	case bool:
 		return result, nil
@@ -630,6 +633,12 @@ func (c *core[V]) compileLike(e *rsql.BinaryExpr) (*node[V], error) {
 func (c *core[V]) compileCall(e *rsql.Call) (*node[V], error) {
 	name := strings.ToLower(e.Name.Name)
 	f, ok := functions[name]
+	if !ok {
+		var custom Function
+		if custom, ok = c.functions.byName[name]; ok {
+			f = custom.internal()
+		}
+	}
 	if !ok || e.Schema != nil {
 		return nil, fmt.Errorf("%w %q", ErrUnknownFunction, e.Name.Name)
 	}

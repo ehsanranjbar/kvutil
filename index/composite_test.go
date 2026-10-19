@@ -3,6 +3,7 @@ package index_test
 import (
 	"bytes"
 	"cmp"
+	"context"
 	"math/rand/v2"
 	"slices"
 	"strings"
@@ -432,6 +433,67 @@ func (r random[F]) between() cond.Cond[pet] {
 		rg = rg.Through(r.value())
 	}
 	return r.field.Range(rg)
+}
+
+func TestVersions(t *testing.T) {
+	store := extstore.New[int64, pet]("pets")
+	computed := field.Computed("Shouted", func(p *pet) ([]string, error) { return []string{p.Name + "!"}, nil })
+
+	plain := index.On(store, "plain", nameField)
+	require.Empty(t, plain.Descriptor().Version)
+
+	// The version of a field is a part of the descriptor, named by the field.
+	versioned := index.On(store, "versioned", computed.WithVersion("3"))
+	require.Equal(t, "Shouted@3", versioned.Descriptor().Version)
+	both := index.Composite(store, "both", field.List[pet](nameField, computed.WithVersion("4"), ageField.WithVersion("5")))
+	require.Equal(t, "Shouted@4,Age@5", both.Descriptor().Version)
+	require.Empty(t, index.On(store, "unversioned", computed).Descriptor().Version)
+
+	// The version of an option is one too, after the versions of the fields.
+	withOption := index.On(store, "with_option", computed.WithVersion("3"), index.Versioned[pet]("f@1"), index.Where(ageField.Gte(1)),
+		index.Versioned[pet]("g@2"), index.Covering(name, nil, "Name"))
+	require.Equal(t, "Shouted@3;f@1;g@2", withOption.Descriptor().Version)
+	require.Equal(t, "Age >= 1", withOption.Descriptor().Where, "the wrapped indexer is still what it was")
+	require.Equal(t, []string{"Name"}, withOption.Descriptor().Covered)
+	require.NotNil(t, withOption.Fields())
+	require.Empty(t, index.On(store, "empty_version", nameField, index.Versioned[pet]("")).Descriptor().Version)
+
+	// The indexes that are looked up with conditions still are.
+	require.NoError(t, store.Check(memkv.New()))
+	db := memkv.New()
+	require.NoError(t, store.Check(db))
+	require.NoError(t, db.Update(func(tx kv.Tx) error {
+		require.NoError(t, store.Instantiate(tx).Set(1, &pet{Name: "a", Age: 4}))
+		require.Equal(t, []int64{1}, ids(t, must(withOption.Instantiate(tx).Lookup(computed.Eq("a!")))))
+		return nil
+	}))
+}
+
+// A version is a part of what an index is identified by, only if there is one.
+func TestVersionsAreInTheIdentityOfIndexes(t *testing.T) {
+	db := memkv.New()
+	define := func(version string) *extstore.Store[int64, pet] {
+		store := extstore.New[int64, pet]("pets")
+		shouted := field.Computed("Shouted", func(p *pet) ([]string, error) { return []string{p.Name + "!"}, nil })
+		if version != "" {
+			shouted = shouted.WithVersion(version)
+		}
+		index.On(store, "shouted", shouted)
+		index.On(store, "optioned", nameField, index.Versioned[pet](version))
+		return store
+	}
+	report, err := define("1").Migrate(context.Background(), db)
+	require.NoError(t, err)
+	require.Contains(t, report.String(), "built index \"pets/shouted\"\nbuilt index \"pets/optioned\"")
+	require.NoError(t, define("1").Check(db))
+	require.ErrorIs(t, define("2").Check(db), migrate.ErrNeedsMigration)
+	require.ErrorIs(t, define("").Check(db), migrate.ErrNeedsMigration)
+
+	// An index without a version is identified as it was before there were versions.
+	report, err = define("").Migrate(context.Background(), db)
+	require.NoError(t, err)
+	require.NotEmpty(t, report.String())
+	require.NoError(t, define("").Check(db))
 }
 
 func TestWhere(t *testing.T) {

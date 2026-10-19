@@ -83,6 +83,11 @@ type Descriptor struct {
 	// Encoding identifies how the keys and the values of the entries are encoded.
 	// An index whose encoding changes must be built again.
 	Encoding string
+	// Version identifies what the functions of the index compute, when that cannot be seen in
+	// the paths of its fields and in its Where: the versions of its fields (see
+	// field.Field.WithVersion) and the one that Versioned gives. It is empty if there are none.
+	// An index whose version changes must be built again.
+	Version string
 }
 
 // FieldDescriptor describes an indexed field.
@@ -103,13 +108,18 @@ func (d Descriptor) attributes() map[string]string {
 			fields = append(fields, f.Path)
 		}
 	}
-	return map[string]string{
+	attrs := map[string]string{
 		"fields":   strings.Join(fields, ","),
 		"unique":   strconv.FormatBool(d.Unique),
 		"covered":  strings.Join(d.Covered, ","),
 		"where":    d.Where,
 		"encoding": d.Encoding,
 	}
+	// Only an index that has a version has the attribute, so that the others are what they were.
+	if d.Version != "" {
+		attrs["version"] = d.Version
+	}
+	return attrs
 }
 
 // Index is an index of a store. It is kept up to date as an extension of the store,

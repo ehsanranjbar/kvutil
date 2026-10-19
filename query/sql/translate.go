@@ -128,6 +128,37 @@ func reference(e rsql.Expr) (string, bool) {
 	return "", false
 }
 
+// operandPath returns the path of the field that an expression stands for in a comparison: the
+// field that it names, or else the field of a path that is the expression itself, in the text
+// that the parser prints for it, like lower("Author"). Such a field is one that the parser was
+// given, or that an index of the store is defined on (see Expr), and an index can look the
+// records up by it. An expression that no field is for is not one, and is evaluated.
+func (c *core[V]) operandPath(e rsql.Expr) (string, bool) {
+	if path, ok := reference(e); ok {
+		return path, true
+	}
+	e = unparenthesised(e)
+	switch e.(type) {
+	case *rsql.Call, *rsql.BinaryExpr, *rsql.UnaryExpr, *rsql.CaseExpr:
+		text := show(e)
+		if col, ok := c.known(text); ok && col.field != nil {
+			return text, true
+		}
+	}
+	return "", false
+}
+
+// unparenthesised returns an expression without the parentheses around the whole of it.
+func unparenthesised(e rsql.Expr) rsql.Expr {
+	for {
+		p, ok := e.(*rsql.ParenExpr)
+		if !ok {
+			return e
+		}
+		e = p.X
+	}
+}
+
 // literal returns the value of an expression that is a value as it is written: a string, a
 // number, TRUE or FALSE, or a blob.
 func literal(e rsql.Expr) (any, bool) {
@@ -157,11 +188,11 @@ func literal(e rsql.Expr) (any, bool) {
 // comparison of anything else is evaluated.
 func (c *core[V]) translateComparison(e *rsql.BinaryExpr) (cond.Cond[V], error) {
 	op := e.Op
-	path, isField := reference(e.X)
+	path, isField := c.operandPath(e.X)
 	value, isValue := literal(e.Y)
 	if !isField || !isValue {
 		// The value may be on the left, which turns the comparison around.
-		if path, isField = reference(e.Y); isField {
+		if path, isField = c.operandPath(e.Y); isField {
 			if value, isValue = literal(e.X); isValue {
 				op = turned(op)
 			}
@@ -220,7 +251,7 @@ func turned(op rsql.Token) rsql.Token {
 func (c *core[V]) translateIn(e *rsql.BinaryExpr) (cond.Cond[V], error) {
 	negate := e.Op == rsql.NOTIN
 
-	if path, ok := reference(e.X); ok {
+	if path, ok := c.operandPath(e.X); ok {
 		if list, ok := e.Y.(*rsql.ExprList); ok {
 			if values, ok := literals(list); ok {
 				f, err := c.comparableField(path)
@@ -281,7 +312,7 @@ func literals(list *rsql.ExprList) ([]any, bool) {
 
 // translateBetween translates a BETWEEN low AND high of values, which has both of its bounds.
 func (c *core[V]) translateBetween(e *rsql.BinaryExpr) (cond.Cond[V], error) {
-	if path, ok := reference(e.X); ok {
+	if path, ok := c.operandPath(e.X); ok {
 		if r, ok := e.Y.(*rsql.Range); ok {
 			low, isLow := literal(r.X)
 			high, isHigh := literal(r.Y)

@@ -242,8 +242,17 @@ func (e *estimator[K, V]) scan() *candidate[K, V] {
 // index returns the candidate of reading an index, or says why it cannot be.
 func (e *estimator[K, V]) index(position int, ix *index.Index[K, V]) (*candidate[K, V], error) {
 	desc := ix.Descriptor()
+	// The fraction of the records of the store that an index of some of them has.
+	kept := 1.0
 	if desc.Where != "" {
-		return nil, errors.New("it has some of the records only")
+		cnd, ok := desc.Condition.(cond.Cond[V])
+		if !ok {
+			return nil, fmt.Errorf("it has the records that satisfy %s only, which is not a condition that is known", desc.Where)
+		}
+		if !implies(e.conj, cnd) {
+			return nil, fmt.Errorf("it has the records that satisfy %s only, which the conditions do not imply", desc.Where)
+		}
+		kept = conditionFraction(cnd)
 	}
 	planner, ok := ix.Indexer().(index.RangePlanner[V])
 	if !ok {
@@ -295,7 +304,7 @@ func (e *estimator[K, V]) index(position int, ix *index.Index[K, V]) (*candidate
 	}
 
 	c := &candidate[K, V]{position: position, index: ix, ranges: ranges, check: residual}
-	rows := math.Max(fraction, 1.0/storeSize) * storeSize
+	rows := math.Max(fraction*kept, 1.0/storeSize) * storeSize
 	if desc.Unique && exact {
 		// Every field has a value or several, so a record is found by each of the ranges at most.
 		rows = float64(len(ranges))
@@ -303,6 +312,25 @@ func (e *estimator[K, V]) index(position int, ix *index.Index[K, V]) (*candidate
 	c.delivery = e.deliver(ix, fields, ranges, exact)
 	c.cost = e.cost(c, rows, true)
 	return c, nil
+}
+
+// conditionFraction returns the fraction of the records that the condition of an index is assumed
+// to be satisfied by, which are the ones that the index has. A part that is not a comparison is
+// assumed to be satisfied by half of them.
+func conditionFraction[V any](c cond.Cond[V]) float64 {
+	conj, empty := normalise([]cond.Cond[V]{c})
+	if empty {
+		return 1.0 / storeSize
+	}
+	fraction := 1.0
+	for _, part := range conj {
+		if cmp, ok := part.(*cond.Comparison[V]); ok {
+			fraction *= fractionOf(cmp)
+		} else {
+			fraction *= residualPass
+		}
+	}
+	return fraction
 }
 
 // fractionOf returns the fraction of the records that a comparison is assumed to be satisfied by.

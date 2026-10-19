@@ -67,8 +67,10 @@
 // coalesce and ifnull, with the meanings that they have in SQLite, but for lower and upper,
 // which change all letters and not only those of ASCII. The length of a field of several values
 // is the number of its values. A function that is given the name of a function there is not is
-// ErrUnknownFunction, and one that is given the wrong number or kinds of arguments is ErrType. What it does not have, like subqueries, CAST,
-// COLLATE, MATCH, REGEXP, bit operators and parameters, is a syntax error.
+// ErrUnknownFunction, and one that is given the wrong number or kinds of arguments is ErrType.
+// What it does not have, like subqueries, CAST, COLLATE, MATCH, REGEXP, bit operators and
+// parameters, is a syntax error. The names of functions are not case sensitive, and the text
+// that the parser prints for a call, which is what a condition is shown as, has them in lower case.
 //
 // The types of what is evaluated are checked when the text is parsed: the ones that a text can
 // be known to have, which are bool, number, text, bytes and time, and any for a field of
@@ -77,6 +79,52 @@
 // error then. What can only be known on a record, like a field of an interface type that is not
 // true or false where it is expected to be, is not true for it, or is ErrEvaluation from Match
 // if it is the whole of a condition.
+//
+// # Functions of your own
+//
+// A parser can be given functions that a text calls like the ones above, with WithFunctions. A
+// function is made from a Go function with Func1, Func2 or Func3, or from the types of its
+// arguments with FuncN, and the functions are put in a set:
+//
+//	functions := sql.Functions{}.
+//		Add(sql.Func1("initial", func(s string) string { return s[:1] })).
+//		Add(sql.Func2("age", func(year, now int) int { return now - year }))
+//	parser := sql.For(books, sql.WithFunctions[Book](functions))
+//	parser.Query(tx, `initial(Author) = 'H' AND age(Year, 2000) > 30`)
+//
+// A call is checked when the text is parsed, as the calls of the functions above are: the name
+// (ErrUnknownFunction), the number of arguments and their kinds (ErrType), and, where the call
+// stands for a condition, that its result is true or false (ErrType). A function that fails
+// fails the evaluation with its error, wrapped in ErrEvaluation, as Match returns it and as the
+// iterator of a query does. A function is applied to each value of a field of several values.
+// The functions of a parser are not seen by any other.
+//
+// A function must be deterministic: it must return the same for the same arguments, always.
+// The entries of an index that is defined on an expression or on a condition that calls it
+// are computed again to be removed, and the records are found by them. If what a function
+// computes changes, give it a new version (Function.WithVersion), and the indexes that call it
+// are built again by the migration.
+//
+// # Indexes of expressions and of conditions
+//
+// Expr defines a field whose values are those of an expression of the record, to index by:
+//
+//	index.On(books, "by_author", sql.Expr[Book, string](`lower(Author)`))
+//
+// and a query that compares the same expression with values reads the index, as it does for a
+// field that is named: lower(Author) = 'herbert', and the other comparisons of the first
+// section above, whatever the spelling of the expression is, so LOWER( "Author" ) is the same.
+// A parser finds the field in the indexes of the store, or is given it with WithFields. An
+// expression that no field is of is evaluated on the records, as it is without an index.
+//
+// Where is the option of an index to have the records that satisfy a condition only:
+//
+//	index.On(books, "in_print_by_year", year, sql.Where[Book](`InPrint AND Year >= 1900`))
+//
+// A query reads such an index if its conditions imply the condition of the index, which package
+// query decides conservatively: InPrint AND Year > 1950 does, and InPrint OR Year > 1950 does not.
+// A condition that is not a comparison is implied by the identical text only, in the form the
+// parser prints it (lower case for the functions, and the same as the parser prints everywhere).
 package sql
 
 import (
@@ -143,6 +191,9 @@ type core[V any] struct {
 	// store is where the indexed fields are found, when a text is first parsed.
 	store interface{ Extensions() []any }
 
+	// functions are the functions that a text can call besides the ones that there always are.
+	functions Functions
+
 	mu      sync.Mutex
 	loaded  bool
 	columns map[string]*column[V]
@@ -186,6 +237,11 @@ func parseExpr(where string) (expr rsql.Expr, err error) {
 	// none. Whatever else it finds is something that does not belong to the condition.
 	_, err = p.ParseStatement()
 	if errors.Is(err, io.EOF) {
+		// The names of functions are in lower case, as the names of the functions that there are
+		// are, so that the text that the parser prints is the same for LOWER(x) and lower(x).
+		if _, err := rsql.Walk(lowerCalls{}, expr); err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrSyntax, err)
+		}
 		return expr, nil
 	}
 	if err != nil {
@@ -193,6 +249,18 @@ func parseExpr(where string) (expr rsql.Expr, err error) {
 	}
 	return nil, fmt.Errorf("%w: unexpected text after %s", ErrSyntax, expr)
 }
+
+// lowerCalls is a visitor that puts the names of the functions that are called in lower case.
+type lowerCalls struct{}
+
+func (lowerCalls) Visit(n rsql.Node) (rsql.Visitor, rsql.Node, error) {
+	if call, ok := n.(*rsql.Call); ok && call.Name != nil {
+		call.Name.Name = strings.ToLower(call.Name.Name)
+	}
+	return lowerCalls{}, n, nil
+}
+
+func (lowerCalls) VisitEnd(n rsql.Node) (rsql.Node, error) { return n, nil }
 
 // column is a field of the records as a text names it.
 type column[V any] struct {
@@ -235,16 +303,32 @@ func fieldColumn[V any](f field.Untyped[V]) *column[V] {
 	return col
 }
 
+// known returns the field that was given to the parser or that an index of the store is defined
+// on, if there is one of the path. Unlike column it does not look in the struct.
+func (c *core[V]) known(path string) (*column[V], bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.load()
+	col, ok := c.columns[path]
+	return col, ok
+}
+
+// load adds the fields of the indexes of the store, once. The mutex is held.
+func (c *core[V]) load() {
+	if !c.loaded {
+		c.loaded = true
+		c.loadIndexed()
+	}
+}
+
 // column returns the field of a path: the one that was given to the parser, or the one of an
 // index of the store, or the one that the struct has.
 func (c *core[V]) column(path string) (*column[V], error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if !c.loaded {
-		c.loaded = true
-		c.loadIndexed()
-	}
+	c.load()
 	if col, ok := c.columns[path]; ok {
 		return col, nil
 	}

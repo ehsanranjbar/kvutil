@@ -80,9 +80,13 @@ func product(keys, suffixes [][]byte) [][]byte {
 func (x *FieldsIndexer[V]) Descriptor() Descriptor {
 	desc := Descriptor{Operators: []cond.Op{cond.OpEq, cond.OpIn, cond.OpRange}}
 	encodings := make([]string, 0, len(x.parts))
+	var versions []string
 	for _, part := range x.parts {
 		desc.Fields = append(desc.Fields, FieldDescriptor{Path: part.Path(), Descending: part.Descending()})
 		desc.MultiEntry = desc.MultiEntry || part.Multi()
+		if v, ok := part.(interface{ Version() string }); ok && v.Version() != "" {
+			versions = append(versions, part.Path()+"@"+v.Version())
+		}
 
 		encoding := part.CodecName()
 		if part.Descending() {
@@ -91,6 +95,7 @@ func (x *FieldsIndexer[V]) Descriptor() Descriptor {
 		encodings = append(encodings, encoding)
 	}
 	desc.Encoding = strings.Join(encodings, ",")
+	desc.Version = strings.Join(versions, ",")
 	return desc
 }
 

@@ -48,6 +48,15 @@
 // not such a comparison. An index that no condition limits is read in full, then, if all its
 // fields are Always, and costs what that costs: it is chosen for an order that it gives under
 // a limit.
+//
+// An index that has a condition (index.Where) has the records that satisfy it only, so it is
+// only read if the conditions of the query imply its condition: every record that the query
+// asks for satisfies it. The conditions of the query imply it if each part of it is implied by
+// a condition of the query, like Year >= 1970 by Year > 1980 or by Year = 1975, or Kind IN
+// ('a', 'b') by Kind = 'a', and a part that is not a comparison, like a function, is implied by
+// the identical condition only. The query is still checked against all its conditions, and its
+// results do not depend on the index. Hinting an index (Using) whose condition is not implied
+// is an error.
 package query
 
 import (
@@ -173,8 +182,9 @@ func (q *Query[K, V]) Limit(n int) *Query[K, V] {
 
 // Using returns the query with a hint to read the index of that name. It is an error, when the
 // query is run or explained, if the store has no such index or if the index cannot serve the
-// query: it has some of the records only, or it may not have an entry for a record that the
-// query asks for (see the package documentation). It replaces FullScan.
+// query: it has some of the records only and the conditions of the query do not imply that
+// they are among them, or it may not have an entry for a record that the query asks for (see the
+// package documentation). It replaces FullScan.
 func (q *Query[K, V]) Using(index string) *Query[K, V] {
 	c := q.derive()
 	c.hint = hint{kind: hintIndex, index: index}

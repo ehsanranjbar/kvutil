@@ -10,6 +10,7 @@ import (
 	"github.com/ehsanranjbar/kvutil/field"
 	"github.com/ehsanranjbar/kvutil/index"
 	"github.com/ehsanranjbar/kvutil/kv"
+	"github.com/ehsanranjbar/kvutil/query/sql"
 	extstore "github.com/ehsanranjbar/kvutil/store/ext"
 )
 
@@ -39,6 +40,11 @@ var (
 	note   = field.Path[Item, string]("Note")
 	weight = field.Path[Item, int]("Weight")
 	ready  = field.Path[Item, bool]("Ready")
+
+	// Fields that are SQL expressions of an item: one value for every item, and several for the
+	// items that have tags.
+	total    = sql.Expr[Item, int]("Rank + Score")
+	upperTag = sql.Expr[Item, string]("upper(Tags)")
 )
 
 const itemCount = 400
@@ -59,8 +65,13 @@ func defineItems() *extstore.Store[int64, Item] {
 	index.UniqueComposite(items, "by_group_code", field.List(group, code.Desc()))
 	index.Composite(items, "by_tag_rank", field.List(tags, rank))
 	index.On(items, "by_note", note)
-	// An index of some of the items is never read by a query.
+	// Indexes of some of the items, by a condition in Go and by one in SQL, which a query reads
+	// if its conditions imply theirs.
 	index.On(items, "ready_by_rank", rank, index.Where(ready.Eq(true)))
+	index.On(items, "ab_by_score", score, sql.Where[Item](`"Group" IN ('a', 'b') AND Rank >= 3`))
+	// Indexes of expressions, of one value for an item and of several.
+	index.On(items, "by_total", total)
+	index.On(items, "by_upper_tag", upperTag)
 	return items
 }
 

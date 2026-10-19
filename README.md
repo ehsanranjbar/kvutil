@@ -287,6 +287,14 @@ comparison of the query needs a value of it. `index.Lookup` fails with `index.Er
 the same case. An index that nothing narrows can still be read in full for its order under a
 `Limit`.
 
+An index of some of the records (`index.Where`) is read when the conditions of the query imply
+its condition, so that every record the query asks for is in it. The planner decides that
+conservatively: a comparison is implied by one of the same field that allows only values that it
+allows (`Year > 1980` implies `Year >= 1970`, `Kind = 'a'` implies `Kind IN ('a', 'b')`), a
+disjunction by one of its branches, and anything else, like a negation or a function, by the
+identical condition only. The query is still checked against all its conditions, and `Using` an
+index whose condition is not implied is an error.
+
 `Explain` shows the plan as a tree of operators: `StoreScan`, `IndexLookup` (with the order
 that it gives, and `reversed` if it is read from its end), `Sort` and `TopN` (when the order is
 not given), `Limit` and `Empty` (when the conditions contradict each other, or the limit is 0).
@@ -323,6 +331,45 @@ is not true or false where a condition is expected (`Total + 1`), is an error wh
 Conditions are true or false, not true, false or unknown as in SQL: a comparison with a value that a
 record does not have is false, and `NOT` makes it true.
 
+**Functions of your own** are given to a parser, and a text calls them like `lower` and `length`:
+`Func1`, `Func2` and `Func3` make one from a Go function, and `FuncN` from the types of its
+arguments, for the ones that fail or that take any number. A call is checked when the text is
+parsed (an unknown name, the wrong number or kinds of arguments, a result that is not true or
+false where a condition is expected), and an error of a function fails the evaluation with
+`sql.ErrEvaluation`.
+
+```go
+fns := sql.Functions{}.
+    Add(sql.Func1("initial", func(s string) string { return s[:1] }).WithVersion("1")).
+    Add(sql.Func2("age", func(year, now int) int { return now - year }))
+p := sql.For(orders, sql.WithFunctions[Order](fns)) // other parsers do not see them
+it, err := p.Query(tx, `initial(Customer) = 'a' AND age(Year, 2000) > 30`)
+```
+
+A function must be deterministic. Its version says what it computes, and an index on an
+expression or a condition that calls it is built again by `Migrate` when the version changes.
+
+**Indexes of an SQL expression and of an SQL condition** are the same as the Go ones, written as
+text. `sql.Expr[V, F]` is a field whose values are those of an expression of the record, and
+`sql.Where[V]` the option that keeps the records that satisfy a condition. A query is served by
+the index when it compares the same expression with values, in whatever spelling (the path of the
+field is the expression as the parser prints it, with the names of functions in lower case), or
+when its conditions imply the condition of the index.
+
+```go
+index.On(orders, "by_customer_lower", sql.Expr[Order, string](`lower(Customer)`))
+index.On(orders, "big_by_customer", customer, sql.Where[Order](`Total >= 1000`))
+
+p.Explain(`LOWER(Customer) = 'ann'`)           // IndexLookup by_customer_lower: 1 range
+p.Explain(`Total > 5000 AND Customer = 'ann'`) // IndexLookup big_by_customer: 1 range, then check [Total > 5000]
+p.Explain(`Total > 500 AND Customer = 'ann'`)  // not implied by the condition of big_by_customer
+```
+
+A record whose expression cannot be evaluated or converted to `F` is not left out of the index:
+writing it fails with the error (`field.Computed` is the field behind it). The text of an
+expression and of a condition, and the versions of the functions they call, identify the index,
+so a change in either is a migration.
+
 ## What is specific to Badger
 
 The general interfaces have what every ordered engine has. The rest of Badger stays within
@@ -344,9 +391,8 @@ An engine that does not have a capability returns `kv.ErrUnsupported` for it.
 
 ## What is not there yet
 
-- A planner that combines indexes (a query reads one, and checks the rest on the records), uses
-  an index of some of the records, or keeps statistics; and queries as text beyond the WHERE
-  clause.
+- A planner that combines indexes (a query reads one, and checks the rest on the records) or
+  keeps statistics; and queries as text beyond the WHERE clause.
 - Building an index while the program writes to its store: `Migrate` is alone with the data.
 - A migration that changes the keys of the records, other than by hand in `migrate.Custom`.
 - Records that expire in stores with indexes or aggregations.

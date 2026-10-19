@@ -69,7 +69,7 @@ func TestQueryAndExplain(t *testing.T) {
 		lib := newLibrary(t, db, func(books *extstore.Store[int64, Book]) {
 			index.Composite(books, "by_author_year", field.List(author, year.Desc()))
 			index.On(books, "by_tag", tags)
-			// An index of some of the books is not for a query to use.
+			// An index of some of the books is for a query about them.
 			index.On(books, "in_print_by_decade", decade, index.Where(inPrint.Eq(true)))
 			index.Unique(books, "by_code", field.Path[Book, string]("Code"))
 		})
@@ -92,11 +92,11 @@ func TestQueryAndExplain(t *testing.T) {
 			{`'scifi' IN Tags AND Price > 5`, `IndexLookup by_tag: 1 range, then check [Price > 5]`},
 			{`Tags IN ('scifi', 'new')`, `IndexLookup by_tag: 2 ranges`},
 			{`Tags = 'scifi' AND Year = 1965`, `IndexLookup by_tag: 1 range, then check [Year = 1965]`},
-			// The index of the books that are in print is never used, as nothing says that the
-			// query is only about them.
+			// The index of the books that are in print is only used by a query that is about them.
 			{`Decade = 1960`, `StoreScan, then check [Decade = 1960]`},
+			{`NOT InPrint AND Decade = 1960`, `StoreScan, then check [not (InPrint = true); Decade = 1960]`},
 			{`InPrint AND Decade >= 1970 AND lower(Author) = 'herbert'`,
-				`StoreScan, then check [InPrint = true; Decade >= 1970; lower("Author") = 'herbert']`},
+				`IndexLookup in_print_by_decade: 1 range, then check [InPrint = true; lower("Author") = 'herbert']`},
 			// A unique index finds one book at most, and costs the least.
 			{`Code = 'c007'`, `IndexLookup by_code: 1 range`},
 			{`Code IN ('c007', 'c008', 'c009')`, `IndexLookup by_code: 3 ranges`},

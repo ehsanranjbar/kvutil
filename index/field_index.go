@@ -17,11 +17,60 @@ type Option[V any] func(indexer Indexer[V]) Indexer[V]
 
 // Where keeps only the records that satisfy a condition in the index, which makes the index
 // smaller and cheaper to keep up to date when most of the records are of no interest to it.
-// A lookup in such an index only finds the records that satisfy the condition.
+// A lookup in such an index only finds the records that satisfy the condition. A query (package
+// query) reads such an index if its own conditions imply the condition of the index; the
+// condition of an index that is a function (cond.Func) is implied only by the function of the
+// same name, and its name must change when the function does. Versioned says that it did. An
+// error of the condition for a record fails the setting of the record.
 func Where[V any](cnd cond.Cond[V]) Option[V] {
 	return func(indexer Indexer[V]) Indexer[V] {
 		return filtered(indexer, cnd)
 	}
+}
+
+// Versioned gives the index a version, which identifies what the functions that it relies on
+// compute, like a condition that is a function (cond.Func) or an SQL function. The index is
+// identified by its version as it is by its fields and its condition, so it is built again
+// when the version changes. Versions that are given more than once, and the ones of the fields,
+// are all a part of the version of the index.
+func Versioned[V any](version string) Option[V] {
+	return func(indexer Indexer[V]) Indexer[V] {
+		return &versionedIndexer[V]{Indexer: indexer, version: version}
+	}
+}
+
+type versionedIndexer[V any] struct {
+	Indexer[V]
+	version string
+}
+
+// Descriptor implements the Indexer interface.
+func (v *versionedIndexer[V]) Descriptor() Descriptor {
+	desc := v.Indexer.Descriptor()
+	if v.version != "" {
+		if desc.Version != "" {
+			desc.Version += ";"
+		}
+		desc.Version += v.version
+	}
+	return desc
+}
+
+// Fields returns the fields of the wrapped indexer, if it is one of fields.
+func (v *versionedIndexer[V]) Fields() []field.Component[V] {
+	if f, ok := v.Indexer.(fielded[V]); ok {
+		return f.Fields()
+	}
+	return nil
+}
+
+// Ranges implements the RangePlanner interface, if the wrapped indexer does.
+func (v *versionedIndexer[V]) Ranges(conds ...cond.Cond[V]) ([]Bounds, []cond.Cond[V], error) {
+	l, ok := v.Indexer.(RangePlanner[V])
+	if !ok {
+		return nil, nil, errors.New("the indexer cannot be looked up with conditions")
+	}
+	return l.Ranges(conds...)
 }
 
 // Covering stores a value with every entry of the index, which can be read from the index
