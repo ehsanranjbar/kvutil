@@ -20,7 +20,8 @@ It needs Go 1.27.
 ## The layers
 
 ```text
-query/sql         the WHERE clause of a query  ->  cond, and the records that satisfy it
+query/sql         the WHERE clause of a query  ->  cond, and a query on a store
+query             queries: conditions, order, offset and limit, planned with the indexes
 field, cond       fields of records, and conditions on them
 index  agg  relation
                   secondary indexes, stored aggregations, relations between stores
@@ -248,19 +249,69 @@ ks.Retire("toys") // the store of the toys is gone from the program: its data is
 report, err := ks.Migrate(ctx, users, orders) // like migrate.Run, and the units go by their names
 ```
 
+## Queries
+
+`query` builds a query on the records of a store from conditions, an order and a page, and
+plans it: it chooses between scanning the store and reading one of its indexes, and between
+sorting the records and reading them in the order of an index. A query is a definition that
+does not change, so every method returns another one, and one query can be run in any number of
+transactions.
+
+```go
+total := field.Path[Order, int64]("Total")
+
+q := query.From(orders).
+    Where(customer.Eq("ann"), total.Gte(50)). // ANDed with the conditions so far
+    OrderBy(total.Desc()).                    // replaces the order; ties go by key
+    Offset(20).Limit(10)                      // there is no limit unless one is set
+
+fmt.Println(q.Explain())
+// Limit 10, offset 20
+// └─ TopN by Total desc
+//    └─ IndexLookup by_customer: 1 range, then check [Total >= 50]
+
+it := q.Run(tx) // an iterator that must be closed; errors come through its Err()
+```
+
+With an order, the records come in it, with the ones that have no value for a field first
+(last, for a field that is `Desc()`), and records that are equal in it by key. So the result
+does not depend on the plan. Without an order the records come in no order that is promised: a
+scan gives the order of the keys and an index the order of its entries, so `Offset` and `Limit`
+of a query without `OrderBy` page whatever order the plan gives, which can change when the
+indexes do.
+
+An index has no entry for a record that has no value for one of its fields, so the planner
+reads one only if none of the records that the query asks for lacks one: each field of the index
+is either `Always()` there (`field.Of`, or a `field.Path` with no pointer on the way), or a
+comparison of the query needs a value of it. `index.Lookup` fails with `index.ErrIncomplete` in
+the same case. An index that nothing narrows can still be read in full for its order under a
+`Limit`.
+
+`Explain` shows the plan as a tree of operators: `StoreScan`, `IndexLookup` (with the order
+that it gives, and `reversed` if it is read from its end), `Sort` and `TopN` (when the order is
+not given), `Limit` and `Empty` (when the conditions contradict each other, or the limit is 0).
+The planner merges the comparisons of a field, keeps `NOT` and `OR` to be checked on the
+records, estimates the cost of each index without any statistics (the numbers are in
+`query/plan.go`), and takes the cheapest. `Using("by_customer")` and `FullScan()` are hints,
+and an index that cannot serve the query is an error.
+
 ## Conditions as text
 
 `query/sql` reads the WHERE clause of a query, in the SQL of SQLite
 ([rqlite/sql](https://github.com/rqlite/sql) parses it), into the conditions that the indexes
 take. Comparisons of a field with values are served by indexes; `LIKE`, functions, arithmetic
-and everything else are evaluated on each record. `Query` runs a clause with the index that
-serves it, or by scanning the store, and `Explain` says which.
+and everything else are evaluated on each record. `Where` returns the `query.Query` of a clause,
+to give an order and a page to, and `Query` runs a clause with the index that serves it, or by
+scanning the store; `Explain` says which.
 
 ```go
 p := sql.For(orders)
 it, err := p.Query(tx, `Customer = 'ann' AND Total >= 50 AND lower(Customer) LIKE 'a%'`)
 plan, err := p.Explain(`Customer = 'ann' AND Total >= 50`)
-// index by_customer: 1 range, then check [Total >= 50]
+// IndexLookup by_customer: 1 range, then check [Total >= 50]
+
+q, err := p.Where(`Customer = 'ann'`) // ORDER BY and LIMIT are never in the text:
+it = q.OrderBy(total.Desc()).Limit(10).Run(tx) // they are methods of the query
 
 c, err := p.Parse(`lower(Customer) = 'ann'`) // a cond.Cond, for anything that has records
 ```
@@ -293,8 +344,9 @@ An engine that does not have a capability returns `kv.ErrUnsupported` for it.
 
 ## What is not there yet
 
-- A planner that weighs the indexes of a query (`Query` picks one by simple rules, and never
-  combines two), and queries as text beyond the WHERE clause.
+- A planner that combines indexes (a query reads one, and checks the rest on the records), uses
+  an index of some of the records, or keeps statistics; and queries as text beyond the WHERE
+  clause.
 - Building an index while the program writes to its store: `Migrate` is alone with the data.
 - A migration that changes the keys of the records, other than by hand in `migrate.Custom`.
 - Records that expire in stores with indexes or aggregations.
@@ -313,7 +365,7 @@ cd examples/petstore && go run .
 The examples of the packages, which are run as tests, show each of them in more detail:
 [index](index/example_test.go), [agg](agg/example_test.go), [relation](relation/example_test.go),
 [store/record](store/record/example_test.go), [migrate](migrate/example_test.go),
-[query/sql](query/sql/example_test.go).
+[query](query/example_test.go), [query/sql](query/sql/example_test.go).
 
 ## Tests
 

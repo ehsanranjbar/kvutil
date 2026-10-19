@@ -61,7 +61,9 @@ func (i *Instance[K, V]) scan(ranges []Bounds, reverse bool, filter []cond.Cond[
 // Lookup iterates over the records of the index that satisfy all the conditions, in ascending
 // order of the keys of the index. The index is used for the conditions that it can serve, and
 // the records that it finds are checked against the others, so the result is exact.
-// It fails if the indexer of the index cannot translate conditions.
+// It fails if the indexer of the index cannot translate conditions, and with ErrIncomplete if
+// the index may not have a record that satisfies them: if a field that records may have no
+// value for is left free by the conditions (see Index.Complete).
 func (i *Instance[K, V]) Lookup(conds ...cond.Cond[V]) (*Iterator[K, V], error) {
 	return i.lookup(conds, false)
 }
@@ -72,12 +74,7 @@ func (i *Instance[K, V]) ReverseLookup(conds ...cond.Cond[V]) (*Iterator[K, V], 
 }
 
 func (i *Instance[K, V]) lookup(conds []cond.Cond[V], reverse bool) (*Iterator[K, V], error) {
-	l, ok := i.x.indexer.(RangePlanner[V])
-	if !ok {
-		return nil, fmt.Errorf("index %q cannot be looked up with conditions", i.x.name)
-	}
-
-	ranges, residual, err := l.Ranges(conds...)
+	ranges, residual, err := i.Plan(conds...)
 	if err != nil {
 		return nil, err
 	}
@@ -88,11 +85,16 @@ func (i *Instance[K, V]) lookup(conds []cond.Cond[V], reverse bool) (*Iterator[K
 }
 
 // Plan returns how the index would serve conditions: the ranges of keys that it would read and
-// the conditions that it would have to check on the records that it finds.
+// the conditions that it would have to check on the records that it finds. It fails with
+// ErrIncomplete if the index may not have all the records that satisfy the conditions; see
+// Index.Complete.
 func (i *Instance[K, V]) Plan(conds ...cond.Cond[V]) (ranges []Bounds, residual []cond.Cond[V], err error) {
 	l, ok := i.x.indexer.(RangePlanner[V])
 	if !ok {
 		return nil, nil, fmt.Errorf("index %q cannot be looked up with conditions", i.x.name)
+	}
+	if err := i.x.Complete(conds...); err != nil {
+		return nil, nil, err
 	}
 	return l.Ranges(conds...)
 }

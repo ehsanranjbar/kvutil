@@ -3,6 +3,7 @@ package sql_test
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/ehsanranjbar/kvutil/field"
 	"github.com/ehsanranjbar/kvutil/index"
@@ -73,7 +74,7 @@ func Example() {
 			if err != nil {
 				panic(err)
 			}
-			fmt.Printf("%s\n  %s\n  %v\n", where, explain, titles)
+			fmt.Printf("%s\n  %s\n  %v\n", where, strings.ReplaceAll(explain, "\n", "\n  "), titles)
 		}
 
 		// The comparisons of the fields of an index are served by it, and the rest of the
@@ -114,13 +115,13 @@ func Example() {
 
 	// Output:
 	// Author = 'Herbert' AND Year >= 1970 AND Title LIKE '%dune'
-	//   index by_author_year: 1 range, then check ["Title" LIKE '%dune']
+	//   IndexLookup by_author_year: 1 range, then check ["Title" LIKE '%dune']
 	//   [Children of Dune]
 	// Decade = 1970 OR ('classic' IN Tags AND NOT Year >= 1900)
-	//   scan, then check [(Decade = 1970) or ((Tags = "classic") and (not (Year >= 1900)))]
+	//   StoreScan, then check [(Decade = 1970) or ((Tags = "classic") and (not (Year >= 1900)))]
 	//   [Emma Children of Dune The Dosadi Experiment]
 	// length(Title) > 10 AND InPrint
-	//   scan, then check [length("Title") > 10; InPrint = true]
+	//   StoreScan, then check [length("Title") > 10; InPrint = true]
 	//   [The Dosadi Experiment]
 	// condition: (Author = "Herbert") and (Year >= 1970) and ("Title" LIKE '%dune')
 	// Athor = 'Herbert': true false

@@ -79,47 +79,41 @@ func TestQueryAndExplain(t *testing.T) {
 			where   string
 			explain string
 		}{
-			{`Author = 'Herbert'`, `index by_author_year: 1 range`},
-			{`Author = 'Herbert' AND Year >= 1965`, `index by_author_year: 1 range`},
-			{`Year BETWEEN 1960 AND 1970 AND Author IN ('Herbert', 'Austen')`, `index by_author_year: 2 ranges`},
+			// Without an order the records come in the order of the index, and nothing is sorted.
+			{`Author = 'Herbert'`, `IndexLookup by_author_year: 1 range`},
+			{`Author = 'Herbert' AND Year >= 1965`, `IndexLookup by_author_year: 1 range`},
+			{`Year BETWEEN 1960 AND 1970 AND Author IN ('Herbert', 'Austen')`,
+				`IndexLookup by_author_year: 2 ranges`},
 			{`Author = 'Herbert' AND Year > 1900 AND Title LIKE '%Dune' AND NOT InPrint`,
-				`index by_author_year: 1 range, then check ["Title" LIKE '%Dune'; not (InPrint = true)]`},
-			{`Author = 'Herbert' OR Year = 1815`, `scan, then check [(Author = "Herbert") or (Year = 1815)]`},
+				`IndexLookup by_author_year: 1 range, then check ["Title" LIKE '%Dune'; not (InPrint = true)]`},
+			{`Author = 'Herbert' OR Year = 1815`, `StoreScan, then check [(Author = "Herbert") or (Year = 1815)]`},
 			// A condition on the second field alone does not narrow anything.
-			{`Year = 1965`, `scan, then check [Year = 1965]`},
-			{`'scifi' IN Tags AND Price > 5`, `index by_tag: 1 range, then check [Price > 5]`},
-			{`Tags IN ('scifi', 'new')`, `index by_tag: 2 ranges`},
-			{`Tags = 'scifi' AND Year = 1965`, `index by_tag: 1 range, then check [Year = 1965]`},
+			{`Year = 1965`, `StoreScan, then check [Year = 1965]`},
+			{`'scifi' IN Tags AND Price > 5`, `IndexLookup by_tag: 1 range, then check [Price > 5]`},
+			{`Tags IN ('scifi', 'new')`, `IndexLookup by_tag: 2 ranges`},
+			{`Tags = 'scifi' AND Year = 1965`, `IndexLookup by_tag: 1 range, then check [Year = 1965]`},
 			// The index of the books that are in print is never used, as nothing says that the
 			// query is only about them.
-			{`Decade = 1960`, `scan, then check [Decade = 1960]`},
+			{`Decade = 1960`, `StoreScan, then check [Decade = 1960]`},
 			{`InPrint AND Decade >= 1970 AND lower(Author) = 'herbert'`,
-				`scan, then check [InPrint = true; Decade >= 1970; lower("Author") = 'herbert']`},
-			// A unique index with nothing to check, then the fewest conditions left to check.
-			{`Code = 'c007'`, `index by_code: 1 range`},
-			{`Code IN ('c007', 'c008', 'c009')`, `index by_code: 3 ranges`},
-			{`Code = 'c007' AND Author = 'Herbert'`, `index by_author_year: 1 range, then check [Code = "c007"]`},
+				`StoreScan, then check [InPrint = true; Decade >= 1970; lower("Author") = 'herbert']`},
+			// A unique index finds one book at most, and costs the least.
+			{`Code = 'c007'`, `IndexLookup by_code: 1 range`},
+			{`Code IN ('c007', 'c008', 'c009')`, `IndexLookup by_code: 3 ranges`},
+			{`Code = 'c007' AND Author = 'Herbert'`, `IndexLookup by_code: 1 range, then check [Author = "Herbert"]`},
 			{`Code >= 'c200' AND Author = 'Herbert' AND Year = 1965`,
-				`index by_author_year: 1 range, then check [Code >= "c200"]`},
+				// Both fields have the one value, so the entries are in the order of the keys.
+				`IndexLookup by_author_year: 1 range, then check [Code >= "c200"]`},
 			{`Author = 'Herbert' AND Tags = 'scifi' AND Code = 'c007'`,
-				`index by_author_year: 1 range, then check [Tags = "scifi"; Code = "c007"]`},
-			{`Tags = 'scifi' AND Code = 'c007'`, `index by_tag: 1 range, then check [Code = "c007"]`},
+				`IndexLookup by_code: 1 range, then check [Author = "Herbert"; Tags = "scifi"]`},
+			{`Tags = 'scifi' AND Code = 'c007'`, `IndexLookup by_code: 1 range, then check [Tags = "scifi"]`},
 			// A contradiction reads nothing.
-			{`Code = 'c007' AND Code = 'c008'`, `index by_code: 1 range, then check [Code = "c008"]`},
-			{`Year BETWEEN 1970 AND 1960 AND Author = 'Herbert'`, `index by_author_year: 1 range, then check [Year >= 1960 and Year <= 1970]`},
-			{`TRUE`, `scan`},
-			{`FALSE`, `scan, then check [false]`},
-			{`Title LIKE 'D%'`, `scan, then check ["Title" LIKE 'D%']`},
+			{`Code = 'c007' AND Code = 'c008'`, `Empty`},
+			{`Year BETWEEN 1970 AND 1960 AND Author = 'Herbert'`, `Empty`},
+			{`TRUE`, `StoreScan`},
+			{`FALSE`, `Empty`},
+			{`Title LIKE 'D%'`, `StoreScan, then check ["Title" LIKE 'D%']`},
 		} {
-			if test.where == `Year BETWEEN 1970 AND 1960 AND Author = 'Herbert'` ||
-				test.where == `Code = 'c007' AND Code = 'c008'` {
-				// These are only checked for what they find.
-				c, err := p.Parse(test.where)
-				require.NoError(t, err, test.where)
-				requireQuery(t, db, lib, p, test.where, c)
-				continue
-			}
-
 			got, err := p.Explain(test.where)
 			require.NoError(t, err, test.where)
 			require.Equal(t, test.explain, got, test.where)
@@ -146,9 +140,9 @@ func TestQueryAndExplain(t *testing.T) {
 
 			for where, want := range map[string]string{
 				// Nothing is left to check with the second index, and the year with the first.
-				`Author = 'Herbert' AND Year = 1965`: `index by_author_year: 1 range`,
+				`Author = 'Herbert' AND Year = 1965`: `IndexLookup by_author_year: 1 range`,
 				// Both find the book with nothing left to check, and one of them is unique.
-				`Code = 'c007'`: `index by_code: 1 range`,
+				`Code = 'c007'`: `IndexLookup by_code: 1 range`,
 			} {
 				got, err := p.Explain(where)
 				require.NoError(t, err, where)
@@ -209,12 +203,7 @@ func requireQuery(t *testing.T, db kv.DB, lib *library, p *sql.Parser[int64, Boo
 
 		keys, err := iterutil.Of[int64, *Book](it).Keys()
 		require.NoError(t, err, where)
-		explain, err := p.Explain(where)
-		require.NoError(t, err, where)
-		if len(explain) >= 4 && explain[:4] == "scan" {
-			// The order of the keys.
-			require.True(t, slices.IsSorted(keys), where)
-		}
+		// There is no order to the books of a query that has none.
 		slices.Sort(keys)
 		require.Equal(t, want, keys, where)
 
@@ -251,12 +240,12 @@ func TestQueryChoosesTheFewestRanges(t *testing.T) {
 
 		explain, err := p.Explain(`Author IN ('Herbert', 'Austen', 'herbert') AND Year = 1965`)
 		require.NoError(t, err)
-		require.Equal(t, `index by_year: 1 range, then check [Author in ("Herbert", "Austen", "herbert")]`, explain)
+		require.Equal(t, `IndexLookup by_year: 1 range, then check [Author in ("Herbert", "Austen", "herbert")]`, explain)
 
 		// With as many ranges, the first index of the store.
 		explain, err = p.Explain(`Author = 'Herbert' AND Year = 1965`)
 		require.NoError(t, err)
-		require.Equal(t, `index by_author: 1 range, then check [Year = 1965]`, explain)
+		require.Equal(t, `IndexLookup by_author: 1 range, then check [Year = 1965]`, explain)
 
 		for _, where := range []string{
 			`Author IN ('Herbert', 'Austen', 'herbert') AND Year = 1965`,
@@ -279,7 +268,7 @@ func TestQueryWithoutIndexes(t *testing.T) {
 		for _, where := range []string{`Author = 'Herbert'`, `Year > 1960 AND lower(Title) LIKE '%dune%'`, `Subtitle IS NULL`} {
 			explain, err := p.Explain(where)
 			require.NoError(t, err)
-			require.Contains(t, explain, "scan")
+			require.Contains(t, explain, "StoreScan")
 			c, err := p.Parse(where)
 			require.NoError(t, err)
 			requireQuery(t, db, lib, p, where, c)
@@ -291,9 +280,16 @@ func TestQueryWithoutIndexes(t *testing.T) {
 			index.Composite(books, "by_author_year", field.List(author, year.Desc()))
 		})
 		p := sql.For(lib.books)
+		q, err := p.Where(`Author = 'Herbert'`)
+		require.NoError(t, err)
+		// Year is descending in the index, and the index gives the order that is asked for.
+		q = q.OrderBy(year.Desc())
+		explain, err := q.Explain()
+		require.NoError(t, err)
+		require.Equal(t, "IndexLookup by_author_year (in order of Year desc): 1 range", explain)
+
 		require.NoError(t, db.View(func(tx kv.Tx) error {
-			it, err := p.Query(tx, `Author = 'Herbert'`)
-			require.NoError(t, err)
+			it := q.Run(tx)
 			defer it.Close()
 
 			var years []int
@@ -304,7 +300,6 @@ func TestQueryWithoutIndexes(t *testing.T) {
 			}
 			require.NoError(t, it.Err())
 			require.NotEmpty(t, years)
-			// Year is descending in the index.
 			require.True(t, slices.IsSortedFunc(years, func(a, b int) int { return b - a }), "%v", years)
 			return nil
 		}))

@@ -207,6 +207,6 @@ func Example_records() {
 
 	// Output:
 	// orders of ann: [1 3]
-	// Customer = 'ann' AND Total >= 50 -> [3] by index by_customer: 1 range, then check [Total >= 50]
+	// Customer = 'ann' AND Total >= 50 -> [3] by IndexLookup by_customer: 1 range, then check [Total >= 50]
 	// revenue of ann: 30 on the first day, 100 in all
 }

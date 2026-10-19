@@ -91,7 +91,7 @@ import (
 
 	"github.com/ehsanranjbar/kvutil/cond"
 	"github.com/ehsanranjbar/kvutil/field"
-	extstore "github.com/ehsanranjbar/kvutil/store/ext"
+	"github.com/ehsanranjbar/kvutil/query"
 )
 
 var (
@@ -115,11 +115,7 @@ var (
 
 // Store is a store whose records can be queried: one that indexes can be defined on. It is
 // implemented by the stores of the packages ext and record.
-type Store[K, V any] interface {
-	extstore.Extensible[K, V]
-	// Extensions returns the extensions of the store, which the indexes are among.
-	Extensions() []any
-}
+type Store[K, V any] = query.Store[K, V]
 
 // Option is an option of a parser.
 type Option[V any] func(*core[V])

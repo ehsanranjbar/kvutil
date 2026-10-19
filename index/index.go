@@ -22,6 +22,11 @@ import (
 // another record.
 var ErrUniqueViolation = errors.New("index: unique index violation")
 
+// ErrIncomplete is returned for a lookup whose conditions leave a field of the index free that a
+// record may have no value for, or several. The index has no entry for such a record, or has
+// several, so the lookup would not find all the records that satisfy the conditions.
+var ErrIncomplete = errors.New("index: the index may not have all the records that satisfy the conditions")
+
 // Entry is an entry of a record in an index.
 type Entry struct {
 	// Key is what the record is found by. An index key must mark where it ends, or all the keys
@@ -186,6 +191,39 @@ func (x *Index[K, V]) Fields() []field.Component[V] {
 // fielded is implemented by the indexers whose keys are made of fields.
 type fielded[V any] interface {
 	Fields() []field.Component[V]
+}
+
+// Complete checks that an index has an entry for every record that satisfies the conditions,
+// which it has if each of its fields is either one that every record has exactly one value for
+// (field.Always), or one that a condition needs a value of: a comparison of the field, at the
+// top of the conditions, with a value or a range. A negation or a disjunction is no such
+// condition. It returns ErrIncomplete naming the field if one is left free. An index whose keys
+// are not made of fields is not checked.
+func (x *Index[K, V]) Complete(conds ...cond.Cond[V]) error {
+	fields := x.Fields()
+	if fields == nil {
+		return nil
+	}
+
+	needed := map[string]struct{}{}
+	for _, c := range flatten(conds) {
+		cmp, ok := c.(*cond.Comparison[V])
+		if !ok || cmp.Err() != nil {
+			continue
+		}
+		if cmp.Op == cond.OpRange || len(cmp.Values) > 0 {
+			needed[cmp.Path] = struct{}{}
+		}
+	}
+
+	for _, f := range fields {
+		if _, ok := needed[f.Path()]; ok || f.Always() {
+			continue
+		}
+		return fmt.Errorf("%w: the conditions do not need a value of %s, which a record may not have, for the index %q",
+			ErrIncomplete, f.Path(), x.name)
+	}
+	return nil
 }
 
 // Prefix returns the prefix that the index keeps its entries under, which is given to it when it

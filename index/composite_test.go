@@ -337,7 +337,18 @@ func TestLookupFindsWhatAScanFinds(t *testing.T) {
 		},
 	}
 
-	narrowed := 0
+	// needsTags reports whether the conditions are only satisfied by a pet that has a tag: one
+	// of them, at the top, is a comparison of the tags.
+	needsTags := func(conds []cond.Cond[pet]) bool {
+		for _, c := range conds {
+			if cmp, ok := c.(*cond.Comparison[pet]); ok && cmp.Path == tagsField.Path() {
+				return true
+			}
+		}
+		return false
+	}
+
+	narrowed, incomplete := 0, 0
 	for range 2000 {
 		var conds []cond.Cond[pet]
 		for _, f := range fields {
@@ -362,10 +373,16 @@ func TestLookupFindsWhatAScanFinds(t *testing.T) {
 				ins := idx.Instantiate(tx)
 
 				// A record with no value for a field of an index is not in the index, so the
-				// index can only answer for the records that have one.
-				expected := want
-				if idx.Name() == "tag_age" {
-					expected = slices.DeleteFunc(slices.Clone(want), func(id int64) bool { return len(pets[id].Tags) == 0 })
+				// index cannot be looked up unless the conditions need a value of that field.
+				if idx.Name() == "tag_age" && !needsTags(conds) {
+					_, err := ins.Lookup(conds...)
+					require.ErrorIs(t, err, index.ErrIncomplete, "%v", texts(conds))
+					_, err = ins.ReverseLookup(conds...)
+					require.ErrorIs(t, err, index.ErrIncomplete, "%v", texts(conds))
+					_, _, err = ins.Plan(conds...)
+					require.ErrorIs(t, err, index.ErrIncomplete, "%v", texts(conds))
+					incomplete++
+					continue
 				}
 
 				// The same records both ways, with no record twice.
@@ -373,8 +390,8 @@ func TestLookupFindsWhatAScanFinds(t *testing.T) {
 				backward := ids(t, must(ins.ReverseLookup(conds...)))
 				slices.Sort(forward)
 				slices.Sort(backward)
-				require.Equal(t, expected, forward, "%s: %v", idx.Name(), texts(conds))
-				require.Equal(t, expected, backward, "%s backwards: %v", idx.Name(), texts(conds))
+				require.Equal(t, want, forward, "%s: %v", idx.Name(), texts(conds))
+				require.Equal(t, want, backward, "%s backwards: %v", idx.Name(), texts(conds))
 
 				ranges, _, err := ins.Plan(conds...)
 				require.NoError(t, err)
@@ -388,6 +405,7 @@ func TestLookupFindsWhatAScanFinds(t *testing.T) {
 	}
 	// The indexes must have been of use for a good part of the lookups.
 	require.Greater(t, narrowed, 2000)
+	require.Greater(t, incomplete, 100)
 }
 
 // random makes random comparisons of a field.

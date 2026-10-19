@@ -18,8 +18,10 @@ type Field[V, F any] struct {
 	path  string
 	get   func(*V) []F
 	multi bool
-	desc  bool
-	codec codec.KeyCodec[F]
+	// always is set if every record has exactly one value.
+	always bool
+	desc   bool
+	codec  codec.KeyCodec[F]
 	// The type of the values, which is F unless the field was found by Reflect.
 	typ reflect.Type
 }
@@ -46,7 +48,9 @@ func newField[V, F any](path string, get func(*V) []F, multi bool, c []codec.Key
 // The values are encoded with the key codec of their type, unless one is given.
 // It panics if the type has no key codec and none is given.
 func Of[V, F any](path string, get func(*V) F, c ...codec.KeyCodec[F]) Field[V, F] {
-	return newField(path, func(v *V) []F { return []F{get(v)} }, false, c)
+	f := newField(path, func(v *V) []F { return []F{get(v)} }, false, c)
+	f.always = true
+	return f
 }
 
 // Each defines a field by a function that returns several values for a record, like its tags.
@@ -71,13 +75,15 @@ func Path[V, F any](path string, c ...codec.KeyCodec[F]) Field[V, F] {
 
 	switch {
 	case t == ft:
-		return newField(path, func(v *V) []F {
+		f := newField(path, func(v *V) []F {
 			fv, ok := value(v)
 			if !ok {
 				return nil
 			}
 			return []F{fv.Interface().(F)}
 		}, false, c)
+		f.always = !passesPointer[V](path)
+		return f
 
 	case t.Kind() == reflect.Pointer && t.Elem() == ft:
 		return newField(path, func(v *V) []F {
@@ -166,6 +172,7 @@ func Reflect[V any](path string) (Field[V, any], error) {
 			}
 			return []any{fv.Interface()}
 		}, false, []codec.KeyCodec[any]{c})
+		f.always = !passesPointer[V](path)
 	} else if t.Kind() == reflect.Pointer {
 		t = t.Elem()
 		if c, err = codec.KeyForType(t); err == nil {
@@ -201,6 +208,32 @@ func Reflect[V any](path string) (Field[V, any], error) {
 	return f, nil
 }
 
+// passesPointer reports whether the path to a field of a struct goes through a pointer, which
+// may be nil in a record, so that the record has no value for the field.
+func passesPointer[V any](path string) bool {
+	t := reflect.TypeFor[V]()
+	for _, part := range strings.Split(path, ".") {
+		if t.Kind() == reflect.Pointer {
+			return true
+		}
+		sf, ok := t.FieldByName(part)
+		if !ok {
+			return false
+		}
+		// The fields that the field is promoted through are on the way too.
+		cur := t
+		for i, index := range sf.Index {
+			ft := cur.Field(index).Type
+			if i < len(sf.Index)-1 && ft.Kind() == reflect.Pointer {
+				return true
+			}
+			cur = ft
+		}
+		t = sf.Type
+	}
+	return false
+}
+
 // Desc returns the field with its values sorting from the greatest to the least in the keys
 // of an index.
 func (f Field[V, F]) Desc() Field[V, F] {
@@ -221,6 +254,19 @@ func (f Field[V, F]) Descending() bool {
 // Multi reports whether a record may have several values for the field.
 func (f Field[V, F]) Multi() bool {
 	return f.multi
+}
+
+// Always reports whether every record has exactly one value for the field. It is so for a field
+// defined with Of, and for one defined with Path or Reflect whose path goes through no pointer
+// and whose last part is neither a pointer nor a slice of the values. It is not for a field
+// defined with Each, nor for one of a slice, of a pointer, or behind a pointer.
+//
+// An index has no entry for a record that has no value for one of its fields, or that has
+// several values and so several entries: a query can only read an index to find all the
+// records if every field of the index is Always, or has a value in all the records that it asks
+// for.
+func (f Field[V, F]) Always() bool {
+	return f.always
 }
 
 // Type returns the type of the values of the field. It is F, unless the field was found by
@@ -289,6 +335,8 @@ type Component[V any] interface {
 	Descending() bool
 	// Multi reports whether a record may have several values.
 	Multi() bool
+	// Always reports whether every record has exactly one value; see Field.Always.
+	Always() bool
 	// CodecName returns the name of the key codec of the values.
 	CodecName() string
 	// Keys returns the values that a record has, each encoded as a part of a key: in the form

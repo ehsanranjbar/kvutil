@@ -268,3 +268,47 @@ func TestComparisonsAgreeWithValues(t *testing.T) {
 		require.Equal(t, b.Title <= s, match(t, title.Lte(s), b), "%q <= %q", b.Title, s)
 	}
 }
+
+// TestComparisonsKnowIfTheFieldHasSeveralValues checks what a planner needs to know to merge the
+// comparisons of a field: two of them are one only if a record has a value at most.
+func TestComparisonsKnowIfTheFieldHasSeveralValues(t *testing.T) {
+	require.False(t, year.Gt(1).Multi)
+	require.False(t, year.Eq(1).Multi)
+	require.False(t, title.In("a", "b").Multi)
+	require.True(t, tags.Gt("a").Multi)
+	require.True(t, tags.Eq("a").Multi)
+	require.True(t, tags.In("a", "b").Multi)
+}
+
+// TestAlways checks which fields every record has exactly one value for.
+func TestAlways(t *testing.T) {
+	require.True(t, title.Always())
+	require.True(t, title.Desc().Always())
+	require.False(t, tags.Always())
+
+	// A path with no pointer on it.
+	require.True(t, field.Path[Book, string]("Title").Always())
+	require.True(t, field.Path[Book, int]("Author.Born").Always())
+	// A pointer at the end, a pointer on the way, and a slice.
+	require.False(t, field.Path[Book, string]("Subtitle").Always())
+	require.False(t, field.Path[Book, string]("Editor.Name").Always())
+	require.False(t, field.Path[Book, string]("Tags").Always())
+
+	for path, want := range map[string]bool{
+		"Title":       true,
+		"Author.Name": true,
+		"Subtitle":    false,
+		"Editor.Name": false,
+		"Editor":      false,
+		"Tags":        false,
+	} {
+		f, err := field.Reflect[Book](path)
+		if path == "Editor" {
+			// A struct has no key codec.
+			require.Error(t, err)
+			continue
+		}
+		require.NoError(t, err, path)
+		require.Equal(t, want, f.Always(), path)
+	}
+}

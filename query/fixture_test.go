@@ -1,0 +1,120 @@
+package query_test
+
+import (
+	"fmt"
+	"math/rand/v2"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+
+	"github.com/ehsanranjbar/kvutil/field"
+	"github.com/ehsanranjbar/kvutil/index"
+	"github.com/ehsanranjbar/kvutil/kv"
+	extstore "github.com/ehsanranjbar/kvutil/store/ext"
+)
+
+// Item is a record with fields of every kind: ones that every record has, ones that a record may
+// have none of or several, and ones that no index is defined on.
+type Item struct {
+	Code   string   // unique
+	Group  string   // few values
+	Rank   int      // few values
+	Score  int      // few values
+	Label  *string  // optional, and in a composite index after a field that every item has
+	Extra  int      // no index
+	Tags   []string // several values
+	Note   *string  // optional
+	Weight *int     // optional, no index
+	Ready  bool
+}
+
+var (
+	code   = field.Path[Item, string]("Code")
+	group  = field.Path[Item, string]("Group")
+	rank   = field.Path[Item, int]("Rank")
+	score  = field.Path[Item, int]("Score")
+	label  = field.Path[Item, string]("Label")
+	extra  = field.Path[Item, int]("Extra")
+	tags   = field.Path[Item, string]("Tags")
+	note   = field.Path[Item, string]("Note")
+	weight = field.Path[Item, int]("Weight")
+	ready  = field.Path[Item, bool]("Ready")
+)
+
+const itemCount = 400
+
+// fixture is a store of items with indexes, and the items that are in it.
+type fixture struct {
+	store *extstore.Store[int64, Item]
+	items map[int64]*Item
+}
+
+// defineItems defines the store of items and its indexes. The indexes are in the order in which
+// ties between them are resolved.
+func defineItems() *extstore.Store[int64, Item] {
+	items := extstore.New[int64, Item]("items")
+	index.Composite(items, "by_group_rank", field.List(group, rank.Desc()))
+	index.Composite(items, "by_score_label", field.List(score, label))
+	index.Unique(items, "by_code", code)
+	index.UniqueComposite(items, "by_group_code", field.List(group, code.Desc()))
+	index.Composite(items, "by_tag_rank", field.List(tags, rank))
+	index.On(items, "by_note", note)
+	// An index of some of the items is never read by a query.
+	index.On(items, "ready_by_rank", rank, index.Where(ready.Eq(true)))
+	return items
+}
+
+// randomItem returns an item whose fields have a few values each, so that many items are equal
+// in a field and a condition on it is satisfied by some of them.
+func randomItem(rng *rand.Rand, id int64) *Item {
+	pick := func(values ...string) string { return values[rng.IntN(len(values))] }
+
+	it := &Item{
+		Code:  fmt.Sprintf("i%04d", id),
+		Group: pick("a", "b", "c", "d"),
+		Rank:  rng.IntN(10),
+		Score: rng.IntN(5),
+		Extra: rng.IntN(6),
+		Ready: rng.IntN(2) == 0,
+	}
+	if rng.IntN(5) > 0 {
+		l := pick("l0", "l1", "l2", "l3", "l4")
+		it.Label = &l
+	}
+	for _, tag := range []string{"t0", "t1", "t2", "t3"} {
+		if rng.IntN(3) == 0 {
+			it.Tags = append(it.Tags, tag)
+		}
+	}
+	if rng.IntN(2) == 0 {
+		n := pick("n0", "n1", "n2")
+		it.Note = &n
+	}
+	if rng.IntN(2) == 0 {
+		w := rng.IntN(5)
+		it.Weight = &w
+	}
+	return it
+}
+
+// newFixture defines the store of items and fills a database with them.
+func newFixture(t *testing.T, db kv.DB) *fixture {
+	t.Helper()
+
+	f := &fixture{store: defineItems(), items: map[int64]*Item{}}
+	require.NoError(t, f.store.Check(db))
+
+	rng := rand.New(rand.NewPCG(11, 12))
+	require.NoError(t, db.Update(func(tx kv.Tx) error {
+		store := f.store.Instantiate(tx)
+		for id := int64(1); id <= itemCount; id++ {
+			it := randomItem(rng, id)
+			f.items[id] = it
+			if err := store.Set(id, it); err != nil {
+				return err
+			}
+		}
+		return nil
+	}))
+	return f
+}

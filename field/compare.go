@@ -9,7 +9,9 @@ import (
 )
 
 func (f Field[V, F]) comparison(op cond.Op, text string) *cond.Comparison[V] {
-	return cond.NewComparison(f.path, f.codec.Name(), op, f.ascending).Describe(text)
+	c := cond.NewComparison(f.path, f.codec.Name(), op, f.ascending).Describe(text)
+	c.Multi = f.multi
+	return c
 }
 
 // Eq returns the condition of the field being equal to a value.

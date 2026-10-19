@@ -100,8 +100,9 @@ func (x *FieldsIndexer[V]) Descriptor() Descriptor {
 // returned as the residual.
 func (x *FieldsIndexer[V]) Ranges(conds ...cond.Cond[V]) ([]Bounds, []cond.Cond[V], error) {
 	// The comparisons that the index may use, by their fields. Several ranges on a field are
-	// one range, and anything else that comes after the first comparison of a field is left
-	// to be checked on the records.
+	// one range, unless the field may have several values, as different values can satisfy
+	// the ranges. Anything else that comes after the first comparison of a field is left to be
+	// checked on the records.
 	var residual []cond.Cond[V]
 	byPath := map[string]*cond.Comparison[V]{}
 	for _, cnd := range flatten(conds) {
@@ -124,7 +125,7 @@ func (x *FieldsIndexer[V]) Ranges(conds ...cond.Cond[V]) ([]Bounds, []cond.Cond[
 		switch {
 		case !ok:
 			byPath[c.Path] = c
-		case first.Op == cond.OpRange && c.Op == cond.OpRange:
+		case first.Op == cond.OpRange && c.Op == cond.OpRange && !first.Multi && !c.Multi:
 			byPath[c.Path] = intersect(first, c)
 		default:
 			residual = append(residual, cnd)

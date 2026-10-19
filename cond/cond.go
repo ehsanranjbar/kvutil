@@ -55,6 +55,10 @@ type Comparison[V any] struct {
 	Values [][]byte
 	// Low and High are the sides of the range of an OpRange. A nil side is not bounded.
 	Low, High *Bound
+	// Multi is set if the field may have several values for a record. Two comparisons of such a
+	// field can be satisfied by different values, so they are not the same as one comparison of
+	// both: Tags > 'a' AND Tags < 'c' is not Tags in the range from 'a' to 'c'.
+	Multi bool
 
 	keys func(*V) ([][]byte, error)
 	text string
