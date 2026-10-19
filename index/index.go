@@ -233,6 +233,12 @@ func (m maintainer[K, V]) Fields() []field.Component[V] {
 	return m.x.Fields()
 }
 
+// Index returns the index that the extension keeps up to date. It is how a query finds the
+// indexes of a store by going through its extensions.
+func (m maintainer[K, V]) Index() *Index[K, V] {
+	return m.x
+}
+
 // Instantiate implements the extstore.Extension interface.
 func (m maintainer[K, V]) Instantiate(tx kv.Tx) extstore.ExtensionInstance[K, V] {
 	return &maintenance[K, V]{

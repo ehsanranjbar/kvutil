@@ -20,7 +20,7 @@ It needs Go 1.27.
 ## The layers
 
 ```text
-query/ql          text of a condition  ->  cond
+query/sql         the WHERE clause of a query  ->  cond, and the records that satisfy it
 field, cond       fields of records, and conditions on them
 index  agg  relation
                   secondary indexes, stored aggregations, relations between stores
@@ -250,19 +250,27 @@ report, err := ks.Migrate(ctx, users, orders) // like migrate.Run, and the units
 
 ## Conditions as text
 
-`query/ql` turns text into the conditions that the indexes take. Comparisons of a field with
-values are served by indexes; functions and everything else are evaluated on each record by
-[qlbridge](https://github.com/araddon/qlbridge).
+`query/sql` reads the WHERE clause of a query, in the SQL of SQLite
+([rqlite/sql](https://github.com/rqlite/sql) parses it), into the conditions that the indexes
+take. Comparisons of a field with values are served by indexes; `LIKE`, functions, arithmetic
+and everything else are evaluated on each record. `Query` runs a clause with the index that
+serves it, or by scanning the store, and `Explain` says which.
 
 ```go
-c, err := ql.For(orders).Parse(`Customer = "ann" AND Total >= 50`)
-it, err := byCustomer.Instantiate(tx).Lookup(c)
+p := sql.For(orders)
+it, err := p.Query(tx, `Customer = 'ann' AND Total >= 50 AND lower(Customer) LIKE 'a%'`)
+plan, err := p.Explain(`Customer = 'ann' AND Total >= 50`)
+// index by_customer: 1 range, then check [Total >= 50]
+
+c, err := p.Parse(`lower(Customer) = 'ann'`) // a cond.Cond, for anything that has records
 ```
 
-A text that names a field or a function that there is not, or that compares a field with a
-value that it cannot have, is an error when it is parsed. The lexer of qlbridge does not return
-for some texts, which the documentation of the package lists: check a text that comes from
-someone who is not trusted before parsing it.
+As in SQLite, single quotes make a string and double quotes make a name: `Customer = "ann"`
+compares two fields, and is an error when there is no field `ann`. A text that names a field or
+a function that there is not, that compares a field with a value that it cannot have, or that
+is not true or false where a condition is expected (`Total + 1`), is an error when it is parsed.
+Conditions are true or false, not true, false or unknown as in SQL: a comparison with a value that a
+record does not have is false, and `NOT` makes it true.
 
 ## What is specific to Badger
 
@@ -285,7 +293,8 @@ An engine that does not have a capability returns `kv.ErrUnsupported` for it.
 
 ## What is not there yet
 
-- A planner that chooses the indexes of a query, and queries as text beyond conditions.
+- A planner that weighs the indexes of a query (`Query` picks one by simple rules, and never
+  combines two), and queries as text beyond the WHERE clause.
 - Building an index while the program writes to its store: `Migrate` is alone with the data.
 - A migration that changes the keys of the records, other than by hand in `migrate.Custom`.
 - Records that expire in stores with indexes or aggregations.
@@ -304,7 +313,7 @@ cd examples/petstore && go run .
 The examples of the packages, which are run as tests, show each of them in more detail:
 [index](index/example_test.go), [agg](agg/example_test.go), [relation](relation/example_test.go),
 [store/record](store/record/example_test.go), [migrate](migrate/example_test.go),
-[query/ql](query/ql/example_test.go).
+[query/sql](query/sql/example_test.go).
 
 ## Tests
 

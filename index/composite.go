@@ -171,8 +171,12 @@ parts:
 		}
 	}
 
-	for path, c := range byPath {
-		if _, ok := used[path]; !ok {
+	// In the order of the fields, so that the plan of the same conditions is always the same.
+	for _, part := range x.parts {
+		if _, ok := used[part.Path()]; ok {
+			continue
+		}
+		if c, ok := byPath[part.Path()]; ok {
 			residual = append(residual, c)
 		}
 	}

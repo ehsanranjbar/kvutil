@@ -13,7 +13,7 @@ import (
 	"github.com/ehsanranjbar/kvutil/kv"
 	"github.com/ehsanranjbar/kvutil/kv/memkv"
 	"github.com/ehsanranjbar/kvutil/kv/prefix"
-	"github.com/ehsanranjbar/kvutil/query/ql"
+	"github.com/ehsanranjbar/kvutil/query/sql"
 	"github.com/ehsanranjbar/kvutil/store/record"
 	"github.com/ehsanranjbar/kvutil/store/typed"
 )
@@ -172,20 +172,22 @@ func Example_records() {
 		}
 		fmt.Println("orders of ann:", ids)
 
-		// By conditions, which are also what the text of a query becomes.
-		c, err := ql.For(orders).Parse(`Customer = "ann" AND Total >= 50`)
+		// By the WHERE clause of a query, which uses an index where one serves it.
+		parser := sql.For(orders)
+		where := `Customer = 'ann' AND Total >= 50`
+		plan, err := parser.Explain(where)
 		if err != nil {
 			return err
 		}
-		it, err = byCustomer.Instantiate(tx).Lookup(c)
+		found, err := parser.Query(tx, where)
 		if err != nil {
 			return err
 		}
-		ids, err = iterutil.Of[int64, *Order](it).Keys()
+		ids, err = found.Keys()
 		if err != nil {
 			return err
 		}
-		fmt.Println(c, "->", ids)
+		fmt.Println(where, "->", ids, "by", plan)
 
 		// The aggregation, for a day and for all of time.
 		first, _, err := revenue.Instantiate(tx).At(agg.Daily, "ann", day(1))
@@ -205,6 +207,6 @@ func Example_records() {
 
 	// Output:
 	// orders of ann: [1 3]
-	// (Customer = "ann") and (Total >= 50) -> [3]
+	// Customer = 'ann' AND Total >= 50 -> [3] by index by_customer: 1 range, then check [Total >= 50]
 	// revenue of ann: 30 on the first day, 100 in all
 }
