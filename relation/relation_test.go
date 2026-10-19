@@ -2,6 +2,7 @@ package relation_test
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"math/rand/v2"
@@ -12,8 +13,9 @@ import (
 	"github.com/ehsanranjbar/kvutil/internal/testkv"
 	"github.com/ehsanranjbar/kvutil/iterutil"
 	"github.com/ehsanranjbar/kvutil/kv"
+	"github.com/ehsanranjbar/kvutil/kv/prefix"
+	"github.com/ehsanranjbar/kvutil/migrate"
 	"github.com/ehsanranjbar/kvutil/relation"
-	"github.com/ehsanranjbar/kvutil/schema"
 	"github.com/ehsanranjbar/kvutil/store/record"
 	"github.com/stretchr/testify/require"
 )
@@ -42,8 +44,8 @@ func must[T any](v T, err error) T {
 }
 
 // newStore defines a store of entities.
-func newStore[I comparable](sch *schema.Schema, name string) *record.Store[I, entity[I]] {
-	return record.New[I, entity[I]](sch.Namespace(name))
+func newStore[I comparable](name string) *record.Store[I, entity[I]] {
+	return record.New[I, entity[I]](name)
 }
 
 // add sets the entities of the ids.
@@ -95,35 +97,30 @@ func keysOf[K, D any](entries []entry[K, D]) []K {
 	return keys
 }
 
-// rawCount counts the keys that a namespace has in a transaction.
-func rawCount(t *testing.T, tx kv.Tx, ns *schema.Namespace) int {
+// rawCount counts the keys that are under a prefix in a transaction, except for the one that
+// the unit under the prefix is recorded at.
+func rawCount(t *testing.T, tx kv.Tx, p []byte) int {
 	t.Helper()
 
-	it, err := ns.Open(tx).Iterator(nil, nil)
+	it, err := prefix.New(tx, p).Iterator(nil, nil)
 	require.NoError(t, err)
 	defer it.Close()
 
 	n := 0
 	for ; it.Valid(); it.Next() {
-		n++
+		if !bytes.Equal(it.Key(), []byte{'m'}) {
+			n++
+		}
 	}
 	return n
 }
 
-// rawCountUnder counts the keys of a namespace that have a prefix, which is the namespace of a
-// direction of a relation.
-func rawCountUnder(t *testing.T, tx kv.Tx, ns *schema.Namespace, prefix byte) int {
+// rawCountUnder counts the keys that are under a prefix followed by a byte, which is the
+// prefix of a direction of a relation.
+func rawCountUnder(t *testing.T, tx kv.Tx, p []byte, b byte) int {
 	t.Helper()
 
-	it, err := ns.Open(tx).Iterator([]byte{prefix}, []byte{prefix + 1})
-	require.NoError(t, err)
-	defer it.Close()
-
-	n := 0
-	for ; it.Valid(); it.Next() {
-		n++
-	}
-	return n
+	return rawCount(t, tx, append(bytes.Clone(p), b))
 }
 
 // plainCodec encodes a string as it is.
@@ -139,11 +136,10 @@ var _ codec.ValueCodec[string] = plainCodec{}
 
 func TestRelation(t *testing.T) {
 	testkv.Each(t, func(t *testing.T, db kv.DB) {
-		sch := schema.New()
-		users := newStore[int64](sch, "users")
-		groups := newStore[string](sch, "groups")
-		memberships := relation.New[membership](sch.Namespace("memberships"), users, groups)
-		require.NoError(t, sch.Check(db))
+		users := newStore[int64]("users")
+		groups := newStore[string]("groups")
+		memberships := relation.New[membership]("memberships", users, groups)
+		require.NoError(t, migrate.Check(db, users, groups, memberships))
 		require.Equal(t, "memberships", memberships.Name())
 
 		err := db.Update(func(tx kv.Tx) error {
@@ -203,11 +199,10 @@ func TestRelation(t *testing.T) {
 
 func TestRelationIteration(t *testing.T) {
 	testkv.Each(t, func(t *testing.T, db kv.DB) {
-		sch := schema.New()
-		users := newStore[int64](sch, "users")
-		groups := newStore[string](sch, "groups")
-		memberships := relation.New[membership](sch.Namespace("memberships"), users, groups)
-		require.NoError(t, sch.Check(db))
+		users := newStore[int64]("users")
+		groups := newStore[string]("groups")
+		memberships := relation.New[membership]("memberships", users, groups)
+		require.NoError(t, migrate.Check(db, users, groups, memberships))
 
 		err := db.Update(func(tx kv.Tx) error {
 			add(t, tx, users, 1, 2, 3, 4)
@@ -269,11 +264,10 @@ func TestRelationIteration(t *testing.T) {
 
 func TestRelationCascade(t *testing.T) {
 	testkv.Each(t, func(t *testing.T, db kv.DB) {
-		sch := schema.New()
-		users := newStore[int64](sch, "users")
-		groups := newStore[string](sch, "groups")
-		memberships := relation.New[membership](sch.Namespace("memberships"), users, groups)
-		require.NoError(t, sch.Check(db))
+		users := newStore[int64]("users")
+		groups := newStore[string]("groups")
+		memberships := relation.New[membership]("memberships", users, groups)
+		require.NoError(t, migrate.Check(db, users, groups, memberships))
 
 		err := db.Update(func(tx kv.Tx) error {
 			add(t, tx, users, 1, 2, 3)
@@ -284,8 +278,8 @@ func TestRelationCascade(t *testing.T) {
 					require.NoError(t, rel.Set(u, g, &membership{Role: fmt.Sprint(u, g)}))
 				}
 			}
-			require.Equal(t, 6, rawCountUnder(t, tx, memberships.Namespace(), 'l'))
-			require.Equal(t, 6, rawCountUnder(t, tx, memberships.Namespace(), 'r'))
+			require.Equal(t, 6, rawCountUnder(t, tx, memberships.Prefix(), 'l'))
+			require.Equal(t, 6, rawCountUnder(t, tx, memberships.Prefix(), 'r'))
 
 			// Deleting a left record removes its pairs, in both directions.
 			remove(t, tx, users, 2)
@@ -293,16 +287,16 @@ func TestRelationCascade(t *testing.T) {
 			require.Empty(t, drain(t, must(rel.Rights(2))))
 			require.Equal(t, []int64{1, 3}, keysOf(drain(t, must(rel.Lefts("dev")))))
 			require.Equal(t, []int64{1, 3}, keysOf(drain(t, must(rel.Lefts("ops")))))
-			require.Equal(t, 4, rawCountUnder(t, tx, memberships.Namespace(), 'l'))
-			require.Equal(t, 4, rawCountUnder(t, tx, memberships.Namespace(), 'r'))
+			require.Equal(t, 4, rawCountUnder(t, tx, memberships.Prefix(), 'l'))
+			require.Equal(t, 4, rawCountUnder(t, tx, memberships.Prefix(), 'r'))
 
 			// Likewise a right record.
 			remove(t, tx, groups, "dev")
 			require.Equal(t, []string{"ops"}, keysOf(drain(t, must(rel.Rights(1)))))
 			require.Equal(t, []string{"ops"}, keysOf(drain(t, must(rel.Rights(3)))))
 			require.Empty(t, drain(t, must(rel.Lefts("dev"))))
-			require.Equal(t, 2, rawCountUnder(t, tx, memberships.Namespace(), 'l'))
-			require.Equal(t, 2, rawCountUnder(t, tx, memberships.Namespace(), 'r'))
+			require.Equal(t, 2, rawCountUnder(t, tx, memberships.Prefix(), 'l'))
+			require.Equal(t, 2, rawCountUnder(t, tx, memberships.Prefix(), 'r'))
 
 			// The pairs that are left are untouched, and so are the records.
 			require.Equal(t, &membership{Role: "1ops"}, must(rel.Get(1, "ops")))
@@ -326,11 +320,10 @@ func TestRelationCascade(t *testing.T) {
 func TestRelationKeysThatBeginOthers(t *testing.T) {
 	t.Run("strings", func(t *testing.T) {
 		testkv.Each(t, func(t *testing.T, db kv.DB) {
-			sch := schema.New()
-			lefts := newStore[string](sch, "lefts")
-			rights := newStore[string](sch, "rights")
-			rel := relation.New[int](sch.Namespace("rel"), lefts, rights)
-			require.NoError(t, sch.Check(db))
+			lefts := newStore[string]("lefts")
+			rights := newStore[string]("rights")
+			rel := relation.New[int]("rel", lefts, rights)
+			require.NoError(t, migrate.Check(db, lefts, rights, rel))
 
 			keys := []string{"a", "ab", "abc", "b"}
 			err := db.Update(func(tx kv.Tx) error {
@@ -394,11 +387,10 @@ func TestRelationKeysThatBeginOthers(t *testing.T) {
 
 	t.Run("integers", func(t *testing.T) {
 		testkv.Each(t, func(t *testing.T, db kv.DB) {
-			sch := schema.New()
-			lefts := newStore[int64](sch, "lefts")
-			rights := newStore[int64](sch, "rights")
-			rel := relation.New[struct{}](sch.Namespace("rel"), lefts, rights)
-			require.NoError(t, sch.Check(db))
+			lefts := newStore[int64]("lefts")
+			rights := newStore[int64]("rights")
+			rel := relation.New[struct{}]("rel", lefts, rights)
+			require.NoError(t, migrate.Check(db, lefts, rights, rel))
 
 			keys := []int64{-300, -2, -1, 1, 2, 255, 256, 1 << 40}
 			err := db.Update(func(tx kv.Tx) error {
@@ -441,10 +433,9 @@ func TestRelationKeysThatBeginOthers(t *testing.T) {
 
 func TestRelationWithItself(t *testing.T) {
 	testkv.Each(t, func(t *testing.T, db kv.DB) {
-		sch := schema.New()
-		users := newStore[int64](sch, "users")
-		follows := relation.New[struct{}](sch.Namespace("follows"), users, users)
-		require.NoError(t, sch.Check(db))
+		users := newStore[int64]("users")
+		follows := relation.New[struct{}]("follows", users, users)
+		require.NoError(t, migrate.Check(db, users, follows))
 
 		err := db.Update(func(tx kv.Tx) error {
 			add(t, tx, users, 1, 2, 3)
@@ -464,12 +455,12 @@ func TestRelationWithItself(t *testing.T) {
 			require.Empty(t, drain(t, must(rel.Lefts(2))))
 			require.Empty(t, drain(t, must(rel.Rights(2))))
 			require.Len(t, drain(t, must(rel.All())), 2)
-			require.Equal(t, 2, rawCountUnder(t, tx, follows.Namespace(), 'l'))
-			require.Equal(t, 2, rawCountUnder(t, tx, follows.Namespace(), 'r'))
+			require.Equal(t, 2, rawCountUnder(t, tx, follows.Prefix(), 'l'))
+			require.Equal(t, 2, rawCountUnder(t, tx, follows.Prefix(), 'r'))
 
 			remove(t, tx, users, 1)
 			require.Empty(t, drain(t, must(rel.All())))
-			require.Zero(t, rawCount(t, tx, follows.Namespace()))
+			require.Zero(t, rawCount(t, tx, follows.Prefix()))
 			return nil
 		})
 		require.NoError(t, err)
@@ -478,12 +469,11 @@ func TestRelationWithItself(t *testing.T) {
 
 func TestRelationData(t *testing.T) {
 	testkv.Each(t, func(t *testing.T, db kv.DB) {
-		sch := schema.New()
-		users := newStore[int64](sch, "users")
-		groups := newStore[int64](sch, "groups")
-		plain := relation.New[struct{}](sch.Namespace("plain"), users, groups)
-		roles := relation.NewWithCodec(sch.Namespace("roles"), users, groups, codec.ValueCodec[string](plainCodec{}))
-		require.NoError(t, sch.Check(db))
+		users := newStore[int64]("users")
+		groups := newStore[int64]("groups")
+		plain := relation.New[struct{}]("plain", users, groups)
+		roles := relation.NewWithCodec("roles", users, groups, codec.ValueCodec[string](plainCodec{}))
+		require.NoError(t, migrate.Check(db, users, groups, plain, roles))
 
 		err := db.Update(func(tx kv.Tx) error {
 			add(t, tx, users, 1, 2)
@@ -506,7 +496,7 @@ func TestRelationData(t *testing.T) {
 			require.Equal(t, []entry[int64, string]{{1, "admin"}, {2, ""}}, drain(t, must(r.Lefts(10))))
 
 			// The data is stored as the codec encodes it.
-			it, err := roles.Namespace().Open(tx).Iterator([]byte{'l'}, []byte{'m'})
+			it, err := prefix.New(tx, append(roles.Prefix(), 'l')).Iterator(nil, nil)
 			require.NoError(t, err)
 			defer it.Close()
 			require.True(t, it.Valid())
@@ -520,63 +510,96 @@ func TestRelationData(t *testing.T) {
 }
 
 func TestRelationDefinitionPanics(t *testing.T) {
-	sch := schema.New()
-	users := newStore[int64](sch, "users")
-	groups := newStore[int64](sch, "groups")
+	users := newStore[int64]("users")
+	groups := newStore[int64]("groups")
 
-	require.PanicsWithValue(t, "relation: the namespace is required", func() {
-		relation.New[struct{}](nil, users, groups)
+	require.PanicsWithValue(t, "relation: the prefix is required", func() {
+		relation.New[struct{}]("", users, groups)
+	})
+	require.PanicsWithValue(t, "relation: the prefix is required", func() {
+		relation.New[struct{}]([]byte(nil), users, groups)
 	})
 	require.PanicsWithValue(t, `relation "a": the left store is required`, func() {
-		relation.New[struct{}, int64, int64](sch.Namespace("a"), nil, groups)
+		relation.New[struct{}, int64, int64]("a", nil, groups)
 	})
 	require.PanicsWithValue(t, `relation "b": the right store is required`, func() {
-		relation.New[struct{}, int64, int64](sch.Namespace("b"), users, nil)
+		relation.New[struct{}, int64, int64]("b", users, nil)
 	})
 	require.PanicsWithValue(t, `relation "c": the left store is required`, func() {
 		var none *record.Store[int64, entity[int64]]
-		relation.New[struct{}](sch.Namespace("c"), none, groups)
+		relation.New[struct{}]("c", none, groups)
 	})
 }
 
-func TestRelationSchema(t *testing.T) {
+func TestRelationUnit(t *testing.T) {
 	testkv.Each(t, func(t *testing.T, db kv.DB) {
-		define := func() (*schema.Schema, *relation.Relation[int64, string, string]) {
-			sch := schema.New()
-			users := newStore[int64](sch, "users")
-			groups := newStore[string](sch, "groups")
-			return sch, relation.NewWithCodec(sch.Namespace("roles"), users, groups, codec.ValueCodec[string](plainCodec{}))
+		define := func() (*record.Store[int64, entity[int64]], *record.Store[string, entity[string]], *relation.Relation[int64, string, string]) {
+			users := newStore[int64]("users")
+			groups := newStore[string]("groups")
+			return users, groups, relation.NewWithCodec("roles", users, groups, codec.ValueCodec[string](plainCodec{}))
 		}
 
-		sch, rel := define()
-		require.NoError(t, sch.Validate())
-		def := rel.Namespace().Definition()
-		require.Equal(t, "relation", def.Kind)
-		require.Equal(t, map[string]string{"left": "int64", "right": "string", "data": "plain"}, def.Attributes())
-		require.NoError(t, sch.Check(db))
+		users, groups, rel := define()
+		unit := rel.Unit()
+		require.Equal(t, "relation", unit.Kind())
+		require.Equal(t, "roles", unit.Name())
+		require.Equal(t, "roles", rel.Name())
+		require.Equal(t, []byte("roles"), unit.Prefix())
+		require.Equal(t, []byte("roles"), rel.Prefix())
+		require.Equal(t, uint64(1), unit.Version())
+		require.Empty(t, unit.Parts())
 
-		// The footprint of the stores includes the relation.
-		for _, name := range []string{"users", "groups"} {
-			var ns *schema.Namespace
-			for _, n := range sch.Namespaces() {
-				if n.Path() == name {
-					ns = n
+		report, err := migrate.Run(context.Background(), db, users, groups, rel)
+		require.NoError(t, err)
+		require.Contains(t, report.String(), `recorded relation "roles"`)
+
+		// The relation keeps its keys under its prefix, and the unit is where it is recorded.
+		require.NoError(t, db.Update(func(tx kv.Tx) error {
+			add(t, tx, users, 1)
+			add(t, tx, groups, "admins")
+			return rel.Instantiate(tx).Set(1, "admins", new(string))
+		}))
+		var related int
+		require.NoError(t, db.View(func(tx kv.Tx) error {
+			it, err := tx.Iterator([]byte("roles"), kv.PrefixEnd([]byte("roles")))
+			require.NoError(t, err)
+			defer it.Close()
+
+			for ; it.Valid(); it.Next() {
+				key := it.Key()
+				require.Contains(t, []byte("lrm"), key[len("roles")], "%q", key)
+				if key[len("roles")] != 'm' {
+					related++
 				}
 			}
-			require.NotNil(t, ns)
-			require.Contains(t, ns.Footprint(), rel.Namespace().Range())
-		}
+			return nil
+		}))
+		require.Equal(t, 2, related)
 
 		// The same definition is accepted again.
-		sch, _ = define()
-		require.NoError(t, sch.Check(db))
+		users, groups, rel = define()
+		require.NoError(t, migrate.Check(db, users, groups, rel))
+		require.NoError(t, rel.Check(db))
 
-		// A definition with another data codec is not.
-		other := schema.New()
-		users := newStore[int64](other, "users")
-		groups := newStore[string](other, "groups")
-		relation.New[string](other.Namespace("roles"), users, groups)
-		require.ErrorIs(t, other.Check(db), schema.ErrChanged)
+		// A definition with another data codec is not, until it is given a version, and a
+		// migration from the one before.
+		users, groups, other := func() (*record.Store[int64, entity[int64]], *record.Store[string, entity[string]], *relation.Relation[int64, string, string]) {
+			users := newStore[int64]("users")
+			groups := newStore[string]("groups")
+			return users, groups, relation.New[string]("roles", users, groups)
+		}()
+		require.ErrorIs(t, other.Check(db), migrate.ErrChanged)
+		require.ErrorIs(t, migrate.Check(db, users, groups, other), migrate.ErrChanged)
+
+		other.WithVersion(2)
+		require.Equal(t, uint64(2), other.Unit().Version())
+		require.ErrorIs(t, other.Check(db), migrate.ErrNoMigration)
+		other.Unit().AddMigration(1, func(context.Context, *migrate.Migrator) error { return nil })
+		require.ErrorIs(t, other.Check(db), migrate.ErrNeedsMigration)
+		report, err = other.Migrate(context.Background(), db)
+		require.NoError(t, err)
+		require.Equal(t, `migrated relation "roles" from version 1 to 2`, report.String())
+		require.NoError(t, other.Check(db))
 	})
 }
 
@@ -593,11 +616,10 @@ func TestRelationRandom(t *testing.T) {
 			ops = 150
 		}
 
-		sch := schema.New()
-		users := newStore[int64](sch, "users")
-		groups := newStore[string](sch, "groups")
-		rel := relation.New[membership](sch.Namespace("memberships"), users, groups)
-		require.NoError(t, sch.Check(db))
+		users := newStore[int64]("users")
+		groups := newStore[string]("groups")
+		rel := relation.New[membership]("memberships", users, groups)
+		require.NoError(t, migrate.Check(db, users, groups, rel))
 
 		lefts := []int64{-3, -1, 1, 2, 7, 300}
 		rights := []string{"a", "ab", "abc", "b", "ba", "c"}
@@ -660,8 +682,8 @@ func TestRelationRandom(t *testing.T) {
 					require.Equal(t, wantLefts, got, "lefts of %q", r)
 				}
 			}
-			require.Equal(t, len(model), rawCountUnder(t, tx, rel.Namespace(), 'l'))
-			require.Equal(t, len(model), rawCountUnder(t, tx, rel.Namespace(), 'r'))
+			require.Equal(t, len(model), rawCountUnder(t, tx, rel.Prefix(), 'l'))
+			require.Equal(t, len(model), rawCountUnder(t, tx, rel.Prefix(), 'r'))
 		}
 
 		err := db.Update(func(tx kv.Tx) error {

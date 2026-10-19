@@ -9,7 +9,7 @@ import (
 
 // ValueCodec encodes and decodes the values of a store.
 type ValueCodec[V any] interface {
-	// Name identifies the encoding. It is recorded with the definition of a store, so that data
+	// Name identifies the encoding. It is recorded with the unit of a store, so that data
 	// is not read with another encoding than the one it was written with.
 	Name() string
 	// Encode encodes the value into a slice that the caller owns.
@@ -19,7 +19,7 @@ type ValueCodec[V any] interface {
 }
 
 // Format is a general encoding that can encode any type, which makes it usable as the default
-// value encoding of all the stores of a schema.
+// value encoding of the stores whose types do not encode themselves.
 type Format interface {
 	// Name identifies the format.
 	Name() string
@@ -118,7 +118,8 @@ func (binaryValue[V]) Decode(bz []byte) (V, error) {
 }
 
 // ValueFor returns the default value codec of a type: its own MarshalBinary and UnmarshalBinary
-// if it has them, the given format otherwise, and Msgpack if the format is nil.
+// if it has them, the given format otherwise, and Msgpack if the format is nil. The stores use
+// it with a nil format when they are given no value codec.
 func ValueFor[V any](format Format) ValueCodec[V] {
 	var v V
 	_, marshaler := any(&v).(encoding.BinaryMarshaler)

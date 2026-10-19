@@ -1,6 +1,7 @@
 package index_test
 
 import (
+	"bytes"
 	"fmt"
 	"math/rand/v2"
 	"slices"
@@ -9,6 +10,7 @@ import (
 	badger "github.com/dgraph-io/badger/v4"
 	"github.com/ehsanranjbar/kvutil"
 	"github.com/ehsanranjbar/kvutil/codec"
+	"github.com/ehsanranjbar/kvutil/codec/lex"
 	"github.com/ehsanranjbar/kvutil/cond"
 	"github.com/ehsanranjbar/kvutil/field"
 	"github.com/ehsanranjbar/kvutil/index"
@@ -17,7 +19,8 @@ import (
 	"github.com/ehsanranjbar/kvutil/kv"
 	"github.com/ehsanranjbar/kvutil/kv/badgerkv"
 	"github.com/ehsanranjbar/kvutil/kv/memkv"
-	"github.com/ehsanranjbar/kvutil/schema"
+	"github.com/ehsanranjbar/kvutil/kv/prefix"
+	"github.com/ehsanranjbar/kvutil/migrate"
 	extstore "github.com/ehsanranjbar/kvutil/store/ext"
 	"github.com/stretchr/testify/require"
 )
@@ -72,11 +75,10 @@ var (
 
 func TestMulti(t *testing.T) {
 	testkv.Each(t, func(t *testing.T, db kv.DB) {
-		sch := schema.New()
-		store := extstore.New[int64, pet](sch.Namespace("pets"))
+		store := extstore.New[int64, pet]("pets")
 		byName := index.On(store, "by_name", nameField)
 		byAge := index.On(store, "by_age", ageField)
-		require.NoError(t, sch.Check(db))
+		require.NoError(t, store.Check(db))
 
 		err := db.Update(func(tx kv.Tx) error {
 			pets := store.Instantiate(tx)
@@ -133,7 +135,7 @@ func TestMulti(t *testing.T) {
 
 func TestMaintenance(t *testing.T) {
 	testkv.Each(t, func(t *testing.T, db kv.DB) {
-		store := extstore.New[int64, pet](schema.New().Namespace("pets"))
+		store := extstore.New[int64, pet]("pets")
 		byName := index.On(store, "by_name", nameField)
 
 		err := db.Update(func(tx kv.Tx) error {
@@ -168,7 +170,7 @@ func TestMaintenance(t *testing.T) {
 
 func TestEach(t *testing.T) {
 	testkv.Each(t, func(t *testing.T, db kv.DB) {
-		store := extstore.New[int64, pet](schema.New().Namespace("pets"))
+		store := extstore.New[int64, pet]("pets")
 		byTag := index.On(store, "by_tag", tagsField)
 		require.True(t, byTag.Descriptor().MultiEntry)
 
@@ -199,7 +201,7 @@ func TestEach(t *testing.T) {
 
 func TestUnique(t *testing.T) {
 	testkv.Each(t, func(t *testing.T, db kv.DB) {
-		store := extstore.New[int64, pet](schema.New().Namespace("pets"))
+		store := extstore.New[int64, pet]("pets")
 		byChip := index.Unique(store, "by_chip", chipField)
 		require.True(t, byChip.Descriptor().Unique)
 
@@ -259,7 +261,7 @@ func TestUniqueConcurrency(t *testing.T) {
 	}
 	// race sets a record while another transaction commits a record with the same value.
 	race := func(t *testing.T, db *badgerkv.DB) (attempts int, err error) {
-		store := extstore.New[int64, pet](schema.New().Namespace("pets"))
+		store := extstore.New[int64, pet]("pets")
 		byChip := index.Unique(store, "by_chip", chipField)
 
 		err = db.Update(func(tx kv.Tx) error {
@@ -300,7 +302,7 @@ func TestUniqueConcurrency(t *testing.T) {
 
 func TestCovering(t *testing.T) {
 	testkv.Each(t, func(t *testing.T, db kv.DB) {
-		store := extstore.New[int64, pet](schema.New().Namespace("pets"))
+		store := extstore.New[int64, pet]("pets")
 		byAge := index.On(store, "by_age", ageField, index.Covering(name, nil, "Name"))
 		require.Equal(t, []string{"Name"}, byAge.Descriptor().Covered)
 
@@ -369,35 +371,49 @@ func TestDiff(t *testing.T) {
 }
 
 func TestCatalog(t *testing.T) {
-	define := func(sch *schema.Schema) *extstore.Store[int64, pet] {
-		return extstore.New[int64, pet](sch.Namespace("pets"))
+	define := func() *extstore.Store[int64, pet] {
+		return extstore.New[int64, pet]("pets")
 	}
 
 	t.Run("Definition", func(t *testing.T) {
-		sch := schema.New()
-		byName := index.On(define(sch), "by_name", nameField)
-		require.NoError(t, sch.Validate())
+		store := define()
+		byName := index.On(store, "by_name", nameField)
 
 		require.Equal(t, "by_name", byName.Name())
-		require.Equal(t, "pets/ext/by_name", byName.Namespace().Path())
-		def := byName.Namespace().Definition()
-		require.Equal(t, "index", def.Kind)
+		// The entries are under the prefix of the store, and under the name of the index.
+		require.True(t, bytes.HasPrefix(byName.Prefix(), store.Prefix()))
+		require.Equal(t, append(append(bytes.Clone(store.Prefix()), 'x'), lex.AppendTerminated(nil, []byte("by_name"))...),
+			byName.Prefix())
+
+		parts := store.Unit().Parts()
+		require.Len(t, parts, 1)
+		require.Equal(t, "by_name", parts[0].Name)
+		require.Equal(t, "index", parts[0].Kind)
+		require.Equal(t, byName.Prefix(), parts[0].Prefix)
+		require.NotNil(t, parts[0].Rebuild)
+		require.Equal(t, map[string]string{
+			"fields":   "Name",
+			"unique":   "false",
+			"covered":  "",
+			"where":    "",
+			"encoding": "string",
+		}, parts[0].Attributes())
+
 		require.Equal(t, index.Descriptor{
 			Fields:    []index.FieldDescriptor{{Path: "Name"}},
 			Operators: []cond.Op{cond.OpEq, cond.OpIn, cond.OpRange},
 			Encoding:  "string",
-		}, def.Descriptor)
-		require.Equal(t, def.Descriptor, byName.Descriptor())
+		}, byName.Descriptor())
 	})
 
 	t.Run("Check", func(t *testing.T) {
 		db := memkv.New()
-		sch := schema.New()
-		index.On(define(sch), "by_name", nameField)
-		require.NoError(t, sch.Check(db))
+		store := define()
+		index.On(store, "by_name", nameField)
+		require.NoError(t, store.Check(db))
 
-		same := schema.New()
-		index.On(define(same), "by_name", nameField)
+		same := define()
+		index.On(same, "by_name", nameField)
 		require.NoError(t, same.Check(db))
 
 		// An index that is defined in another way has to be built again.
@@ -421,22 +437,20 @@ func TestCatalog(t *testing.T) {
 				index.On(store, "by_name", nameField, index.Where(ageField.Gt(1)))
 			},
 		} {
-			changed := schema.New()
-			change(define(changed))
-			require.ErrorIs(t, changed.Check(db), schema.ErrNeedsMigration, name)
+			changed := define()
+			change(changed)
+			require.ErrorIs(t, changed.Check(db), migrate.ErrNeedsMigration, name)
 		}
 	})
 
 	t.Run("SameNameTwice", func(t *testing.T) {
-		sch := schema.New()
-		store := define(sch)
+		store := define()
 		index.On(store, "by_name", nameField)
-		index.On(store, "by_name", ageField)
-		require.Error(t, sch.Validate())
+		require.Panics(t, func() { index.On(store, "by_name", ageField) })
 	})
 
 	t.Run("NoField", func(t *testing.T) {
-		store := define(schema.New())
+		store := define()
 		require.Panics(t, func() { index.Composite(store, "by_nothing", nil) })
 		require.Panics(t, func() { index.Composite(store, "by_name_twice", field.List(nameField, nameField.Desc())) })
 	})
@@ -444,7 +458,7 @@ func TestCatalog(t *testing.T) {
 
 func TestScanAndLookup(t *testing.T) {
 	db := memkv.New()
-	store := extstore.New[int64, pet](schema.New().Namespace("pets"))
+	store := extstore.New[int64, pet]("pets")
 	byName := index.On(store, "by_name", nameField)
 	byOwner := index.Composite(store, "by_owner", field.List(ownerField, ageField))
 	custom := index.New(store, "custom", fixedIndexer{})
@@ -499,13 +513,11 @@ func (fixedIndexer) Descriptor() index.Descriptor {
 
 // fixture is a store with one index of every kind.
 type fixture struct {
-	sch   *schema.Schema
 	store *extstore.Store[int64, pet]
 }
 
 func newFixture() fixture {
-	sch := schema.New()
-	store := extstore.New[int64, pet](sch.Namespace("pets"))
+	store := extstore.New[int64, pet]("pets")
 	index.On(store, "by_name", nameField)
 	index.On(store, "by_name_desc", nameField.Desc())
 	index.On(store, "by_tag", tagsField)
@@ -517,18 +529,22 @@ func newFixture() fixture {
 	index.On(store, "old_by_name", nameField, index.Where(cond.And(ageField.Gte(1), ownerField.Eq("ann"))))
 	index.Composite(store, "tagged_by_owner", field.List(ownerField, nameField),
 		index.Where(cond.Func("has_tags", func(p *pet) bool { return len(p.Tags) > 0 })))
-	return fixture{sch: sch, store: store}
+	return fixture{store: store}
 }
 
-// dump returns everything that is stored for the store: its records and its indexes.
+// dump returns everything that is stored for the store: its records and its indexes, but not
+// what it records of itself.
 func (f fixture) dump(t *testing.T, db kv.DB) []string {
 	var entries []string
 	err := db.View(func(tx kv.Tx) error {
-		it, err := f.store.Namespace().Open(tx).Iterator(nil, nil)
+		it, err := prefix.New(tx, f.store.Prefix()).Iterator(nil, nil)
 		require.NoError(t, err)
 		defer it.Close()
 
 		for ; it.Valid(); it.Next() {
+			if bytes.Equal(it.Key(), []byte{'m'}) {
+				continue
+			}
 			value, err := it.Value()
 			require.NoError(t, err)
 			entries = append(entries, fmt.Sprintf("%x=%x", it.Key(), value))
@@ -544,7 +560,7 @@ func (f fixture) dump(t *testing.T, db kv.DB) []string {
 func TestIndexesEqualRebuild(t *testing.T) {
 	run := func(t *testing.T, db kv.DB, ops int) {
 		f := newFixture()
-		require.NoError(t, f.sch.Check(db))
+		require.NoError(t, f.store.Check(db))
 
 		rng := rand.New(rand.NewPCG(7, 11))
 		pick := func(values ...string) string { return values[rng.IntN(len(values))] }

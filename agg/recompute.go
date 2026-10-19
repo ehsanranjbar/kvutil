@@ -269,7 +269,7 @@ func (r *recomputeKind[X, S]) collect(db kv.DB, cursor []byte, batch int, report
 		if cursor != nil {
 			start = append(bytes.Clone(cursor), 0x00)
 		}
-		it, err := r.ns.Open(root).Iterator(start, []byte{markerKeys + 1})
+		it, err := prefix.New(root, r.prefix).Iterator(start, []byte{markerKeys + 1})
 		if err != nil {
 			return err
 		}
@@ -288,7 +288,7 @@ func (r *recomputeKind[X, S]) collect(db kv.DB, cursor []byte, batch int, report
 		var failure error
 		err := db.Update(func(root kv.Tx) error {
 			failure = nil
-			tx := r.ns.Open(root)
+			tx := prefix.New(root, r.prefix)
 
 			// Reading the marker makes the transaction conflict with a write to the span.
 			if _, err := tx.Get(marker); errors.Is(err, kv.ErrNotFound) {

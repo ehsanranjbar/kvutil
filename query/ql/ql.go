@@ -35,7 +35,6 @@ import (
 	"github.com/araddon/qlbridge/lex"
 	"github.com/ehsanranjbar/kvutil/cond"
 	"github.com/ehsanranjbar/kvutil/field"
-	"github.com/ehsanranjbar/kvutil/schema"
 	extstore "github.com/ehsanranjbar/kvutil/store/ext"
 )
 
@@ -60,14 +59,15 @@ var (
 // on. It is implemented by the stores of the packages ext and record.
 type Store[K, V any] interface {
 	extstore.Extensible[K, V]
-	// Namespace returns the namespace of the store.
-	Namespace() *schema.Namespace
+	// Extensions returns the extensions of the store, which the indexes are among.
+	Extensions() []any
 }
 
 // Parser parses the text of conditions on the records of the type V.
 // It can be used from several goroutines.
 type Parser[V any] struct {
-	ns *schema.Namespace
+	// store is where the indexed fields are found, when a text is first parsed.
+	store interface{ Extensions() []any }
 
 	mu      sync.Mutex
 	loaded  bool
@@ -109,7 +109,7 @@ func New[V any](opts ...Option[V]) *Parser[V] {
 // field.Reflect does. The indexes are the ones that the store has when a text is first parsed.
 func For[K, V any](store Store[K, V], opts ...Option[V]) *Parser[V] {
 	p := New(opts...)
-	p.ns = store.Namespace()
+	p.store = store
 	return p
 }
 
@@ -221,13 +221,13 @@ func (p *Parser[V]) column(name string) (*column[V], error) {
 }
 
 // loadIndexed adds the fields that the indexes of the store are defined on, which are found
-// through the schema. The first index that has a field gives it.
+// through the extensions of the store. The first index that has a field gives it.
 func (p *Parser[V]) loadIndexed() {
-	if p.ns == nil {
+	if p.store == nil {
 		return
 	}
-	for _, def := range p.ns.Definitions() {
-		x, ok := def.Object.(interface{ Fields() []field.Component[V] })
+	for _, ext := range p.store.Extensions() {
+		x, ok := ext.(interface{ Fields() []field.Component[V] })
 		if !ok {
 			continue
 		}

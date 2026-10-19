@@ -1,6 +1,7 @@
 package relation_test
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math/rand/v2"
@@ -12,8 +13,8 @@ import (
 	"github.com/ehsanranjbar/kvutil/internal/testkv"
 	"github.com/ehsanranjbar/kvutil/iterutil"
 	"github.com/ehsanranjbar/kvutil/kv"
+	"github.com/ehsanranjbar/kvutil/migrate"
 	"github.com/ehsanranjbar/kvutil/relation"
-	"github.com/ehsanranjbar/kvutil/schema"
 	"github.com/ehsanranjbar/kvutil/store/record"
 	"github.com/ehsanranjbar/kvutil/store/typed"
 	"github.com/stretchr/testify/require"
@@ -70,12 +71,11 @@ func parentOf[PI comparable, PT any, CI comparable, CT any](
 
 func TestAssociationParentSide(t *testing.T) {
 	testkv.Each(t, func(t *testing.T, db kv.DB) {
-		sch := schema.New()
-		owners := record.New[int64, person](sch.Namespace("owners"))
-		pets := record.New[int64, pet](sch.Namespace("pets"))
-		ownership := relation.Associate(sch.Namespace("ownership"), owners, pets)
-		require.NoError(t, sch.Check(db))
-		require.Equal(t, "ownership", ownership.Name())
+		owners := record.New[int64, person]("owners")
+		pets := record.New[int64, pet]("pets")
+		ownership := relation.Associate("owned", owners, pets)
+		require.NoError(t, ownership.Check(db))
+		require.Equal(t, "owned", ownership.Name())
 
 		err := db.Update(func(tx kv.Tx) error {
 			ins := ownership.Instantiate(tx)
@@ -85,7 +85,7 @@ func TestAssociationParentSide(t *testing.T) {
 			require.NoError(t, ins.Set(p2, c2))
 
 			// A parent and a child reference each other once.
-			require.Equal(t, 4, rawCount(t, tx, ownership.Namespace()))
+			require.Equal(t, 4, rawCount(t, tx, ownership.Prefix()))
 			require.Equal(t, int64(1), parentOf(t, ins, 1))
 			require.Equal(t, int64(2), parentOf(t, ins, 2))
 
@@ -95,7 +95,7 @@ func TestAssociationParentSide(t *testing.T) {
 			require.False(t, must(pets.Instantiate(tx).Has(1)))
 			require.True(t, must(owners.Instantiate(tx).Has(2)))
 			require.True(t, must(pets.Instantiate(tx).Has(2)))
-			require.Equal(t, 2, rawCount(t, tx, ownership.Namespace()))
+			require.Equal(t, 2, rawCount(t, tx, ownership.Prefix()))
 			_, ok, err := ins.ParentID(1)
 			require.NoError(t, err)
 			require.False(t, ok)
@@ -105,7 +105,7 @@ func TestAssociationParentSide(t *testing.T) {
 			// Deleting a parent that has no children is fine.
 			require.NoError(t, owners.Instantiate(tx).Delete(2))
 			require.NoError(t, owners.Instantiate(tx).Delete(2))
-			require.Zero(t, rawCount(t, tx, ownership.Namespace()))
+			require.Zero(t, rawCount(t, tx, ownership.Prefix()))
 			require.False(t, must(pets.Instantiate(tx).Has(2)))
 			return nil
 		})
@@ -115,11 +115,10 @@ func TestAssociationParentSide(t *testing.T) {
 
 func TestAssociationChildSide(t *testing.T) {
 	testkv.Each(t, func(t *testing.T, db kv.DB) {
-		sch := schema.New()
-		owners := record.New[int64, person](sch.Namespace("owners"))
-		pets := record.New[int64, pet](sch.Namespace("pets"))
-		ownership := relation.Associate(sch.Namespace("ownership"), owners, pets)
-		require.NoError(t, sch.Check(db))
+		owners := record.New[int64, person]("owners")
+		pets := record.New[int64, pet]("pets")
+		ownership := relation.Associate("owned", owners, pets)
+		require.NoError(t, ownership.Check(db))
 
 		err := db.Update(func(tx kv.Tx) error {
 			ins := ownership.Instantiate(tx)
@@ -134,17 +133,17 @@ func TestAssociationChildSide(t *testing.T) {
 			err = store.Set(c1, ownership.Under(2))
 			require.ErrorIs(t, err, relation.ErrMissingRecord)
 			require.False(t, must(store.Has(1)))
-			require.Zero(t, rawCount(t, tx, ownership.Namespace()))
+			require.Zero(t, rawCount(t, tx, ownership.Prefix()))
 
 			require.NoError(t, owners.Instantiate(tx).Set(&person{id: 1, Name: "P1"}))
 			require.NoError(t, store.Set(c1, ownership.Under(1)))
 			require.NoError(t, store.Set(c2, ownership.Under(1)))
-			require.Equal(t, 4, rawCount(t, tx, ownership.Namespace()))
+			require.Equal(t, 4, rawCount(t, tx, ownership.Prefix()))
 			require.Equal(t, []int64{1, 2}, petIDs(t, must(ins.Children(1))))
 
 			// Deleting a child leaves its parent and its siblings.
 			require.NoError(t, store.Delete(1))
-			require.Equal(t, 2, rawCount(t, tx, ownership.Namespace()))
+			require.Equal(t, 2, rawCount(t, tx, ownership.Prefix()))
 			require.True(t, must(owners.Instantiate(tx).Has(1)))
 			require.Equal(t, []int64{2}, petIDs(t, must(ins.Children(1))))
 			_, ok, err := ins.ParentID(1)
@@ -153,7 +152,7 @@ func TestAssociationChildSide(t *testing.T) {
 
 			// A child that is set again under the same parent is not referenced twice.
 			require.NoError(t, store.Set(&pet{id: 2, Name: "C2 again"}, ownership.Under(1)))
-			require.Equal(t, 2, rawCount(t, tx, ownership.Namespace()))
+			require.Equal(t, 2, rawCount(t, tx, ownership.Prefix()))
 			require.Equal(t, "C2 again", must(store.Get(2)).Name)
 			return nil
 		})
@@ -163,11 +162,10 @@ func TestAssociationChildSide(t *testing.T) {
 
 func TestAssociationParentIDField(t *testing.T) {
 	testkv.Each(t, func(t *testing.T, db kv.DB) {
-		sch := schema.New()
-		owners := record.New[int64, person](sch.Namespace("owners"))
-		pets := record.New[int64, pet](sch.Namespace("pets"))
-		ownership := relation.Associate(sch.Namespace("ownership"), owners, pets).WithParentID(ownerOf)
-		require.NoError(t, sch.Check(db))
+		owners := record.New[int64, person]("owners")
+		pets := record.New[int64, pet]("pets")
+		ownership := relation.Associate("owned", owners, pets).WithParentID(ownerOf)
+		require.NoError(t, ownership.Check(db))
 
 		err := db.Update(func(tx kv.Tx) error {
 			ins := ownership.Instantiate(tx)
@@ -198,7 +196,7 @@ func TestAssociationParentIDField(t *testing.T) {
 			require.Equal(t, []int64{1}, petIDs(t, must(ins.Children(1))))
 			require.Equal(t, []int64{2, 3}, petIDs(t, must(ins.Children(2))))
 			require.Equal(t, int64(2), parentOf(t, ins, 2))
-			require.Equal(t, 6, rawCount(t, tx, ownership.Namespace()))
+			require.Equal(t, 6, rawCount(t, tx, ownership.Prefix()))
 
 			// Deleting a child removes it from its parent, whose other children are left.
 			require.NoError(t, store.Delete(3))
@@ -208,7 +206,7 @@ func TestAssociationParentIDField(t *testing.T) {
 			require.NoError(t, owners.Instantiate(tx).Delete(2))
 			require.False(t, must(store.Has(2)))
 			require.True(t, must(store.Has(1)))
-			require.Equal(t, 2, rawCount(t, tx, ownership.Namespace()))
+			require.Equal(t, 2, rawCount(t, tx, ownership.Prefix()))
 			return nil
 		})
 		require.NoError(t, err)
@@ -218,11 +216,10 @@ func TestAssociationParentIDField(t *testing.T) {
 func TestAssociationPartial(t *testing.T) {
 	t.Run("under", func(t *testing.T) {
 		testkv.Each(t, func(t *testing.T, db kv.DB) {
-			sch := schema.New()
-			owners := record.New[int64, person](sch.Namespace("owners"))
-			pets := record.New[int64, pet](sch.Namespace("pets"))
-			ownership := relation.Associate(sch.Namespace("ownership"), owners, pets).Partial()
-			require.NoError(t, sch.Check(db))
+			owners := record.New[int64, person]("owners")
+			pets := record.New[int64, pet]("pets")
+			ownership := relation.Associate("owned", owners, pets).Partial()
+			require.NoError(t, ownership.Check(db))
 
 			err := db.Update(func(tx kv.Tx) error {
 				ins := ownership.Instantiate(tx)
@@ -236,7 +233,7 @@ func TestAssociationPartial(t *testing.T) {
 				require.False(t, ok)
 				_, err = ins.Parent(1)
 				require.ErrorIs(t, err, kv.ErrNotFound)
-				require.Zero(t, rawCount(t, tx, ownership.Namespace()))
+				require.Zero(t, rawCount(t, tx, ownership.Prefix()))
 
 				// But the parent that it is given has to exist.
 				err = store.Set(&pet{id: 1, Name: "C1"}, ownership.Under(5))
@@ -250,7 +247,7 @@ func TestAssociationPartial(t *testing.T) {
 				require.NoError(t, err)
 				require.False(t, ok)
 				require.Empty(t, petIDs(t, must(ins.Children(1))))
-				require.Zero(t, rawCount(t, tx, ownership.Namespace()))
+				require.Zero(t, rawCount(t, tx, ownership.Prefix()))
 
 				// A child without a parent is left when the other ones are deleted with theirs.
 				require.NoError(t, store.Set(&pet{id: 2, Name: "C2"}, ownership.Under(1)))
@@ -265,12 +262,11 @@ func TestAssociationPartial(t *testing.T) {
 
 	t.Run("field", func(t *testing.T) {
 		testkv.Each(t, func(t *testing.T, db kv.DB) {
-			sch := schema.New()
-			owners := record.New[int64, person](sch.Namespace("owners"))
-			pets := record.New[int64, pet](sch.Namespace("pets"))
-			ownership := relation.Associate(sch.Namespace("ownership"), owners, pets).
+			owners := record.New[int64, person]("owners")
+			pets := record.New[int64, pet]("pets")
+			ownership := relation.Associate("owned", owners, pets).
 				Partial().WithParentID(ownerOf)
-			require.NoError(t, sch.Check(db))
+			require.NoError(t, ownership.Check(db))
 
 			err := db.Update(func(tx kv.Tx) error {
 				ins := ownership.Instantiate(tx)
@@ -296,11 +292,10 @@ func TestAssociationPartial(t *testing.T) {
 
 func TestAssociationReads(t *testing.T) {
 	testkv.Each(t, func(t *testing.T, db kv.DB) {
-		sch := schema.New()
-		owners := record.New[int64, person](sch.Namespace("owners"))
-		pets := record.New[int64, pet](sch.Namespace("pets"))
-		ownership := relation.Associate(sch.Namespace("ownership"), owners, pets)
-		require.NoError(t, sch.Check(db))
+		owners := record.New[int64, person]("owners")
+		pets := record.New[int64, pet]("pets")
+		ownership := relation.Associate("owned", owners, pets)
+		require.NoError(t, ownership.Check(db))
 
 		err := db.Update(func(tx kv.Tx) error {
 			ins := ownership.Instantiate(tx)
@@ -350,13 +345,12 @@ func TestAssociationReads(t *testing.T) {
 func TestAssociationSet(t *testing.T) {
 	t.Run("under", func(t *testing.T) {
 		testkv.Each(t, func(t *testing.T, db kv.DB) {
-			sch := schema.New()
 			next := int64(100)
-			owners := record.New[int64, person](sch.Namespace("owners")).
+			owners := record.New[int64, person]("owners").
 				WithIDFunc(func(*person) (int64, error) { next++; return next, nil })
-			pets := record.New[int64, pet](sch.Namespace("pets"))
-			ownership := relation.Associate(sch.Namespace("ownership"), owners, pets)
-			require.NoError(t, sch.Check(db))
+			pets := record.New[int64, pet]("pets")
+			ownership := relation.Associate("owned", owners, pets)
+			require.NoError(t, ownership.Check(db))
 
 			err := db.Update(func(tx kv.Tx) error {
 				ins := ownership.Instantiate(tx)
@@ -395,11 +389,10 @@ func TestAssociationSet(t *testing.T) {
 
 	t.Run("field", func(t *testing.T) {
 		testkv.Each(t, func(t *testing.T, db kv.DB) {
-			sch := schema.New()
-			owners := record.New[int64, person](sch.Namespace("owners"))
-			pets := record.New[int64, pet](sch.Namespace("pets"))
-			ownership := relation.Associate(sch.Namespace("ownership"), owners, pets).WithParentID(ownerOf)
-			require.NoError(t, sch.Check(db))
+			owners := record.New[int64, person]("owners")
+			pets := record.New[int64, pet]("pets")
+			ownership := relation.Associate("owned", owners, pets).WithParentID(ownerOf)
+			require.NoError(t, ownership.Check(db))
 
 			err := db.Update(func(tx kv.Tx) error {
 				ins := ownership.Instantiate(tx)
@@ -423,12 +416,11 @@ func TestAssociationSet(t *testing.T) {
 
 func TestAssociationCascadeReachesExtensions(t *testing.T) {
 	testkv.Each(t, func(t *testing.T, db kv.DB) {
-		sch := schema.New()
-		owners := record.New[int64, person](sch.Namespace("owners"))
-		pets := record.New[int64, pet](sch.Namespace("pets"))
+		owners := record.New[int64, person]("owners")
+		pets := record.New[int64, pet]("pets")
 		byName := index.On(pets, "by_name", field.Path[pet, string]("Name"))
-		ownership := relation.Associate(sch.Namespace("ownership"), owners, pets)
-		require.NoError(t, sch.Check(db))
+		ownership := relation.Associate("owned", owners, pets)
+		require.NoError(t, ownership.Check(db))
 
 		err := db.Update(func(tx kv.Tx) error {
 			ins := ownership.Instantiate(tx)
@@ -437,14 +429,14 @@ func TestAssociationCascadeReachesExtensions(t *testing.T) {
 				&pet{id: 1, Name: "rex"}, &pet{id: 2, Name: "tom"}, &pet{id: 3, Name: "rex"}))
 			require.NoError(t, ins.Set(&person{id: 2, Name: "Bob"}, &pet{id: 4, Name: "rex"}, &pet{id: 5, Name: "kit"}))
 			require.Equal(t, []int64{1, 3, 4}, must(iterutil.Of(must(names.Match("rex"))).Keys()))
-			require.Equal(t, 5, rawCount(t, tx, byName.Namespace()))
+			require.Equal(t, 5, rawCount(t, tx, byName.Prefix()))
 
 			// The index of the children sees them go with their parent.
 			require.NoError(t, owners.Instantiate(tx).Delete(1))
 			require.Equal(t, []int64{4}, must(iterutil.Of(must(names.Match("rex"))).Keys()))
 			require.Empty(t, must(iterutil.Of(must(names.Match("tom"))).Keys()))
 			require.Equal(t, []int64{5}, must(iterutil.Of(must(names.Match("kit"))).Keys()))
-			require.Equal(t, 2, rawCount(t, tx, byName.Namespace()))
+			require.Equal(t, 2, rawCount(t, tx, byName.Prefix()))
 
 			// And a child that is deleted by itself leaves its parent and siblings.
 			require.NoError(t, pets.Instantiate(tx).Delete(4))
@@ -453,8 +445,8 @@ func TestAssociationCascadeReachesExtensions(t *testing.T) {
 			require.True(t, must(pets.Instantiate(tx).Has(5)))
 
 			require.NoError(t, owners.Instantiate(tx).Delete(2))
-			require.Zero(t, rawCount(t, tx, byName.Namespace()))
-			require.Zero(t, rawCount(t, tx, ownership.Namespace()))
+			require.Zero(t, rawCount(t, tx, byName.Prefix()))
+			require.Zero(t, rawCount(t, tx, ownership.Prefix()))
 			return nil
 		})
 		require.NoError(t, err)
@@ -463,13 +455,12 @@ func TestAssociationCascadeReachesExtensions(t *testing.T) {
 
 func TestAssociationTwoOnOneStore(t *testing.T) {
 	testkv.Each(t, func(t *testing.T, db kv.DB) {
-		sch := schema.New()
-		owners := record.New[int64, person](sch.Namespace("owners"))
-		vets := record.New[int64, person](sch.Namespace("vets"))
-		pets := record.New[int64, pet](sch.Namespace("pets"))
-		ownership := relation.Associate(sch.Namespace("ownership"), owners, pets)
-		care := relation.Associate(sch.Namespace("care"), vets, pets)
-		require.NoError(t, sch.Check(db))
+		owners := record.New[int64, person]("owners")
+		vets := record.New[int64, person]("vets")
+		pets := record.New[int64, pet]("pets")
+		ownership := relation.Associate("owned", owners, pets)
+		care := relation.Associate("care", vets, pets)
+		require.NoError(t, migrate.Check(db, owners, vets, pets, ownership, care))
 
 		err := db.Update(func(tx kv.Tx) error {
 			require.NoError(t, owners.Instantiate(tx).Set(&person{id: 1}))
@@ -484,8 +475,8 @@ func TestAssociationTwoOnOneStore(t *testing.T) {
 			// Deleting either parent deletes the child, and the other association forgets it.
 			require.NoError(t, vets.Instantiate(tx).Delete(5))
 			require.False(t, must(store.Has(1)))
-			require.Zero(t, rawCount(t, tx, ownership.Namespace()))
-			require.Zero(t, rawCount(t, tx, care.Namespace()))
+			require.Zero(t, rawCount(t, tx, ownership.Prefix()))
+			require.Zero(t, rawCount(t, tx, care.Prefix()))
 			return nil
 		})
 		require.NoError(t, err)
@@ -502,7 +493,7 @@ func TestAssociationTwoOnOneStore(t *testing.T) {
 		require.ErrorIs(t, err, relation.ErrNoParent)
 		err = db.View(func(tx kv.Tx) error {
 			require.False(t, must(pets.Instantiate(tx).Has(2)))
-			require.Zero(t, rawCount(t, tx, ownership.Namespace()))
+			require.Zero(t, rawCount(t, tx, ownership.Prefix()))
 			return nil
 		})
 		require.NoError(t, err)
@@ -522,12 +513,11 @@ func (c *category) SetId(id int64) { c.id = id }
 
 func TestAssociationOfStoreWithItself(t *testing.T) {
 	testkv.Each(t, func(t *testing.T, db kv.DB) {
-		sch := schema.New()
-		categories := record.New[int64, category](sch.Namespace("categories"))
-		tree := relation.Associate(sch.Namespace("tree"), categories, categories).
+		categories := record.New[int64, category]("categories")
+		tree := relation.Associate("tree", categories, categories).
 			Partial().
 			WithParentID(func(c *category) (int64, bool) { return c.Parent, c.Parent != 0 })
-		require.NoError(t, sch.Check(db))
+		require.NoError(t, migrate.Check(db, categories, tree))
 
 		err := db.Update(func(tx kv.Tx) error {
 			store := categories.Instantiate(tx)
@@ -548,7 +538,7 @@ func TestAssociationOfStoreWithItself(t *testing.T) {
 			require.NoError(t, store.Delete(1))
 			require.False(t, must(store.Has(3)))
 			require.True(t, must(store.Has(6)))
-			require.Zero(t, rawCount(t, tx, tree.Namespace()))
+			require.Zero(t, rawCount(t, tx, tree.Prefix()))
 			return nil
 		})
 		require.NoError(t, err)
@@ -556,62 +546,68 @@ func TestAssociationOfStoreWithItself(t *testing.T) {
 }
 
 func TestAssociationDefinitionPanics(t *testing.T) {
-	sch := schema.New()
-	owners := record.New[int64, person](sch.Namespace("owners"))
-	pets := record.New[int64, pet](sch.Namespace("pets"))
+	owners := record.New[int64, person]("owners")
+	pets := record.New[int64, pet]("pets")
 
-	require.PanicsWithValue(t, "association: the namespace is required", func() {
-		relation.Associate[int64, person, int64, pet](nil, owners, pets)
+	require.PanicsWithValue(t, "association: the prefix is required", func() {
+		relation.Associate[int64, person, int64, pet]("", owners, pets)
 	})
 	require.PanicsWithValue(t, `association "a": the parent store is required`, func() {
-		relation.Associate[int64, person, int64, pet](sch.Namespace("a"), nil, pets)
+		relation.Associate[int64, person, int64, pet]("a", nil, pets)
 	})
 	require.PanicsWithValue(t, `association "b": the child store is required`, func() {
-		relation.Associate[int64, person, int64, pet](sch.Namespace("b"), owners, nil)
+		relation.Associate[int64, person, int64, pet]("b", owners, nil)
 	})
 }
 
-func TestAssociationSchema(t *testing.T) {
+func TestAssociationUnit(t *testing.T) {
 	testkv.Each(t, func(t *testing.T, db kv.DB) {
-		define := func(partial bool) (*schema.Schema, *relation.Association[int64, person, int64, pet]) {
-			sch := schema.New()
-			owners := record.New[int64, person](sch.Namespace("owners"))
-			pets := record.New[int64, pet](sch.Namespace("pets"))
-			ownership := relation.Associate(sch.Namespace("ownership"), owners, pets)
+		define := func(partial bool) (*record.Store[int64, person], *record.Store[int64, pet], *relation.Association[int64, person, int64, pet]) {
+			owners := record.New[int64, person]("owners")
+			pets := record.New[int64, pet]("pets")
+			ownership := relation.Associate("owned", owners, pets)
 			if partial {
 				ownership.Partial()
 			}
-			return sch, ownership
+			return owners, pets, ownership
 		}
 
-		sch, ownership := define(false)
-		require.NoError(t, sch.Validate())
-		def := ownership.Namespace().Definition()
-		require.Equal(t, "association", def.Kind)
-		require.Equal(t, map[string]string{"parent": "int64", "child": "int64", "partial": "false"}, def.Attributes())
-		require.NoError(t, sch.Check(db))
+		owners, pets, ownership := define(false)
+		unit := ownership.Unit()
+		require.Equal(t, "association", unit.Kind())
+		require.Equal(t, "owned", unit.Name())
+		require.Equal(t, "owned", ownership.Name())
+		require.Equal(t, []byte("owned"), ownership.Prefix())
+		require.Equal(t, uint64(1), unit.Version())
 
-		// The deletes of the parents reach the children and the association, and those of the children
-		// reach the association.
-		footprint := func(path string) []kv.KeyRange {
-			for _, ns := range sch.Namespaces() {
-				if ns.Path() == path {
-					return ns.Footprint()
-				}
-			}
-			t.Fatalf("no namespace %q", path)
+		report, err := migrate.Run(context.Background(), db, owners, pets, ownership)
+		require.NoError(t, err)
+		require.Contains(t, report.String(), `recorded association "owned"`)
+
+		// The keys of the association are under its prefix, in the two directions.
+		require.NoError(t, db.Update(func(tx kv.Tx) error {
+			require.NoError(t, ownership.Instantiate(tx).Set(&person{id: 1}, &pet{id: 1, Name: "rex"}))
 			return nil
-		}
-		for _, path := range []string{"owners", "pets"} {
-			require.Contains(t, footprint(path), ownership.Namespace().Range(), path)
-		}
-		require.Contains(t, footprint("owners"), footprint("pets")[0])
+		}))
+		require.NoError(t, db.View(func(tx kv.Tx) error {
+			require.Equal(t, 1, rawCountUnder(t, tx, ownership.Prefix(), 'p'))
+			require.Equal(t, 1, rawCountUnder(t, tx, ownership.Prefix(), 'c'))
+			require.Equal(t, 2, rawCount(t, tx, ownership.Prefix()))
+			return nil
+		}))
 
 		// The same definition is accepted again, and one that is partial is not.
-		sch, _ = define(false)
-		require.NoError(t, sch.Check(db))
-		sch, _ = define(true)
-		require.ErrorIs(t, sch.Check(db), schema.ErrChanged)
+		owners, pets, ownership = define(false)
+		require.NoError(t, migrate.Check(db, owners, pets, ownership))
+		_, _, partial := define(true)
+		require.ErrorIs(t, partial.Check(db), migrate.ErrChanged)
+
+		// A version, and its migration, make the change one that is made.
+		partial.WithVersion(2).Unit().AddMigration(1, func(context.Context, *migrate.Migrator) error { return nil })
+		report, err = partial.Migrate(context.Background(), db)
+		require.NoError(t, err)
+		require.Equal(t, `migrated association "owned" from version 1 to 2`, report.String())
+		require.NoError(t, partial.Check(db))
 	})
 }
 
@@ -622,13 +618,12 @@ func TestAssociationRandom(t *testing.T) {
 			ops = 150
 		}
 
-		sch := schema.New()
-		owners := record.New[int64, person](sch.Namespace("owners"))
-		pets := record.New[int64, pet](sch.Namespace("pets"))
-		ownership := relation.Associate(sch.Namespace("ownership"), owners, pets)
+		owners := record.New[int64, person]("owners")
+		pets := record.New[int64, pet]("pets")
+		ownership := relation.Associate("owned", owners, pets)
 		// The index is defined after the association, so a child that is refused is not indexed.
 		byName := index.On(pets, "by_name", field.Path[pet, string]("Name"))
-		require.NoError(t, sch.Check(db))
+		require.NoError(t, ownership.Check(db))
 
 		var (
 			parentIDs = []int64{-2, 1, 2, 3, 40}
@@ -661,8 +656,8 @@ func TestAssociationRandom(t *testing.T) {
 				}
 				require.Equal(t, want, petIDs(t, must(ins.Children(p))), "children of %d", p)
 			}
-			require.Equal(t, 2*len(model), rawCount(t, tx, ownership.Namespace()))
-			require.Equal(t, len(model), rawCount(t, tx, byName.Namespace()))
+			require.Equal(t, 2*len(model), rawCount(t, tx, ownership.Prefix()))
+			require.Equal(t, len(model), rawCount(t, tx, byName.Prefix()))
 		}
 
 		err := db.Update(func(tx kv.Tx) error {

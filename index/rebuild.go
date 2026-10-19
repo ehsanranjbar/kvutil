@@ -15,14 +15,14 @@ const rebuildBatch = 500
 
 // Rebuild builds an index again from the records of its store: it deletes the entries that
 // the index has and writes the ones of every record. It is how an index that is defined on a
-// store with records in it gets to know of them, and the Migrate of the schema calls it for
-// an index that is new, that has changed, or whose store was migrated.
+// store with records in it gets to know of them, and migrate.Run calls it for an index that is
+// new, that has changed, or whose store was migrated.
 //
 // It must not run while records are written to the store. A unique index of records that do
 // not all have keys of their own fails with ErrUniqueViolation, and is left unfinished.
 func Rebuild[K, V any](ctx context.Context, db kv.DB, x *Index[K, V]) error {
-	r := x.refs.Namespace().Range()
-	if err := kv.DeleteRange(ctx, db, r.Start, r.End); err != nil {
+	start := x.refs.Prefix()
+	if err := kv.DeleteRange(ctx, db, start, kv.PrefixEnd(start)); err != nil {
 		return fmt.Errorf("failed to clear the index %q: %w", x.name, err)
 	}
 

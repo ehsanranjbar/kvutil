@@ -1,11 +1,17 @@
-// Package migrate has the migrations of the records of stores: what converts the records
-// that an older version of a program wrote into the ones that the program reads now.
+// Package migrate keeps what a store records of itself and brings a database to what a program
+// defines: versions, migrations of the records, and the rebuilding of what is derived from them.
 //
-// A migration is a part of the program of the version that it leads to, like the type of the
-// records of the version before, which is kept next to it for as long as a database of that
-// version may be met:
+// Every store keeps a record of itself under its own prefix: its version, a fingerprint of what
+// its data depends on, like the codecs, and the parts that depend on its data, like its
+// indexes. It is a Unit. Run compares the units of a program with the records in the database
+// when the program starts, and brings the database to them; Check only compares.
 //
-//	pets := record.New[int64, Pet](sch.Namespace("pets", schema.Version(2)))
+// A migration converts the records that an older version of a program wrote into the ones that
+// the program reads now. It is a part of the program of the version that it leads to, like the
+// type of the records of the version before, which is kept next to it for as long as a database
+// of that version may be met:
+//
+//	pets := record.New[int64, Pet]("pets").WithVersion(2)
 //
 //	type PetV1 struct { ... }
 //
@@ -13,7 +19,8 @@
 //		return &Pet{Name: old.Name, Species: old.Kind}, nil
 //	})
 //
-// The Migrate of the schema runs the migrations that a database needs when the program starts.
+//	report, err := pets.Migrate(ctx, db)
+//
 // A value that only gets fields that it did not have needs no migration in the formats that
 // leave out what they do not know, like the default one.
 package migrate
@@ -25,11 +32,8 @@ import (
 
 	"github.com/ehsanranjbar/kvutil/codec"
 	"github.com/ehsanranjbar/kvutil/kv"
-	"github.com/ehsanranjbar/kvutil/schema"
+	"github.com/ehsanranjbar/kvutil/kv/prefix"
 )
-
-// Migrator is what a migration works with.
-type Migrator = schema.Migrator
 
 // Store is a store whose records are migrated. It is implemented by the stores of the
 // packages typed, ext and record.
@@ -38,13 +42,10 @@ type Store[K, V any] interface {
 	KeyCodec() codec.KeyCodec[K]
 	// ValueCodec returns the value codec of the store.
 	ValueCodec() codec.ValueCodec[V]
-	// DataNamespace returns the namespace that the records are kept in.
-	DataNamespace() *schema.Namespace
-}
-
-// Namespaced is anything that is defined in a namespace, like a store or a relation.
-type Namespaced interface {
-	Namespace() *schema.Namespace
+	// DataPrefix returns the prefix that the records are kept under.
+	DataPrefix() []byte
+	// Unit returns the unit of the store, which the migrations are added to.
+	Unit() *Unit
 }
 
 type options struct {
@@ -95,7 +96,7 @@ func Records[K, Old, New any](
 	// the program.
 	oldCodec[K, Old](store, opts, new(options))
 
-	store.DataNamespace().AddMigration(from, func(ctx context.Context, m *Migrator) error {
+	store.Unit().AddMigration(from, func(ctx context.Context, m *Migrator) error {
 		return Convert(ctx, m, store, convert, opts...)
 	})
 }
@@ -104,8 +105,8 @@ func Records[K, Old, New any](
 // any function, for what is not the conversion of one record into one record. The function
 // is given the database, and saves how far it has come with the steps of the Migrator if it
 // is to go on from there when it is interrupted. It can use Convert for a store.
-func Custom(of Namespaced, from uint64, m schema.Migration) {
-	of.Namespace().AddMigration(from, m)
+func Custom(of Migratable, from uint64, m Migration) {
+	of.Unit().AddMigration(from, m)
 }
 
 func oldCodec[K, Old, New any](store Store[K, New], opts []Option, o *options) codec.ValueCodec[Old] {
@@ -114,13 +115,13 @@ func oldCodec[K, Old, New any](store Store[K, New], opts []Option, o *options) c
 		opt(o)
 	}
 	if o.oldCodec == nil {
-		return codec.ValueFor[Old](store.DataNamespace().Schema().Format())
+		return codec.ValueFor[Old](nil)
 	}
 
 	c, ok := o.oldCodec.(codec.ValueCodec[Old])
 	if !ok {
 		panic(fmt.Sprintf("migrate: the old codec of %q is a %T, not a codec of %T",
-			store.DataNamespace().Path(), o.oldCodec, *new(Old)))
+			store.Unit().Name(), o.oldCodec, *new(Old)))
 	}
 	return c
 }
@@ -137,7 +138,8 @@ func Convert[K, Old, New any](
 ) error {
 	var o options
 	old := oldCodec[K, Old](store, opts, &o)
-	ns := store.DataNamespace()
+	dataPrefix := store.DataPrefix()
+	name := store.Unit().Name()
 
 	type change struct {
 		key   []byte
@@ -158,7 +160,7 @@ func Convert[K, Old, New any](
 				// The first key after the one that was converted last.
 				start = append(bytes.Clone(cursor), 0x00)
 			}
-			it, err := ns.Open(tx).Iterator(start, nil)
+			it, err := prefix.New(tx, dataPrefix).Iterator(start, nil)
 			if err != nil {
 				return err
 			}
@@ -169,7 +171,7 @@ func Convert[K, Old, New any](
 				rawKey := bytes.Clone(it.Key())
 				c, err := convertOne(store, old, convert, rawKey, it)
 				if err != nil {
-					return fmt.Errorf("record %x of %q: %w", rawKey, ns.Path(), err)
+					return fmt.Errorf("record %x of %q: %w", rawKey, name, err)
 				}
 				batch = append(batch, change{key: rawKey, value: c, drop: c == nil})
 				size += len(rawKey) + len(c)
@@ -184,7 +186,7 @@ func Convert[K, Old, New any](
 		}
 
 		err = m.Step(batch[len(batch)-1].key, func(tx kv.Tx) error {
-			records := ns.Open(tx)
+			records := prefix.New(tx, dataPrefix)
 			for _, c := range batch {
 				var err error
 				if c.drop {

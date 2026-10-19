@@ -9,7 +9,6 @@ import (
 	"github.com/ehsanranjbar/kvutil/iterutil"
 	"github.com/ehsanranjbar/kvutil/kv"
 	"github.com/ehsanranjbar/kvutil/kv/memkv"
-	"github.com/ehsanranjbar/kvutil/schema"
 	extstore "github.com/ehsanranjbar/kvutil/store/ext"
 )
 
@@ -22,8 +21,7 @@ type Sale struct {
 // Example keeps the sales of each shop summed up by day, by month and for all of time, and the
 // largest sale of each day, and reads them before and after they are collected.
 func Example() {
-	sch := schema.New()
-	sales := extstore.New[int64, Sale](sch.Namespace("sales"))
+	sales := extstore.New[int64, Sale]("sales")
 
 	byShop := func(s *Sale) (string, int64, bool) { return s.Shop, s.Amount, true }
 	when := func(s *Sale) time.Time { return s.At }
@@ -54,7 +52,7 @@ func Example() {
 		agg.ByTime(when, agg.Monthly))
 
 	db := memkv.New()
-	if err := sch.Check(db); err != nil {
+	if err := sales.Check(db); err != nil {
 		panic(err)
 	}
 
@@ -125,7 +123,7 @@ func Example() {
 	read("written")
 
 	// A collector usually runs in the background, with Run. Here it is asked to collect once.
-	collector := agg.NewCollector(db, sch)
+	collector := agg.NewCollector(db, []agg.Source{sales})
 	if err := collector.Collect(context.Background()); err != nil {
 		panic(err)
 	}

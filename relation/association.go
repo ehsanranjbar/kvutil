@@ -2,15 +2,15 @@ package relation
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
-	"reflect"
 	"strconv"
 
 	"github.com/ehsanranjbar/kvutil/codec"
 	"github.com/ehsanranjbar/kvutil/iterutil"
 	"github.com/ehsanranjbar/kvutil/kv"
-	"github.com/ehsanranjbar/kvutil/schema"
+	"github.com/ehsanranjbar/kvutil/migrate"
 	"github.com/ehsanranjbar/kvutil/store/ext"
 	"github.com/ehsanranjbar/kvutil/store/record"
 	"github.com/ehsanranjbar/kvutil/store/ref"
@@ -20,9 +20,11 @@ import (
 // ErrNoParent is returned when a child is set without a parent, in an association that is not partial.
 var ErrNoParent = errors.New("relation: child has no parent")
 
-var (
-	parentsPrefix  = []byte{'p'}
-	childrenPrefix = []byte{'c'}
+// The bytes after the prefix of an association that the references of its two directions are
+// kept under.
+const (
+	parentsKey  = 'p'
+	childrenKey = 'c'
 )
 
 // Association is a one-to-many relation between the records of a parent store and the records of
@@ -31,9 +33,16 @@ var (
 //
 // Which parent a child belongs to is given when the child is set, with the option that Under
 // makes, or it is a field of the child if WithParentID is used. The association keeps the
-// parent of every child, and the children of every parent, in its namespace.
+// parent of every child, and the children of every parent, under its prefix: the children of
+// every parent are under the prefix followed by 'p', and the parent of every child under the
+// prefix followed by 'c'.
+//
+// It is a unit of its own, which records its version and its codecs under its prefix.
 type Association[PI comparable, PT any, CI comparable, CT any] struct {
-	ns       *schema.Namespace
+	unit *migrate.Unit
+	// label is the prefix as text, which names the extension and the delete hook that the
+	// association adds to the stores.
+	label    string
 	parents  *record.Store[PI, PT]
 	children *record.Store[CI, CT]
 	pidCodec codec.KeyCodec[PI]
@@ -46,55 +55,48 @@ type Association[PI comparable, PT any, CI comparable, CT any] struct {
 	cp *ref.Store
 }
 
-// Associate defines a new Association in the given namespace, which makes the records of the
+// Associate defines a new Association under a prefix, which makes the records of the
 // child store belong to the records of the parent store.
-// It panics if the namespace or either store is nil.
-func Associate[PI comparable, PT any, CI comparable, CT any](
-	ns *schema.Namespace,
+// It panics if the prefix is empty or either store is nil.
+func Associate[PI comparable, PT any, CI comparable, CT any, P ~string | ~[]byte](
+	prefix P,
 	parents *record.Store[PI, PT],
 	children *record.Store[CI, CT],
 ) *Association[PI, PT, CI, CT] {
 	// These are mistakes in the definition, which is made in code when the program starts.
-	if ns == nil {
-		panic("association: the namespace is required")
+	p := bytes.Clone([]byte(prefix))
+	if len(p) == 0 {
+		panic("association: the prefix is required")
 	}
+	label := migrate.Label(p)
 	if parents == nil {
-		panic(fmt.Sprintf("association %q: the parent store is required", ns.Path()))
+		panic(fmt.Sprintf("association %q: the parent store is required", label))
 	}
 	if children == nil {
-		panic(fmt.Sprintf("association %q: the child store is required", ns.Path()))
+		panic(fmt.Sprintf("association %q: the child store is required", label))
 	}
 
 	a := &Association[PI, PT, CI, CT]{
-		ns:       ns,
+		label:    label,
 		parents:  parents,
 		children: children,
 		pidCodec: parents.KeyCodec(),
 		cidCodec: children.KeyCodec(),
 	}
-	ns.Define(schema.Definition{
-		Kind:    "association",
-		KeyType: reflect.TypeFor[PI]().String() + "," + reflect.TypeFor[CI]().String(),
-		Attributes: func() map[string]string {
-			return map[string]string{
-				"parent":  a.pidCodec.Name(),
-				"child":   a.cidCodec.Name(),
-				"partial": strconv.FormatBool(a.partial),
-			}
-		},
+	a.unit = migrate.NewUnit(p, "association", func() map[string]string {
+		return map[string]string{
+			"parent":  a.pidCodec.Name(),
+			"child":   a.cidCodec.Name(),
+			"partial": strconv.FormatBool(a.partial),
+		}
 	})
+	a.pc = ref.New(under(p, parentsKey))
+	a.cp = ref.NewUnique(under(p, childrenKey))
 
-	def := schema.Definition{Kind: "association refs"}
-	a.pc = ref.New(ns.Sub("pc", schema.WithPrefix(parentsPrefix)), def)
-	a.cp = ref.NewUnique(ns.Sub("cp", schema.WithPrefix(childrenPrefix)), def)
-
-	children.AddExtension(ns.Name(), childExtension[PI, PT, CI, CT]{a: a})
-	// The path is the name of the association, which is unique in the schema.
-	parents.AddDeleteHook(ns.Path(), a.deleteChildren)
-
-	parents.Namespace().Cascade(children.Namespace())
-	parents.Namespace().Cascade(ns)
-	children.Namespace().Cascade(ns)
+	// The label of the prefix is the name of the association, which is unique as prefixes do
+	// not overlap.
+	children.AddExtension(label, childExtension[PI, PT, CI, CT]{a: a})
+	parents.AddDeleteHook(label, a.deleteChildren)
 	return a
 }
 
@@ -113,14 +115,39 @@ func (a *Association[PI, PT, CI, CT]) WithParentID(f func(*CT) (PI, bool)) *Asso
 	return a
 }
 
-// Name returns the name of the association.
+// Name returns the name of the association, which is its prefix as text unless the name of its
+// unit was set.
 func (a *Association[PI, PT, CI, CT]) Name() string {
-	return a.ns.Name()
+	return a.unit.Name()
 }
 
-// Namespace returns the namespace that the association keeps its references in.
-func (a *Association[PI, PT, CI, CT]) Namespace() *schema.Namespace {
-	return a.ns
+// Prefix returns the prefix of the association. The slice must not be modified.
+func (a *Association[PI, PT, CI, CT]) Prefix() []byte {
+	return a.unit.Prefix()
+}
+
+// Unit returns what the association records of itself, which is migrated as a whole.
+func (a *Association[PI, PT, CI, CT]) Unit() *migrate.Unit {
+	return a.unit
+}
+
+// WithVersion sets the version of the data of the association, which is 1 by default. It is
+// raised when the data must be converted, and a migration is added to the unit from every
+// version before it.
+func (a *Association[PI, PT, CI, CT]) WithVersion(v uint64) *Association[PI, PT, CI, CT] {
+	a.unit.SetVersion(v)
+	return a
+}
+
+// Migrate brings the database to what the association defines; see migrate.Run.
+func (a *Association[PI, PT, CI, CT]) Migrate(ctx context.Context, db kv.DB) (*migrate.Report, error) {
+	return migrate.Run(ctx, db, a)
+}
+
+// Check compares the database with what the association defines, without changing it; see
+// migrate.Check.
+func (a *Association[PI, PT, CI, CT]) Check(db kv.DB) error {
+	return migrate.Check(db, a)
 }
 
 // underOption says which parent a child that is being set belongs to.
@@ -135,7 +162,7 @@ type underOption[PI comparable] struct {
 //
 // Only the association receives it, so a store can be the child store of several associations.
 func (a *Association[PI, PT, CI, CT]) Under(parentID PI) any {
-	return ext.For(a.ns.Name(), underOption[PI]{id: parentID})
+	return ext.For(a.label, underOption[PI]{id: parentID})
 }
 
 // Instantiate creates the instance of the association for a transaction.
@@ -265,7 +292,7 @@ func (m *childMaintenance[PI, PT, CI, CT]) OnSet(key CI, rawKey []byte, _, new *
 	a := m.a
 	pid, ok := a.parentOf(new, opts)
 	if !ok && !a.partial {
-		return fmt.Errorf("%w: child %v in association %q", ErrNoParent, key, a.ns.Path())
+		return fmt.Errorf("%w: child %v in association %q", ErrNoParent, key, a.label)
 	}
 
 	current, has, err := parentOfChild(m.cp, rawKey)
@@ -285,7 +312,7 @@ func (m *childMaintenance[PI, PT, CI, CT]) OnSet(key CI, rawKey []byte, _, new *
 		return fmt.Errorf("failed to look up the parent: %w", err)
 	}
 	if !exists {
-		return fmt.Errorf("%w: parent %v of child %v in association %q", ErrMissingRecord, pid, key, a.ns.Path())
+		return fmt.Errorf("%w: parent %v of child %v in association %q", ErrMissingRecord, pid, key, a.label)
 	}
 
 	parent, err := form(a.pidCodec, pid)
@@ -368,10 +395,10 @@ func (i *AssociationInstance[PI, PT, CI, CT]) Set(parent *PT, children ...*CT) e
 		switch {
 		case !ok:
 			return fmt.Errorf("%w: the child does not carry the id of its parent %v in association %q",
-				ErrNoParent, pid, a.ns.Path())
+				ErrNoParent, pid, a.label)
 		case got != pid:
 			return fmt.Errorf("association %q: the child carries the id %v of another parent than %v",
-				a.ns.Path(), got, pid)
+				a.label, got, pid)
 		}
 		if err := i.children.Set(child); err != nil {
 			return fmt.Errorf("failed to set child: %w", err)

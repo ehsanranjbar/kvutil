@@ -1,6 +1,7 @@
 package record_test
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -8,15 +9,13 @@ import (
 
 	badger "github.com/dgraph-io/badger/v4"
 	"github.com/ehsanranjbar/kvutil"
-	"github.com/ehsanranjbar/kvutil/agg"
 	"github.com/ehsanranjbar/kvutil/codec"
-	"github.com/ehsanranjbar/kvutil/field"
-	"github.com/ehsanranjbar/kvutil/index"
 	"github.com/ehsanranjbar/kvutil/internal/testkv"
 	"github.com/ehsanranjbar/kvutil/iterutil"
 	"github.com/ehsanranjbar/kvutil/kv"
 	"github.com/ehsanranjbar/kvutil/kv/badgerkv"
-	"github.com/ehsanranjbar/kvutil/schema"
+	"github.com/ehsanranjbar/kvutil/kv/memkv"
+	"github.com/ehsanranjbar/kvutil/migrate"
 	extstore "github.com/ehsanranjbar/kvutil/store/ext"
 	"github.com/ehsanranjbar/kvutil/store/record"
 	"github.com/ehsanranjbar/kvutil/store/typed"
@@ -90,11 +89,10 @@ func TestStore(t *testing.T) {
 	testkv.Each(t, func(t *testing.T, db kv.DB) {
 		type object = record.Object[uuid.UUID, sample]
 
-		sch := schema.New()
-		noIDFunc := record.New[uuid.UUID, object](sch.Namespace("without"))
-		store := record.New[uuid.UUID, object](sch.Namespace("objects")).
+		noIDFunc := record.New[uuid.UUID, object]("without")
+		store := record.New[uuid.UUID, object]("objects").
 			WithIDFunc(func(*object) (uuid.UUID, error) { return uuid.New(), nil })
-		require.NoError(t, sch.Check(db))
+		require.NoError(t, migrate.Check(db, noIDFunc, store))
 
 		err := db.Update(func(tx kv.Tx) error {
 			ins := noIDFunc.Instantiate(tx)
@@ -150,9 +148,8 @@ func TestStore(t *testing.T) {
 
 func TestSetGetHasDelete(t *testing.T) {
 	testkv.Each(t, func(t *testing.T, db kv.DB) {
-		sch := schema.New()
-		store := record.New[int64, pet](sch.Namespace("pets"))
-		require.NoError(t, sch.Check(db))
+		store := record.New[int64, pet]("pets")
+		require.NoError(t, store.Check(db))
 
 		err := db.Update(func(tx kv.Tx) error {
 			ins := store.Instantiate(tx)
@@ -198,7 +195,7 @@ func TestSetGetHasDelete(t *testing.T) {
 			require.ErrorIs(t, ins.Set(&pet{id: 5}), kv.ErrReadOnly)
 			require.ErrorIs(t, ins.Delete(1), kv.ErrReadOnly)
 
-			raw, err := store.Namespace().Open(tx).Get(append([]byte{'d'}, 0x80, 0, 0, 0, 0, 0, 0, 1))
+			raw, err := tx.Get(append([]byte("petsd"), 0x80, 0, 0, 0, 0, 0, 0, 1))
 			require.NoError(t, err)
 			decoded, err := store.ValueCodec().Decode(raw)
 			require.NoError(t, err)
@@ -211,7 +208,7 @@ func TestSetGetHasDelete(t *testing.T) {
 
 func TestIterators(t *testing.T) {
 	testkv.Each(t, func(t *testing.T, db kv.DB) {
-		store := record.New[int64, pet](schema.New().Namespace("pets"))
+		store := record.New[int64, pet]("pets")
 
 		err := db.Update(func(tx kv.Tx) error {
 			ins := store.Instantiate(tx)
@@ -259,7 +256,7 @@ func TestIterators(t *testing.T) {
 
 func TestGetterAndRecords(t *testing.T) {
 	testkv.Each(t, func(t *testing.T, db kv.DB) {
-		store := record.New[int64, pet](schema.New().Namespace("pets"))
+		store := record.New[int64, pet]("pets")
 
 		err := db.Update(func(tx kv.Tx) error {
 			ins := store.Instantiate(tx)
@@ -291,7 +288,7 @@ func TestGetterAndRecords(t *testing.T) {
 func TestIDFunc(t *testing.T) {
 	testkv.Each(t, func(t *testing.T, db kv.DB) {
 		t.Run("NoIDFunc", func(t *testing.T) {
-			store := record.New[int64, pet](schema.New().Namespace("pets"))
+			store := record.New[int64, pet]("pets")
 			err := db.Update(func(tx kv.Tx) error {
 				ins := store.Instantiate(tx)
 				p := &pet{Name: "rex"}
@@ -308,7 +305,7 @@ func TestIDFunc(t *testing.T) {
 
 		t.Run("IDFunc", func(t *testing.T) {
 			next := int64(10)
-			store := record.New[int64, pet](schema.New().Namespace("generated")).
+			store := record.New[int64, pet]("generated").
 				WithIDFunc(func(*pet) (int64, error) {
 					next++
 					return next, nil
@@ -337,7 +334,7 @@ func TestIDFunc(t *testing.T) {
 
 		t.Run("IDFuncFails", func(t *testing.T) {
 			failure := errors.New("failure")
-			store := record.New[int64, pet](schema.New().Namespace("failing")).
+			store := record.New[int64, pet]("failing").
 				WithIDFunc(func(*pet) (int64, error) { return 0, failure })
 			err := db.Update(func(tx kv.Tx) error {
 				p := &pet{Name: "rex"}
@@ -359,9 +356,8 @@ func TestSequenceID(t *testing.T) {
 	require.NoError(t, err)
 	defer seq.Release()
 
-	sch := schema.New()
-	store := record.New[int64, pet](sch.Namespace("pets")).WithIDFunc(badgerkv.SequenceID[int64, pet](seq))
-	require.NoError(t, sch.Check(db))
+	store := record.New[int64, pet]("pets").WithIDFunc(badgerkv.SequenceID[int64, pet](seq))
+	require.NoError(t, store.Check(db))
 
 	err = db.Update(func(tx kv.Tx) error {
 		ins := store.Instantiate(tx)
@@ -383,9 +379,8 @@ func TestSequenceID(t *testing.T) {
 
 func TestAccessors(t *testing.T) {
 	testkv.Each(t, func(t *testing.T, db kv.DB) {
-		sch := schema.New()
 		next := int64(100)
-		store := record.NewWithAccessors(sch.Namespace("cards"),
+		store := record.NewWithAccessors("cards",
 			func(c *card) int64 { return c.Number },
 			func(c *card, id int64) { c.Number = id },
 			nil, nil).
@@ -393,8 +388,8 @@ func TestAccessors(t *testing.T) {
 				next++
 				return next, nil
 			})
-		require.NoError(t, sch.Check(db))
-		require.Equal(t, "record", store.Namespace().Definition().Kind)
+		require.NoError(t, store.Check(db))
+		require.Equal(t, "record", store.Unit().Kind())
 
 		err := db.Update(func(tx kv.Tx) error {
 			ins := store.Instantiate(tx)
@@ -426,16 +421,15 @@ func TestAccessors(t *testing.T) {
 	})
 
 	t.Run("NoAccessors", func(t *testing.T) {
-		ns := schema.New().Namespace("cards")
 		require.Panics(t, func() {
-			record.NewWithAccessors[int64, card](ns, nil, func(*card, int64) {}, nil, nil)
+			record.NewWithAccessors[int64, card]("cards", nil, func(*card, int64) {}, nil, nil)
 		})
 	})
 }
 
 func TestDocs(t *testing.T) {
 	testkv.Each(t, func(t *testing.T, db kv.DB) {
-		store := record.New[int64, record.Doc[int64]](schema.New().Namespace("docs")).
+		store := record.New[int64, record.Doc[int64]]("docs").
 			WithIDFunc(func(*record.Doc[int64]) (int64, error) { return 42, nil })
 
 		err := db.Update(func(tx kv.Tx) error {
@@ -447,69 +441,6 @@ func TestDocs(t *testing.T) {
 			got, err := ins.Get(42)
 			require.NoError(t, err)
 			require.Equal(t, record.Doc[int64]{"_id": int64(42), "a": "b"}, *got)
-			return nil
-		})
-		require.NoError(t, err)
-	})
-}
-
-func TestIndexAndAggregation(t *testing.T) {
-	testkv.Each(t, func(t *testing.T, db kv.DB) {
-		sch := schema.New()
-		store := record.New[int64, pet](sch.Namespace("pets"))
-		byName := index.On(store, "by_name", field.Of("Name", func(p *pet) string { return p.Name }))
-		unique := index.Unique(store, "by_age", field.Of("Age", func(p *pet) int { return p.Age }))
-		counted := agg.Count(store, "count", func(p *pet) (string, bool) { return p.Name, true })
-		require.NoError(t, sch.Check(db))
-
-		// What fails is rolled back with the transaction that it is in.
-		err := db.Update(func(tx kv.Tx) error {
-			return store.Instantiate(tx).Set(&pet{id: 4, Name: "baz", Age: 3})
-		})
-		require.NoError(t, err)
-		err = db.Update(func(tx kv.Tx) error {
-			return store.Instantiate(tx).Set(&pet{id: 5, Name: "baz", Age: 3})
-		})
-		require.ErrorIs(t, err, index.ErrUniqueViolation)
-		err = db.Update(func(tx kv.Tx) error {
-			return store.Instantiate(tx).Delete(4)
-		})
-		require.NoError(t, err)
-
-		err = db.Update(func(tx kv.Tx) error {
-			ins := store.Instantiate(tx)
-			require.NoError(t, ins.Set(&pet{id: 1, Name: "foo", Age: 1}))
-			require.NoError(t, ins.Set(&pet{id: 2, Name: "foo", Age: 2}))
-			require.NoError(t, ins.Set(&pet{id: 3, Name: "bar", Age: 3}))
-
-			names := byName.Instantiate(tx)
-			it, err := names.Match("foo")
-			require.NoError(t, err)
-			// The records are read through the store, so they have their ids.
-			require.Equal(t, []int64{1, 2}, idsOf(t, it))
-
-			it, err = names.Range(kvutil.All[string]())
-			require.NoError(t, err)
-			require.Equal(t, []int64{3, 1, 2}, idsOf(t, it))
-
-			id, found, err := unique.Instantiate(tx).Find(3)
-			require.NoError(t, err)
-			require.True(t, found)
-			require.Equal(t, int64(3), id)
-
-			count, ok, err := counted.Instantiate(tx).Get("foo")
-			require.NoError(t, err)
-			require.True(t, ok)
-			require.Equal(t, int64(2), count)
-
-			// What is deleted is taken out.
-			require.NoError(t, ins.Delete(1))
-			it, err = names.Match("foo")
-			require.NoError(t, err)
-			require.Equal(t, []int64{2}, idsOf(t, it))
-			count, _, err = counted.Instantiate(tx).Get("foo")
-			require.NoError(t, err)
-			require.Equal(t, int64(1), count)
 			return nil
 		})
 		require.NoError(t, err)
@@ -554,7 +485,7 @@ func TestExtensionsAndDeleteHooks(t *testing.T) {
 			}
 		}
 
-		store := record.New[int64, pet](schema.New().Namespace("pets")).
+		store := record.New[int64, pet]("pets").
 			WithExtension("first", recorder{events: &events})
 		store.AddExtension("second", recorder{events: &events})
 		store.AddDeleteHook("hook", hook("hook"))
@@ -582,7 +513,7 @@ func TestExtensionsAndDeleteHooks(t *testing.T) {
 
 	t.Run("Failure", func(t *testing.T) {
 		failure := errors.New("failure")
-		store := record.New[int64, pet](schema.New().Namespace("pets"))
+		store := record.New[int64, pet]("pets")
 		store.AddDeleteHook("failing", func(kv.Tx, int64, []byte) error { return failure })
 
 		err := testkv.NewMem(t).Update(func(tx kv.Tx) error {
@@ -599,35 +530,51 @@ func TestExtensionsAndDeleteHooks(t *testing.T) {
 	})
 }
 
-func TestSchema(t *testing.T) {
+func TestUnit(t *testing.T) {
 	testkv.Each(t, func(t *testing.T, db kv.DB) {
-		sch := schema.New()
-		store := record.New[int64, pet](sch.Namespace("pets"))
-		require.Equal(t, "record", store.Namespace().Definition().Kind)
-		require.Equal(t, "pets", store.Namespace().Path())
-		require.NoError(t, sch.Check(db))
+		store := record.New[int64, pet]("pets")
+		require.Equal(t, "record", store.Unit().Kind())
+		require.Equal(t, "pets", store.Unit().Name())
+		require.Equal(t, []byte("pets"), store.Prefix())
+		require.Equal(t, []byte("petsd"), store.DataPrefix())
+		require.Equal(t, uint64(1), store.Unit().Version())
+		require.NoError(t, store.Check(db))
 
-		same := schema.New()
-		record.New[int64, pet](same.Namespace("pets"))
-		require.NoError(t, same.Check(db))
+		require.NoError(t, record.New[int64, pet]("pets").Check(db))
 
-		otherFormat := schema.New(schema.WithFormat(codec.JSON))
-		record.New[int64, pet](otherFormat.Namespace("pets"))
-		require.ErrorIs(t, otherFormat.Check(db), schema.ErrChanged)
+		otherFormat := record.NewWithCodecs[int64, pet]("pets", nil, codec.Formatted[pet](codec.JSON))
+		require.ErrorIs(t, otherFormat.Check(db), migrate.ErrChanged)
 
-		otherKey := schema.New()
-		record.New[int32, pet32](otherKey.Namespace("pets"))
-		require.ErrorIs(t, otherKey.Check(db), schema.ErrChanged)
-
-		withCodec := schema.New()
-		record.NewWithCodecs[int64, pet](withCodec.Namespace("pets"), nil, codec.Formatted[pet](codec.JSON))
-		require.ErrorIs(t, withCodec.Check(db), schema.ErrChanged)
+		require.ErrorIs(t, record.New[int32, pet32]("pets").Check(db), migrate.ErrChanged)
 
 		// A store that is not a record store is not the same.
-		other := schema.New()
-		extstore.New[int64, pet](other.Namespace("pets"))
-		require.ErrorIs(t, other.Check(db), schema.ErrChanged)
+		require.ErrorIs(t, extstore.New[int64, pet]("pets").Check(db), migrate.ErrChanged)
+		require.ErrorIs(t, typed.New[int64, pet]("pets").Check(db), migrate.ErrChanged)
+
+		// A version comes with a migration, and then the store is what it is defined as.
+		next := record.NewWithCodecs[int64, pet]("pets", nil, codec.Formatted[pet](codec.JSON)).WithVersion(2)
+		require.Equal(t, uint64(2), next.Unit().Version())
+		migrate.Custom(next, 1, func(context.Context, *migrate.Migrator) error { return nil })
+		report, err := next.Migrate(context.Background(), db)
+		require.NoError(t, err)
+		require.Equal(t, `migrated record "pets" from version 1 to 2`, report.String())
+		require.NoError(t, next.Check(db))
 	})
+}
+
+func TestExtensionsOfTheStore(t *testing.T) {
+	var events []string
+	first, second := recorder{events: &events}, recorder{events: &events}
+	store := record.New[int64, pet]("pets").WithExtension("first", first)
+	store.AddExtension("second", second)
+	require.Equal(t, []any{first, second}, store.Extensions())
+
+	// A name that is taken is a mistake of the definition, and an extension that keeps nothing
+	// has nothing to retire, but a name can be retired all the same.
+	require.Panics(t, func() { store.AddExtension("first", recorder{events: &events}) })
+	require.Empty(t, store.Unit().Parts())
+	store.RetireExtension("gone")
+	require.NoError(t, store.Check(memkv.New()))
 }
 
 // pet32 is a pet with a smaller id.
@@ -650,15 +597,14 @@ func TestDefinitionProblems(t *testing.T) {
 	t.Run("MissingKeyCodec", func(t *testing.T) {
 		accessors := func(*pin) point { return point{} }
 		require.Panics(t, func() {
-			record.NewWithAccessors(schema.New().Namespace("pins"), accessors, func(*pin, point) {}, nil, nil)
+			record.NewWithAccessors("pins", accessors, func(*pin, point) {}, nil, nil)
 		})
 	})
 
 	t.Run("Codecs", func(t *testing.T) {
-		sch := schema.New()
-		store := record.NewWithCodecs[int64, pet](sch.Namespace("pets"),
+		store := record.NewWithCodecs[int64, pet]("pets",
 			codec.IntKey[int64](), codec.Formatted[pet](codec.JSON))
-		require.NoError(t, sch.Validate())
+		require.NoError(t, store.Check(memkv.New()))
 		require.Equal(t, "json", store.ValueCodec().Name())
 	})
 }
@@ -673,7 +619,7 @@ func TestRecordTypes(t *testing.T) {
 }
 
 func TestIDOf(t *testing.T) {
-	store := record.New[int64, pet](schema.New().Namespace("pets"))
+	store := record.New[int64, pet]("pets")
 
 	p := &pet{}
 	require.Zero(t, store.IDOf(p))

@@ -9,7 +9,6 @@ import (
 	"github.com/ehsanranjbar/kvutil/kv"
 	"github.com/ehsanranjbar/kvutil/kv/memkv"
 	"github.com/ehsanranjbar/kvutil/migrate"
-	"github.com/ehsanranjbar/kvutil/schema"
 	"github.com/ehsanranjbar/kvutil/store/typed"
 )
 
@@ -26,9 +25,8 @@ type User struct {
 
 // firstVersion is the program as it was: it opens the database and writes users.
 func firstVersion(db kv.DB) {
-	sch := schema.New()
-	users := typed.New[int64, UserV1](sch.Namespace("users"))
-	if _, err := sch.Migrate(context.Background(), db); err != nil {
+	users := typed.New[int64, UserV1]("users")
+	if _, err := users.Migrate(context.Background(), db); err != nil {
 		panic(err)
 	}
 
@@ -51,8 +49,7 @@ func Example() {
 
 	// The store is of the second version now, and the migration from the first one is
 	// defined with it.
-	sch := schema.New()
-	users := typed.New[int64, User](sch.Namespace("users", schema.Version(2)))
+	users := typed.New[int64, User]("users").WithVersion(2)
 	migrate.Records(users, 1, func(id int64, old *UserV1) (*User, error) {
 		var u User
 		fmt.Sscan(old.Name, &u.First, &u.Last)
@@ -60,7 +57,7 @@ func Example() {
 	})
 
 	// When the program starts, before it uses the database.
-	report, err := sch.Migrate(context.Background(), db)
+	report, err := users.Migrate(context.Background(), db)
 	if err != nil {
 		panic(err)
 	}
@@ -81,11 +78,11 @@ func Example() {
 	}
 
 	// The next time there is nothing to do.
-	report, err = sch.Migrate(context.Background(), db)
+	report, err = users.Migrate(context.Background(), db)
 	fmt.Printf("%q %v\n", report, err)
 
 	// Output:
-	// migrated unit "users" from version 1 to 2
+	// migrated typed "users" from version 1 to 2
 	// 1 Lee, Ann
 	// 2 Ray, Bob
 	// "" <nil>

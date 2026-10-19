@@ -12,7 +12,6 @@ import (
 	"github.com/ehsanranjbar/kvutil/iterutil"
 	"github.com/ehsanranjbar/kvutil/kv"
 	"github.com/ehsanranjbar/kvutil/kv/memkv"
-	"github.com/ehsanranjbar/kvutil/schema"
 	extstore "github.com/ehsanranjbar/kvutil/store/ext"
 )
 
@@ -40,8 +39,7 @@ var (
 
 // Example defines a store with one index of every kind and looks books up with each of them.
 func Example() {
-	sch := schema.New()
-	books := extstore.New[int64, Book](sch.Namespace("books"))
+	books := extstore.New[int64, Book]("books")
 
 	// Any number of books can have the same author.
 	byAuthor := index.On(books, "by_author", Author)
@@ -58,7 +56,7 @@ func Example() {
 	inPrintByDecade := index.On(books, "in_print_by_decade", Decade, index.Where(InPrint.Eq(true)))
 
 	db := memkv.New()
-	if err := sch.Check(db); err != nil {
+	if err := books.Check(db); err != nil {
 		panic(err)
 	}
 

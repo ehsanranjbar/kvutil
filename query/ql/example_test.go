@@ -11,7 +11,6 @@ import (
 	"github.com/ehsanranjbar/kvutil/kv"
 	"github.com/ehsanranjbar/kvutil/kv/memkv"
 	"github.com/ehsanranjbar/kvutil/query/ql"
-	"github.com/ehsanranjbar/kvutil/schema"
 	extstore "github.com/ehsanranjbar/kvutil/store/ext"
 )
 
@@ -26,8 +25,7 @@ type Novel struct {
 // Example parses the text of conditions for a store, and looks the records that satisfy them
 // up with an index and without one.
 func Example() {
-	sch := schema.New()
-	novels := extstore.New[int64, Novel](sch.Namespace("novels"))
+	novels := extstore.New[int64, Novel]("novels")
 	byAuthorYear := index.Composite(novels, "by_author_year", field.List(
 		field.Path[Novel, string]("Author"),
 		field.Path[Novel, int]("Year"),
@@ -36,7 +34,7 @@ func Example() {
 	index.On(novels, "by_decade", field.Of("Decade", func(n *Novel) int { return n.Year / 10 * 10 }))
 
 	db := memkv.New()
-	if err := sch.Check(db); err != nil {
+	if err := novels.Check(db); err != nil {
 		panic(err)
 	}
 	err := db.Update(func(tx kv.Tx) error {

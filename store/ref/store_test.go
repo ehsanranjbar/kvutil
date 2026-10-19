@@ -6,7 +6,7 @@ import (
 
 	"github.com/ehsanranjbar/kvutil/internal/testkv"
 	"github.com/ehsanranjbar/kvutil/kv"
-	"github.com/ehsanranjbar/kvutil/schema"
+	"github.com/ehsanranjbar/kvutil/kv/prefix"
 	refstore "github.com/ehsanranjbar/kvutil/store/ref"
 	"github.com/stretchr/testify/require"
 )
@@ -42,12 +42,9 @@ func scan(t *testing.T, refs *refstore.Instance, start, end []byte, reverse bool
 
 func TestStore(t *testing.T) {
 	testkv.Each(t, func(t *testing.T, db kv.DB) {
-		sch := schema.New()
-		store := refstore.New(sch.Namespace("refs"), schema.Definition{Kind: "test"})
-		require.NoError(t, sch.Validate())
+		store := refstore.New([]byte("refs"))
 		require.False(t, store.Unique())
-		require.Equal(t, "test", store.Namespace().Definition().Kind)
-		require.True(t, store.Namespace().Definition().Keys)
+		require.Equal(t, []byte("refs"), store.Prefix())
 
 		err := db.Update(func(tx kv.Tx) error {
 			refs := store.Instantiate(tx)
@@ -115,7 +112,7 @@ func TestStore(t *testing.T) {
 			require.NoError(t, refs.Set([]byte("k4"), long[:255], nil))
 
 			// A reference is stored under its key, its primary key and the length of the primary key.
-			stored, err := store.Namespace().Open(tx).Get([]byte("k1b\x01"))
+			stored, err := prefix.New(tx, store.Prefix()).Get([]byte("k1b\x01"))
 			require.NoError(t, err)
 			require.Equal(t, []byte("v1"), stored)
 			return nil
@@ -126,7 +123,7 @@ func TestStore(t *testing.T) {
 
 func TestUniqueStore(t *testing.T) {
 	testkv.Each(t, func(t *testing.T, db kv.DB) {
-		store := refstore.NewUnique(schema.New().Namespace("refs"), schema.Definition{Kind: "test"})
+		store := refstore.NewUnique([]byte("refs"))
 		require.True(t, store.Unique())
 
 		err := db.Update(func(tx kv.Tx) error {
@@ -172,7 +169,7 @@ func TestUniqueStore(t *testing.T) {
 			require.Equal(t, []entry{{"k1", "b", ""}}, scan(t, refs, []byte("k1"), []byte("k2"), false))
 
 			// A reference is stored under its key alone.
-			stored, err := store.Namespace().Open(tx).Get([]byte("k3"))
+			stored, err := prefix.New(tx, store.Prefix()).Get([]byte("k3"))
 			require.NoError(t, err)
 			require.Equal(t, []byte("\x00v3"), stored)
 			return nil
@@ -183,12 +180,12 @@ func TestUniqueStore(t *testing.T) {
 
 func TestCorruptEntries(t *testing.T) {
 	db := testkv.NewMem(t)
-	multi := refstore.New(schema.New().Namespace("multi"), schema.Definition{Kind: "test"})
-	unique := refstore.NewUnique(schema.New().Namespace("unique"), schema.Definition{Kind: "test"})
+	multi := refstore.New([]byte("multi"))
+	unique := refstore.NewUnique([]byte("unique"))
 
 	err := db.Update(func(tx kv.Tx) error {
 		// The length says that the primary key is longer than the whole key.
-		require.NoError(t, multi.Namespace().Open(tx).Set([]byte("k\x09"), nil))
+		require.NoError(t, prefix.New(tx, multi.Prefix()).Set([]byte("k\x09"), nil))
 		it, err := multi.Instantiate(tx).Iterator(nil, nil)
 		require.NoError(t, err)
 		defer it.Close()
@@ -198,7 +195,7 @@ func TestCorruptEntries(t *testing.T) {
 		_, err = it.Key()
 		require.ErrorIs(t, err, refstore.ErrCorrupt)
 
-		require.NoError(t, unique.Namespace().Open(tx).Set([]byte("k"), []byte{0x09, 'a'}))
+		require.NoError(t, prefix.New(tx, unique.Prefix()).Set([]byte("k"), []byte{0x09, 'a'}))
 		refs := unique.Instantiate(tx)
 		require.ErrorIs(t, refs.Set([]byte("k"), []byte("a"), nil), refstore.ErrCorrupt)
 		require.ErrorIs(t, refs.Delete([]byte("k"), []byte("a")), refstore.ErrCorrupt)

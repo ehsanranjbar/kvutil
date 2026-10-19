@@ -14,10 +14,10 @@ import (
 
 	badger "github.com/dgraph-io/badger/v4"
 	"github.com/ehsanranjbar/kvutil/examples/petstore/types"
+	"github.com/ehsanranjbar/kvutil/keyspace"
 	"github.com/ehsanranjbar/kvutil/kv"
 	"github.com/ehsanranjbar/kvutil/kv/badgerkv"
 	"github.com/ehsanranjbar/kvutil/relation"
-	"github.com/ehsanranjbar/kvutil/schema"
 	"github.com/ehsanranjbar/kvutil/store/record"
 	echo "github.com/labstack/echo/v4"
 )
@@ -318,16 +318,16 @@ func writeFirstVersion(t *testing.T, opt badger.Options) {
 	}
 	defer base.Close()
 
-	names, err := schema.NewNameRegistry(base)
+	ks, err := keyspace.Open(base)
 	if err != nil {
 		t.Fatal(err)
 	}
-	sch := schema.New(schema.WithPrefixAllocator(names))
-	categories := record.New[int64, types.Category](sch.Namespace("categories"))
-	pets := record.New[int64, types.PetRecord](sch.Namespace("pets"))
-	relation.Associate(sch.Namespace("category_pets"), categories, pets).
+	categories := record.New[int64, types.Category](ks.Prefix("categories"))
+	pets := record.New[int64, types.PetRecord](ks.Prefix("pets"))
+	categoryPets := relation.Associate(ks.Prefix("category_pets"), categories, pets).
 		WithParentID(func(p *types.PetRecord) (int64, bool) { return p.CategoryId, true })
-	if _, err := sch.Migrate(t.Context(), base); err != nil {
+	// The first version had no images and no sequences, so it claimed no more names.
+	if _, err := ks.Migrate(t.Context(), categories, pets, categoryPets); err != nil {
 		t.Fatal(err)
 	}
 
@@ -362,10 +362,10 @@ func TestUpgrade(t *testing.T) {
 	}
 	report := db.Migrated.String()
 	for _, line := range []string{
-		`migrated unit "pets" from version 1 to 2`,
-		`built index "pets/ext/by_status"`,
-		`built agg "pets/ext/per_category"`,
-		`built agg "pets/ext/added"`,
+		`migrated record "pets" from version 1 to 2`,
+		`built index "pets/by_status"`,
+		`built agg "pets/per_category"`,
+		`built agg "pets/added"`,
 	} {
 		if !strings.Contains(report, line) {
 			t.Fatalf("the report has no %q:\n%s", line, report)

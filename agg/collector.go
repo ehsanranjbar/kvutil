@@ -4,12 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"time"
 
 	"github.com/ehsanranjbar/kvutil"
 	"github.com/ehsanranjbar/kvutil/kv"
-	"github.com/ehsanranjbar/kvutil/schema"
+	"github.com/ehsanranjbar/kvutil/kv/prefix"
 )
 
 const (
@@ -27,12 +28,24 @@ type collectable interface {
 	collectBatch(db kv.DB, cursor []byte, batch int, report func(error)) (next []byte, err error)
 }
 
-// Collector turns what the transactions have noted for the aggregations of a schema into their
-// stored states. A database should have one collector running. The aggregations are exact
+// collected is implemented by the extensions that are aggregations, which is how a collector
+// finds them among the extensions of a store.
+type collected interface {
+	collection() collectable
+}
+
+// Source is a store whose aggregations a collector collects, like an ext store or a record store.
+type Source interface {
+	// Extensions returns the extensions of the store.
+	Extensions() []any
+}
+
+// Collector turns what the transactions have noted for the aggregations of some stores into
+// their stored states. A database should have one collector running. The aggregations are exact
 // without it, but reading them takes longer the more there is that was not collected.
 type Collector struct {
 	db       kv.DB
-	sch      *schema.Schema
+	sources  []Source
 	batch    int
 	interval time.Duration
 	onError  func(error)
@@ -70,11 +83,11 @@ func WithErrorHandler(f func(error)) CollectorOption {
 	}
 }
 
-// NewCollector creates a collector for the aggregations that are defined in a schema.
-func NewCollector(db kv.DB, sch *schema.Schema, opts ...CollectorOption) *Collector {
+// NewCollector creates a collector for the aggregations of some stores.
+func NewCollector(db kv.DB, sources []Source, opts ...CollectorOption) *Collector {
 	c := &Collector{
 		db:       db,
-		sch:      sch,
+		sources:  slices.Clone(sources),
 		batch:    DefaultBatchSize,
 		interval: DefaultInterval,
 		onError:  func(error) {},
@@ -85,12 +98,18 @@ func NewCollector(db kv.DB, sch *schema.Schema, opts ...CollectorOption) *Collec
 	return c
 }
 
-// aggs returns the aggregations that are defined in the schema right now.
+// aggs returns the aggregations that the sources have right now, which are found among their
+// extensions in the same way every time.
 func (c *Collector) aggs() []collectable {
 	var aggs []collectable
-	for _, def := range c.sch.Definitions() {
-		if a, ok := def.Object.(collectable); ok {
-			aggs = append(aggs, a)
+	for _, source := range c.sources {
+		if source == nil {
+			continue
+		}
+		for _, ext := range source.Extensions() {
+			if a, ok := ext.(collected); ok {
+				aggs = append(aggs, a.collection())
+			}
 		}
 	}
 	return aggs
@@ -208,11 +227,10 @@ func (c *Collector) Shutdown(ctx context.Context) error {
 // aggregation that is added to a store with records in it gets to know of them.
 // It must not run while records are written to the store.
 func Rebuild[K, V, G, X, S any](ctx context.Context, db kv.DB, a *Aggregation[K, V, G, X, S], opts ...CollectorOption) error {
-	c := NewCollector(db, a.ns.Schema(), opts...)
+	c := NewCollector(db, nil, opts...)
 
 	// Everything that the aggregation has stored goes first.
-	r := a.ns.Range()
-	if err := kv.DeleteRange(ctx, db, r.Start, r.End); err != nil {
+	if err := kv.DeleteRange(ctx, db, a.prefix, kv.PrefixEnd(a.prefix)); err != nil {
 		return fmt.Errorf("failed to clear %s: %w", a.collectName(), err)
 	}
 
@@ -242,7 +260,7 @@ func Rebuild[K, V, G, X, S any](ctx context.Context, db kv.DB, a *Aggregation[K,
 			}
 			defer it.Close()
 
-			m := &maintenance[K, V, G, X, S]{a: a, tx: a.ns.Open(tx)}
+			m := &maintenance[K, V, G, X, S]{a: a, tx: prefix.New(tx, a.prefix)}
 			for ; it.Valid() && batchSize < c.batch; it.Next() {
 				batchSize++
 				key, err := it.Key()

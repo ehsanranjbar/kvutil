@@ -6,8 +6,8 @@ import (
 
 	"github.com/ehsanranjbar/kvutil/kv"
 	"github.com/ehsanranjbar/kvutil/kv/memkv"
+	"github.com/ehsanranjbar/kvutil/migrate"
 	"github.com/ehsanranjbar/kvutil/relation"
-	"github.com/ehsanranjbar/kvutil/schema"
 	"github.com/ehsanranjbar/kvutil/store/record"
 )
 
@@ -39,14 +39,13 @@ type Role struct {
 // ExampleRelation relates accounts to teams, with the role of an account in a team as the data of
 // the pair, and deletes an account and a team.
 func ExampleRelation() {
-	sch := schema.New()
-	accounts := record.New[int64, Account](sch.Namespace("accounts"))
-	teams := record.New[int64, Team](sch.Namespace("teams"))
+	accounts := record.New[int64, Account]("accounts")
+	teams := record.New[int64, Team]("teams")
 	// The type of the data is the only type argument to write.
-	roles := relation.New[Role](sch.Namespace("roles"), accounts, teams)
+	roles := relation.New[Role]("roles", accounts, teams)
 
 	db := memkv.New()
-	if err := sch.Check(db); err != nil {
+	if err := migrate.Check(db, accounts, teams, roles); err != nil {
 		panic(err)
 	}
 
@@ -156,13 +155,12 @@ func (p *Pet) SetId(id int64) { p.id = id }
 
 // ExampleAssociation makes pets belong to owners, and deletes an owner with its pets.
 func ExampleAssociation() {
-	sch := schema.New()
-	owners := record.New[int64, Owner](sch.Namespace("owners"))
-	pets := record.New[int64, Pet](sch.Namespace("pets"))
-	ownership := relation.Associate(sch.Namespace("ownership"), owners, pets)
+	owners := record.New[int64, Owner]("owners")
+	pets := record.New[int64, Pet]("pets")
+	ownership := relation.Associate("owned", owners, pets)
 
 	db := memkv.New()
-	if err := sch.Check(db); err != nil {
+	if err := migrate.Check(db, owners, pets, ownership); err != nil {
 		panic(err)
 	}
 

@@ -1,11 +1,17 @@
 // Package relation provides relations between the records of stores: a many-to-many Relation
 // between the keys of two stores, and a one-to-many Association between a parent store and a
-// child store. Both keep their references in a namespace of their own, and both are kept
-// consistent with the stores as the records of the stores are deleted.
+// child store. Both keep their references under a prefix of their own, record their version and
+// their codecs there as a unit that is migrated, and are kept consistent with the stores as the
+// records of the stores are deleted.
+//
+// The prefix of a relation or an association must not be the prefix of a store, nor begin or
+// be the beginning of one, as migrate.Run does not take units whose prefixes overlap. The key
+// that is the prefix followed by 'm' is where the unit is recorded, and is not to be used.
 package relation
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"reflect"
@@ -13,7 +19,7 @@ import (
 	"github.com/ehsanranjbar/kvutil/codec"
 	"github.com/ehsanranjbar/kvutil/iterutil"
 	"github.com/ehsanranjbar/kvutil/kv"
-	"github.com/ehsanranjbar/kvutil/schema"
+	"github.com/ehsanranjbar/kvutil/migrate"
 	"github.com/ehsanranjbar/kvutil/store/ext"
 	"github.com/ehsanranjbar/kvutil/store/ref"
 )
@@ -21,18 +27,30 @@ import (
 // ErrMissingRecord is returned when a relation is set to a record that does not exist.
 var ErrMissingRecord = errors.New("relation: record does not exist")
 
-var (
-	leftPrefix  = []byte{'l'}
-	rightPrefix = []byte{'r'}
+// The bytes after the prefix of a relation that the references of its two directions are kept
+// under.
+const (
+	leftKey  = 'l'
+	rightKey = 'r'
 )
+
+// under returns the prefix followed by a byte, in a slice of its own.
+func under(prefix []byte, b byte) []byte {
+	p := make([]byte, 0, len(prefix)+1)
+	p = append(p, prefix...)
+	return append(p, b)
+}
 
 // Relation is a many-to-many relation between the records of two stores, with data of the
 // type D for each pair. Use struct{} for D if a pair has no data.
 //
 // Every pair is kept in both directions, so that the records that a record is related to are
 // found from either side of the relation. Deleting a record of either store deletes its pairs.
+//
+// It is a unit of its own, which records its version and its codecs under its prefix: the
+// pairs are under the prefix followed by 'l' and by 'r'.
 type Relation[L, R, D any] struct {
-	ns         *schema.Namespace
+	unit       *migrate.Unit
 	leftCodec  codec.KeyCodec[L]
 	rightCodec codec.KeyCodec[R]
 	dataCodec  codec.ValueCodec[D]
@@ -44,87 +62,103 @@ type Relation[L, R, D any] struct {
 	rl *ref.Store
 }
 
-// New defines a new Relation between the records of two stores in the given namespace, with the
+// New defines a new Relation between the records of two stores under a prefix, with the
 // codec that the type of its data has by default. D comes first so that it is the only type
 // argument that has to be written:
 //
-//	relation.New[Membership](ns, users, groups)
+//	relation.New[Membership]("memberships", users, groups)
 //
-// It panics if the namespace or either store is nil.
-func New[D, L, R any](ns *schema.Namespace, left ext.Referable[L], right ext.Referable[R]) *Relation[L, R, D] {
-	return NewWithCodec[D](ns, left, right, nil)
+// It panics if the prefix is empty or either store is nil.
+func New[D, L, R any, P ~string | ~[]byte](prefix P, left ext.Referable[L], right ext.Referable[R]) *Relation[L, R, D] {
+	return NewWithCodec[D](prefix, left, right, nil)
 }
 
-// NewWithCodec defines a new Relation between the records of two stores in the given namespace,
+// NewWithCodec defines a new Relation between the records of two stores under a prefix,
 // with the given codec for its data. A codec that is nil is the one that New would use.
-// It panics if the namespace or either store is nil.
-func NewWithCodec[D, L, R any](
-	ns *schema.Namespace,
+// It panics if the prefix is empty or either store is nil.
+func NewWithCodec[D, L, R any, P ~string | ~[]byte](
+	prefix P,
 	left ext.Referable[L],
 	right ext.Referable[R],
 	dataCodec codec.ValueCodec[D],
 ) *Relation[L, R, D] {
 	// These are mistakes in the definition, which is made in code when the program starts.
-	if ns == nil {
-		panic("relation: the namespace is required")
+	p := bytes.Clone([]byte(prefix))
+	if len(p) == 0 {
+		panic("relation: the prefix is required")
 	}
+	label := migrate.Label(p)
 	if isNil(left) {
-		panic(fmt.Sprintf("relation %q: the left store is required", ns.Path()))
+		panic(fmt.Sprintf("relation %q: the left store is required", label))
 	}
 	if isNil(right) {
-		panic(fmt.Sprintf("relation %q: the right store is required", ns.Path()))
+		panic(fmt.Sprintf("relation %q: the right store is required", label))
 	}
 	if dataCodec == nil {
-		dataCodec = codec.ValueFor[D](ns.Schema().Format())
+		dataCodec = codec.ValueFor[D](nil)
 	}
 
 	r := &Relation[L, R, D]{
-		ns:         ns,
 		leftCodec:  left.KeyCodec(),
 		rightCodec: right.KeyCodec(),
 		dataCodec:  dataCodec,
 		left:       left,
 		right:      right,
 	}
-	ns.Define(schema.Definition{
-		Kind:      "relation",
-		KeyType:   reflect.TypeFor[L]().String() + "," + reflect.TypeFor[R]().String(),
-		ValueType: reflect.TypeFor[D]().String(),
-		Attributes: func() map[string]string {
-			return map[string]string{
-				"left":  r.leftCodec.Name(),
-				"right": r.rightCodec.Name(),
-				"data":  r.dataCodec.Name(),
-			}
-		},
+	r.unit = migrate.NewUnit(p, "relation", func() map[string]string {
+		return map[string]string{
+			"left":  r.leftCodec.Name(),
+			"right": r.rightCodec.Name(),
+			"data":  r.dataCodec.Name(),
+		}
 	})
+	r.lr = ref.New(under(p, leftKey))
+	r.rl = ref.New(under(p, rightKey))
 
-	def := schema.Definition{Kind: "relation refs"}
-	r.lr = ref.New(ns.Sub("lr", schema.WithPrefix(leftPrefix)), def)
-	r.rl = ref.New(ns.Sub("rl", schema.WithPrefix(rightPrefix)), def)
-
-	// The hooks have different names for a relation of a store with itself. The path is
-	// the name of the relation, which is unique in the schema.
-	name := ns.Path()
-	left.AddDeleteHook(name+"/left", func(tx kv.Tx, key L, _ []byte) error {
+	// The hooks have different names for a relation of a store with itself. The label of the
+	// prefix is the name of the relation, which is unique as prefixes do not overlap.
+	left.AddDeleteHook(label+"/left", func(tx kv.Tx, key L, _ []byte) error {
 		return removeAll(tx, r.lr, r.rl, r.leftCodec, r.rightCodec, key)
 	})
-	right.AddDeleteHook(name+"/right", func(tx kv.Tx, key R, _ []byte) error {
+	right.AddDeleteHook(label+"/right", func(tx kv.Tx, key R, _ []byte) error {
 		return removeAll(tx, r.rl, r.lr, r.rightCodec, r.leftCodec, key)
 	})
-	left.Namespace().Cascade(ns)
-	right.Namespace().Cascade(ns)
 	return r
 }
 
-// Name returns the name of the relation.
+// Name returns the name of the relation, which is its prefix as text unless the name of its
+// unit was set.
 func (r *Relation[L, R, D]) Name() string {
-	return r.ns.Name()
+	return r.unit.Name()
 }
 
-// Namespace returns the namespace that the relation keeps its references in.
-func (r *Relation[L, R, D]) Namespace() *schema.Namespace {
-	return r.ns
+// Prefix returns the prefix of the relation. The slice must not be modified.
+func (r *Relation[L, R, D]) Prefix() []byte {
+	return r.unit.Prefix()
+}
+
+// Unit returns what the relation records of itself, which is migrated as a whole.
+func (r *Relation[L, R, D]) Unit() *migrate.Unit {
+	return r.unit
+}
+
+// WithVersion sets the version of the data of the relation, which is 1 by default. It is
+// raised when the data must be converted, like when the codec of its data is changed, and a
+// migration is added to the unit from every version before it.
+func (r *Relation[L, R, D]) WithVersion(v uint64) *Relation[L, R, D] {
+	r.unit.SetVersion(v)
+	return r
+}
+
+// Migrate brings the database to what the relation defines; see migrate.Run.
+func (r *Relation[L, R, D]) Migrate(ctx context.Context, db kv.DB) (*migrate.Report, error) {
+	return migrate.Run(ctx, db, r)
+}
+
+// Check compares the database with what the relation defines, without changing it; see
+// migrate.Check.
+func (r *Relation[L, R, D]) Check(db kv.DB) error {
+	return migrate.Check(db, r)
 }
 
 // Instantiate creates the instance of the relation for a transaction.
@@ -155,14 +189,14 @@ func (i *Instance[L, R, D]) Set(left L, right R, data *D) error {
 		return fmt.Errorf("failed to look up the left record: %w", err)
 	}
 	if !ok {
-		return fmt.Errorf("%w: left record %v in relation %q", ErrMissingRecord, left, r.ns.Path())
+		return fmt.Errorf("%w: left record %v in relation %q", ErrMissingRecord, left, r.unit.Name())
 	}
 	ok, err = r.right.Contains(i.tx, right)
 	if err != nil {
 		return fmt.Errorf("failed to look up the right record: %w", err)
 	}
 	if !ok {
-		return fmt.Errorf("%w: right record %v in relation %q", ErrMissingRecord, right, r.ns.Path())
+		return fmt.Errorf("%w: right record %v in relation %q", ErrMissingRecord, right, r.unit.Name())
 	}
 
 	lk, rk, err := i.forms(left, right)

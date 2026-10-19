@@ -258,7 +258,7 @@ func (d *deltaKind[X, S]) series(
 func (d *deltaKind[X, S]) collect(db kv.DB, cursor []byte, batch int, report func(error)) (next []byte, err error) {
 	err = db.Update(func(root kv.Tx) error {
 		next = nil
-		tx := d.ns.Open(root)
+		tx := prefix.New(root, d.prefix)
 
 		start := []byte{tempKeys}
 		if cursor != nil {

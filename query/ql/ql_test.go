@@ -18,7 +18,6 @@ import (
 	"github.com/ehsanranjbar/kvutil/kv"
 	"github.com/ehsanranjbar/kvutil/kv/memkv"
 	"github.com/ehsanranjbar/kvutil/query/ql"
-	"github.com/ehsanranjbar/kvutil/schema"
 	extstore "github.com/ehsanranjbar/kvutil/store/ext"
 	"github.com/ehsanranjbar/kvutil/store/record"
 	"github.com/stretchr/testify/require"
@@ -480,8 +479,7 @@ func TestEvaluation(t *testing.T) {
 // TestStore checks that what is parsed for a store is written with the fields of its indexes,
 // so that they serve it.
 func TestStore(t *testing.T) {
-	sch := schema.New()
-	books := extstore.New[int64, Book](sch.Namespace("books"))
+	books := extstore.New[int64, Book]("books")
 	byAuthorYear := index.Composite(books, "by_author_year", field.List(author, year.Desc()))
 	byTag := index.On(books, "by_tag", tags)
 	// A field that is computed can only be found through an index, or be given.
@@ -491,7 +489,7 @@ func TestStore(t *testing.T) {
 	byCents := index.On(books, "by_cents", cents)
 
 	db := memkv.New()
-	require.NoError(t, sch.Check(db))
+	require.NoError(t, books.Check(db))
 
 	rng := rand.New(rand.NewPCG(5, 6))
 	all := map[int64]*Book{}

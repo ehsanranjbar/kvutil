@@ -3,6 +3,7 @@
 package record
 
 import (
+	"context"
 	"errors"
 	"fmt"
 
@@ -10,7 +11,7 @@ import (
 	"github.com/ehsanranjbar/kvutil/codec"
 	"github.com/ehsanranjbar/kvutil/iterutil"
 	"github.com/ehsanranjbar/kvutil/kv"
-	"github.com/ehsanranjbar/kvutil/schema"
+	"github.com/ehsanranjbar/kvutil/migrate"
 	"github.com/ehsanranjbar/kvutil/store/ext"
 	"github.com/ehsanranjbar/kvutil/store/typed"
 )
@@ -34,31 +35,31 @@ type Store[I comparable, T any] struct {
 	idFunc func(*T) (I, error)
 }
 
-// New defines a new Store in the given namespace, with the codecs that its types have by default.
-// It panics if the type of the ids has no key codec, in which case the store must be defined
-// with NewWithCodecs.
-func New[I comparable, T any, PT Record[I, T]](ns *schema.Namespace) *Store[I, T] {
-	return NewWithCodecs[I, T, PT](ns, nil, nil)
+// New defines a new Store under a prefix, with the codecs that its types have by default.
+// It panics if the prefix is empty, and if the type of the ids has no key codec, in which case
+// the store must be defined with NewWithCodecs.
+func New[I comparable, T any, PT Record[I, T], P ~string | ~[]byte](prefix P) *Store[I, T] {
+	return NewWithCodecs[I, T, PT](prefix, nil, nil)
 }
 
-// NewWithCodecs defines a new Store in the given namespace with the given codecs.
+// NewWithCodecs defines a new Store under a prefix with the given codecs.
 // A codec that is nil is the one that New would use.
-func NewWithCodecs[I comparable, T any, PT Record[I, T]](
-	ns *schema.Namespace,
+func NewWithCodecs[I comparable, T any, PT Record[I, T], P ~string | ~[]byte](
+	prefix P,
 	idCodec codec.KeyCodec[I],
 	valueCodec codec.ValueCodec[T],
 ) *Store[I, T] {
-	return NewWithAccessors(ns,
+	return NewWithAccessors(prefix,
 		func(v *T) I { return PT(v).GetId() },
 		func(v *T, id I) { PT(v).SetId(id) },
 		idCodec, valueCodec)
 }
 
-// NewWithAccessors defines a new Store in the given namespace for a type of records that does not
+// NewWithAccessors defines a new Store under a prefix for a type of records that does not
 // have the methods GetId and SetId, with the functions that get and set the id of a record instead.
 // A codec that is nil is the one that New would use. It panics if either function is nil.
-func NewWithAccessors[I comparable, T any](
-	ns *schema.Namespace,
+func NewWithAccessors[I comparable, T any, P ~string | ~[]byte](
+	prefix P,
 	getID func(*T) I,
 	setID func(*T, I),
 	idCodec codec.KeyCodec[I],
@@ -66,15 +67,16 @@ func NewWithAccessors[I comparable, T any](
 ) *Store[I, T] {
 	if getID == nil || setID == nil {
 		// A mistake in the definition, which is made in code when the program starts.
-		panic(fmt.Sprintf("store %q: the functions that get and set the id are required", ns.Path()))
+		panic(fmt.Sprintf("store %q: the functions that get and set the id are required",
+			migrate.Label([]byte(prefix))))
 	}
 
 	s := &Store[I, T]{
-		base:  ext.NewWithCodecs(ns, idCodec, valueCodec),
+		base:  ext.NewWithCodecs(prefix, idCodec, valueCodec),
 		getID: getID,
 		setID: setID,
 	}
-	ns.Definition().Kind = "record"
+	s.base.Unit().SetKind("record")
 	return s
 }
 
@@ -134,9 +136,16 @@ func (s *Store[I, T]) ValueCodec() codec.ValueCodec[T] {
 	return s.base.ValueCodec()
 }
 
-// Namespace returns the namespace of the store.
-func (s *Store[I, T]) Namespace() *schema.Namespace {
-	return s.base.Namespace()
+// WithVersion sets the version of the records of the store, which is 1 by default; see
+// typed.Store.WithVersion.
+func (s *Store[I, T]) WithVersion(v uint64) *Store[I, T] {
+	s.base.WithVersion(v)
+	return s
+}
+
+// Extensions returns the extensions of the store, in the order that they were added.
+func (s *Store[I, T]) Extensions() []any {
+	return s.base.Extensions()
 }
 
 // RetireExtension says that the data of an extension that is not added to the store any more
@@ -145,9 +154,29 @@ func (s *Store[I, T]) RetireExtension(name string) {
 	s.base.RetireExtension(name)
 }
 
-// DataNamespace returns the namespace that the records are kept in, under the one of the store.
-func (s *Store[I, T]) DataNamespace() *schema.Namespace {
-	return s.base.DataNamespace()
+// Prefix returns the prefix of the store. The slice must not be modified.
+func (s *Store[I, T]) Prefix() []byte {
+	return s.base.Prefix()
+}
+
+// DataPrefix returns the prefix that the records are kept under. The slice must not be modified.
+func (s *Store[I, T]) DataPrefix() []byte {
+	return s.base.DataPrefix()
+}
+
+// Unit returns what the store records of itself, which is migrated as a whole.
+func (s *Store[I, T]) Unit() *migrate.Unit {
+	return s.base.Unit()
+}
+
+// Migrate brings the database to what the store defines; see migrate.Run.
+func (s *Store[I, T]) Migrate(ctx context.Context, db kv.DB) (*migrate.Report, error) {
+	return migrate.Run(ctx, db, s)
+}
+
+// Check compares the database with what the store defines, without changing it; see migrate.Check.
+func (s *Store[I, T]) Check(db kv.DB) error {
+	return migrate.Check(db, s)
 }
 
 // Instantiate creates the instance of the store for a transaction.

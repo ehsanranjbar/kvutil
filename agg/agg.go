@@ -25,7 +25,7 @@ import (
 	"github.com/ehsanranjbar/kvutil/codec"
 	"github.com/ehsanranjbar/kvutil/kv"
 	"github.com/ehsanranjbar/kvutil/kv/prefix"
-	"github.com/ehsanranjbar/kvutil/schema"
+	"github.com/ehsanranjbar/kvutil/migrate"
 	extstore "github.com/ehsanranjbar/kvutil/store/ext"
 )
 
@@ -213,7 +213,7 @@ func appendTime(dst []byte, t time.Time) []byte {
 // encoded in the keys: in the form of their key codec that marks where it ends.
 type core[X, S any] struct {
 	name      string
-	ns        *schema.Namespace
+	prefix    []byte // where the data is kept, which the store gives to the aggregation
 	buckets   []Bucket
 	skipGroup func(bz []byte) (n int, err error) // the size of the group at the front of the bytes
 	xCodec    codec.ValueCodec[X]
@@ -289,12 +289,12 @@ type Aggregation[K, V, G, X, S any] struct {
 	kind    kind[X, S]
 	desc    Descriptor
 
-	// What is set when the store gives the aggregation its namespace.
+	// What is set when the store gives the aggregation its prefix.
 	opts options
 }
 
 // define creates an aggregation and adds it to the store. The kind is made by the function
-// once the aggregation has its namespace and its codecs.
+// once the aggregation has its prefix and its codecs.
 func define[K, V, G, X, S any](
 	store extstore.Extensible[K, V],
 	name, kindName string,
@@ -368,9 +368,10 @@ func (a *Aggregation[K, V, G, X, S]) Descriptor() Descriptor {
 	return a.desc
 }
 
-// Namespace returns the namespace that the aggregation keeps its data in.
-func (a *Aggregation[K, V, G, X, S]) Namespace() *schema.Namespace {
-	return a.ns
+// Prefix returns the prefix that the aggregation keeps its data under, which is given to it when
+// it is added to its store. The slice must not be modified.
+func (a *Aggregation[K, V, G, X, S]) Prefix() []byte {
+	return a.prefix
 }
 
 // Buckets returns the buckets that the aggregation is kept for.
@@ -414,7 +415,7 @@ func (a *Aggregation[K, V, G, X, S]) encodeGroup(group G) ([]byte, error) {
 
 // collectName implements the collectable interface.
 func (a *Aggregation[K, V, G, X, S]) collectName() string {
-	return a.ns.Path()
+	return a.name
 }
 
 // collectBatch implements the collectable interface.
@@ -428,40 +429,40 @@ type maintainer[K, V, G, X, S any] struct {
 	newKind func(c *core[X, S], o options) kind[X, S]
 }
 
-// UseNamespace implements the extstore.NamespaceUser interface.
-func (m maintainer[K, V, G, X, S]) UseNamespace(ns *schema.Namespace) {
+// Keep implements the extstore.Keeper interface.
+func (m maintainer[K, V, G, X, S]) Keep(p []byte) migrate.Part {
 	a := m.a
-	a.ns = ns
+	a.prefix = bytes.Clone(p)
 
-	format := ns.Schema().Format()
 	if a.xCodec = option[codec.ValueCodec[X]](a.name, "the contribution codec", a.opts.xCodec); a.xCodec == nil {
-		a.xCodec = codec.ValueFor[X](format)
+		a.xCodec = codec.ValueFor[X](nil)
 	}
 	if a.sCodec = option[codec.ValueCodec[S]](a.name, "the state codec", a.opts.sCodec); a.sCodec == nil {
-		a.sCodec = codec.ValueFor[S](format)
+		a.sCodec = codec.ValueFor[S](nil)
 	}
 	a.desc.Encoding = a.gCodec.Name() + "," + a.xCodec.Name() + "," + a.sCodec.Name()
 	a.kind = m.newKind(a.core, a.opts)
 
-	ns.Define(schema.Definition{
+	return migrate.Part{
 		Kind:       "agg",
-		Keys:       true,
-		KeyType:    reflect.TypeFor[K]().String(),
-		ValueType:  reflect.TypeFor[V]().String(),
 		Attributes: a.desc.attributes,
-		Descriptor: a.desc,
-		Object:     a,
 		// An aggregation is derived from the records, so it is built for the ones that
 		// are there when it is defined, and again when it or the records have changed.
 		Rebuild: func(ctx context.Context, db kv.DB) error {
 			return Rebuild(ctx, db, a)
 		},
-	})
+	}
+}
+
+// collection implements the collected interface, which is how a collector finds the
+// aggregations among the extensions of a store.
+func (m maintainer[K, V, G, X, S]) collection() collectable {
+	return m.a
 }
 
 // Instantiate implements the extstore.Extension interface.
 func (m maintainer[K, V, G, X, S]) Instantiate(tx kv.Tx) extstore.ExtensionInstance[K, V] {
-	return &maintenance[K, V, G, X, S]{a: m.a, tx: m.a.ns.Open(tx)}
+	return &maintenance[K, V, G, X, S]{a: m.a, tx: prefix.New(tx, m.a.prefix)}
 }
 
 type maintenance[K, V, G, X, S any] struct {
@@ -498,7 +499,7 @@ func (m *maintenance[K, V, G, X, S]) change(rawKey []byte, old, new *V) error {
 
 // Instantiate creates the instance of the aggregation for a transaction.
 func (a *Aggregation[K, V, G, X, S]) Instantiate(tx kv.Tx) *Instance[K, V, G, X, S] {
-	return &Instance[K, V, G, X, S]{a: a, tx: a.ns.Open(tx)}
+	return &Instance[K, V, G, X, S]{a: a, tx: prefix.New(tx, a.prefix)}
 }
 
 // Instance is an Aggregation in a transaction, which it is read with.

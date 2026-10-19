@@ -13,14 +13,14 @@ import (
 	"github.com/ehsanranjbar/kvutil/internal/testkv"
 	"github.com/ehsanranjbar/kvutil/iterutil"
 	"github.com/ehsanranjbar/kvutil/kv"
-	"github.com/ehsanranjbar/kvutil/schema"
+	"github.com/ehsanranjbar/kvutil/kv/prefix"
+	"github.com/ehsanranjbar/kvutil/migrate"
 	extstore "github.com/ehsanranjbar/kvutil/store/ext"
 	"github.com/stretchr/testify/require"
 )
 
 // kennel is a version of a program with a store of pets and the indexes that it defines.
 type kennel struct {
-	sch     *schema.Schema
 	pets    *extstore.Store[int64, pet]
 	byName  *index.FieldIndex[int64, pet, string]
 	byTag   *index.FieldIndex[int64, pet, string]
@@ -32,8 +32,7 @@ type kennel struct {
 // newKennel defines the store, and the indexes if they are asked for. The old pets are the
 // ones from an age on.
 func newKennel(indexes bool, oldFrom int) *kennel {
-	k := &kennel{sch: schema.New()}
-	k.pets = extstore.New[int64, pet](k.sch.Namespace("pets"))
+	k := &kennel{pets: extstore.New[int64, pet]("pets")}
 	if indexes {
 		k.byName = index.On(k.pets, "by_name", nameField)
 		k.byTag = index.On(k.pets, "by_tag", tagsField)
@@ -133,10 +132,10 @@ func randomPet(rng *rand.Rand, id int64) *pet {
 	return p
 }
 
-func migrated(t *testing.T, db kv.DB, sch *schema.Schema) string {
+func migrated(t *testing.T, db kv.DB, store *extstore.Store[int64, pet]) string {
 	t.Helper()
 
-	report, err := sch.Migrate(context.Background(), db)
+	report, err := store.Migrate(context.Background(), db)
 	require.NoError(t, err)
 	return report.String()
 }
@@ -151,7 +150,7 @@ func TestBackfill(t *testing.T) {
 
 		// A program without indexes writes the pets.
 		v1 := newKennel(false, 0)
-		migrated(t, db, v1.sch)
+		migrated(t, db, v1.pets)
 		require.NoError(t, db.Update(func(tx kv.Tx) error {
 			for id := int64(1); id <= n; id++ {
 				if err := v1.pets.Instantiate(tx).Set(id, randomPet(rng, id)); err != nil {
@@ -163,15 +162,15 @@ func TestBackfill(t *testing.T) {
 
 		// The next one defines them.
 		v2 := newKennel(true, 8)
-		require.ErrorIs(t, v2.sch.Check(db), schema.ErrNeedsMigration)
-		require.Equal(t, `built index "pets/ext/by_name"
-built index "pets/ext/by_tag"
-built index "pets/ext/by_chip"
-built index "pets/ext/by_owner_age"
-built index "pets/ext/olds"`, migrated(t, db, v2.sch))
+		require.ErrorIs(t, v2.pets.Check(db), migrate.ErrNeedsMigration)
+		require.Equal(t, `built index "pets/by_name"
+built index "pets/by_tag"
+built index "pets/by_chip"
+built index "pets/by_owner_age"
+built index "pets/olds"`, migrated(t, db, v2.pets))
 		v2.verify(t, db, 8)
-		require.NoError(t, v2.sch.Check(db))
-		require.Empty(t, migrated(t, db, v2.sch))
+		require.NoError(t, v2.pets.Check(db))
+		require.Empty(t, migrated(t, db, v2.pets))
 
 		// They are kept up to date as any index is.
 		require.NoError(t, db.Update(func(tx kv.Tx) error {
@@ -194,15 +193,15 @@ built index "pets/ext/olds"`, migrated(t, db, v2.sch))
 
 		// An index whose definition has changed is built again: the old pets are others.
 		v3 := newKennel(true, 3)
-		require.ErrorIs(t, v3.sch.Check(db), schema.ErrNeedsMigration)
-		require.Equal(t, `built index "pets/ext/olds"`, migrated(t, db, v3.sch))
+		require.ErrorIs(t, v3.pets.Check(db), migrate.ErrNeedsMigration)
+		require.Equal(t, `built index "pets/olds"`, migrated(t, db, v3.pets))
 		v3.verify(t, db, 3)
 
 		// A program without the indexes deletes them, as it would not keep them up to date.
 		v4 := newKennel(false, 0)
-		require.Contains(t, migrated(t, db, v4.sch), `dropped index "pets/ext/by_name"`)
+		require.Contains(t, migrated(t, db, v4.pets), `dropped index "pets/by_name"`)
 		require.NoError(t, db.View(func(tx kv.Tx) error {
-			it, err := v2.byName.Namespace().Open(tx).Iterator(nil, nil)
+			it, err := prefix.New(tx, v2.byName.Prefix()).Iterator(nil, nil)
 			require.NoError(t, err)
 			defer it.Close()
 			require.False(t, it.Valid())
@@ -220,8 +219,8 @@ built index "pets/ext/olds"`, migrated(t, db, v2.sch))
 
 		// So they are built again when they are defined again.
 		v5 := newKennel(true, 3)
-		require.ErrorIs(t, v5.sch.Check(db), schema.ErrNeedsMigration)
-		require.Contains(t, migrated(t, db, v5.sch), `built index "pets/ext/by_chip"`)
+		require.ErrorIs(t, v5.pets.Check(db), migrate.ErrNeedsMigration)
+		require.Contains(t, migrated(t, db, v5.pets), `built index "pets/by_chip"`)
 		v5.verify(t, db, 3)
 	})
 }
@@ -229,7 +228,7 @@ built index "pets/ext/olds"`, migrated(t, db, v2.sch))
 func TestRebuild(t *testing.T) {
 	testkv.Each(t, func(t *testing.T, db kv.DB) {
 		k := newKennel(true, 8)
-		require.NoError(t, k.sch.Check(db))
+		require.NoError(t, k.pets.Check(db))
 
 		rng := rand.New(rand.NewPCG(3, 4))
 		require.NoError(t, db.Update(func(tx kv.Tx) error {
@@ -239,7 +238,7 @@ func TestRebuild(t *testing.T) {
 				}
 			}
 			// Entries that no pet has, and a pet without its entries.
-			refs := k.byName.Namespace().Open(tx)
+			refs := prefix.New(tx, k.byName.Prefix())
 			if err := refs.Set([]byte("zzz\x00\x01\x80\x00\x00\x00\x00\x00\x00\x63\x08"), nil); err != nil {
 				return err
 			}
@@ -270,17 +269,16 @@ func TestRebuild(t *testing.T) {
 // have keys of their own, and can be once they have.
 func TestBackfillUnique(t *testing.T) {
 	testkv.Each(t, func(t *testing.T, db kv.DB) {
-		define := func(unique bool) (*schema.Schema, *extstore.Store[int64, pet], *index.FieldIndex[int64, pet, string]) {
-			sch := schema.New()
-			pets := extstore.New[int64, pet](sch.Namespace("pets"))
+		define := func(unique bool) (*extstore.Store[int64, pet], *index.FieldIndex[int64, pet, string]) {
+			pets := extstore.New[int64, pet]("pets")
 			if !unique {
-				return sch, pets, nil
+				return pets, nil
 			}
-			return sch, pets, index.Unique(pets, "by_chip", field.Of("Chip", func(p *pet) string { return p.Chip }))
+			return pets, index.Unique(pets, "by_chip", field.Of("Chip", func(p *pet) string { return p.Chip }))
 		}
 
-		sch, pets, _ := define(false)
-		migrated(t, db, sch)
+		pets, _ := define(false)
+		migrated(t, db, pets)
 		require.NoError(t, db.Update(func(tx kv.Tx) error {
 			for id, chip := range map[int64]string{1: "a", 2: "b", 3: "c", 7: "b"} {
 				if err := pets.Instantiate(tx).Set(id, &pet{Chip: chip}); err != nil {
@@ -291,26 +289,26 @@ func TestBackfillUnique(t *testing.T) {
 		}))
 
 		// The two records are named.
-		sch, _, _ = define(true)
-		_, err := sch.Migrate(context.Background(), db)
+		pets, _ = define(true)
+		_, err := pets.Migrate(context.Background(), db)
 		require.ErrorIs(t, err, index.ErrUniqueViolation)
-		require.ErrorContains(t, err, `index "pets/ext/by_chip"`)
+		require.ErrorContains(t, err, `index "pets/by_chip"`)
 		require.ErrorContains(t, err, "the record 7 has a key that the record 2 has")
 
 		// The index is not for use, and the same program cannot go on with a check.
-		sch, _, _ = define(true)
-		require.ErrorIs(t, sch.Check(db), schema.ErrNeedsMigration)
-		_, err = sch.Migrate(context.Background(), db)
+		pets, _ = define(true)
+		require.ErrorIs(t, pets.Check(db), migrate.ErrNeedsMigration)
+		_, err = pets.Migrate(context.Background(), db)
 		require.ErrorIs(t, err, index.ErrUniqueViolation)
 
 		// Once the records have keys of their own, it is built.
-		sch, pets, _ = define(false)
-		migrated(t, db, sch)
+		pets, _ = define(false)
+		migrated(t, db, pets)
 		require.NoError(t, db.Update(func(tx kv.Tx) error {
 			return pets.Instantiate(tx).Set(7, &pet{Chip: "d"})
 		}))
-		sch, pets, byChip := define(true)
-		require.Equal(t, `built index "pets/ext/by_chip"`, migrated(t, db, sch))
+		pets, byChip := define(true)
+		require.Equal(t, `built index "pets/by_chip"`, migrated(t, db, pets))
 		require.NoError(t, db.View(func(tx kv.Tx) error {
 			id, ok, err := byChip.Instantiate(tx).Find("d")
 			require.NoError(t, err)

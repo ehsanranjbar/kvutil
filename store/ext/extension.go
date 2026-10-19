@@ -5,7 +5,7 @@ import (
 	"github.com/ehsanranjbar/kvutil/codec"
 	"github.com/ehsanranjbar/kvutil/iterutil"
 	"github.com/ehsanranjbar/kvutil/kv"
-	"github.com/ehsanranjbar/kvutil/schema"
+	"github.com/ehsanranjbar/kvutil/migrate"
 )
 
 // Extension is an extension to the Store, which is told of the records that are set and deleted.
@@ -25,10 +25,12 @@ type ExtensionInstance[K, V any] interface {
 	OnDelete(key K, rawKey []byte, old *V) error
 }
 
-// NamespaceUser is implemented by the extensions that keep data of their own.
-// They are given a namespace under the namespace of the store when they are added to it.
-type NamespaceUser interface {
-	UseNamespace(ns *schema.Namespace)
+// Keeper is implemented by the extensions that keep data of their own. Keep is given the
+// prefix of that data when the extension is added, and returns what the store records of it:
+// the kind of the extension, what its data depends on, and how it is built from the records if
+// it can be. The store sets the name and the prefix of the part.
+type Keeper interface {
+	Keep(prefix []byte) migrate.Part
 }
 
 // DeleteHook is called before a record that exists is deleted, with the key as it is given
@@ -47,8 +49,6 @@ type Referable[K any] interface {
 	DeleteHooks[K]
 	// KeyCodec returns the key codec of the store.
 	KeyCodec() codec.KeyCodec[K]
-	// Namespace returns the namespace of the store.
-	Namespace() *schema.Namespace
 	// Contains reports whether the store has a record of a key, in a transaction.
 	Contains(tx kv.Tx, key K) (bool, error)
 }

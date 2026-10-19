@@ -15,7 +15,7 @@ import (
 	"github.com/ehsanranjbar/kvutil/index"
 	"github.com/ehsanranjbar/kvutil/kv"
 	"github.com/ehsanranjbar/kvutil/kv/memkv"
-	"github.com/ehsanranjbar/kvutil/schema"
+	"github.com/ehsanranjbar/kvutil/migrate"
 	extstore "github.com/ehsanranjbar/kvutil/store/ext"
 	"github.com/stretchr/testify/require"
 )
@@ -271,7 +271,7 @@ func TestPlan(t *testing.T) {
 // indexes, and checks that each of them finds exactly the records that satisfy the conditions.
 func TestLookupFindsWhatAScanFinds(t *testing.T) {
 	db := memkv.New()
-	store := extstore.New[int64, pet](schema.New().Namespace("pets"))
+	store := extstore.New[int64, pet]("pets")
 	indexes := []*index.Index[int64, pet]{
 		index.Composite(store, "owner_age_name", field.List(ownerField, ageField.Desc(), nameField)),
 		index.Composite(store, "name_owner", field.List(nameField.Desc(), ownerField)),
@@ -418,12 +418,11 @@ func (r random[F]) between() cond.Cond[pet] {
 
 func TestWhere(t *testing.T) {
 	db := memkv.New()
-	sch := schema.New()
-	store := extstore.New[int64, pet](sch.Namespace("pets"))
+	store := extstore.New[int64, pet]("pets")
 	old := index.On(store, "old_by_name", nameField, index.Where(ageField.Gte(10)))
 	tagged := index.New(store, "tagged", index.ByFields(field.List(ownerField)...),
 		index.Where(cond.Func("has_tags", func(p *pet) bool { return len(p.Tags) > 0 })))
-	require.NoError(t, sch.Check(db))
+	require.NoError(t, store.Check(db))
 
 	// The condition is a part of what the index is.
 	require.Equal(t, "Age >= 10", old.Descriptor().Where)
@@ -455,14 +454,14 @@ func TestWhere(t *testing.T) {
 	require.NoError(t, err)
 
 	// An index with another condition has other records in it, so it has to be built again.
-	changed := schema.New()
-	index.On(extstore.New[int64, pet](changed.Namespace("pets")), "old_by_name", nameField, index.Where(ageField.Gte(11)))
-	require.ErrorIs(t, changed.Check(db), schema.ErrNeedsMigration)
+	changed := extstore.New[int64, pet]("pets")
+	index.On(changed, "old_by_name", nameField, index.Where(ageField.Gte(11)))
+	require.ErrorIs(t, changed.Check(db), migrate.ErrNeedsMigration)
 }
 
 func TestUniqueComposite(t *testing.T) {
 	db := memkv.New()
-	store := extstore.New[int64, pet](schema.New().Namespace("pets"))
+	store := extstore.New[int64, pet]("pets")
 	idx := index.UniqueComposite(store, "by_owner_name", field.List(ownerField, nameField))
 	require.True(t, idx.Descriptor().Unique)
 
@@ -485,15 +484,13 @@ func TestFields(t *testing.T) {
 	age := field.Path[pet, int]("Age")
 	tags := field.Path[pet, string]("Tags")
 
-	sch := schema.New()
-	pets := extstore.New[int64, pet](sch.Namespace("pets"))
+	pets := extstore.New[int64, pet]("pets")
 	byOwner := index.On(pets, "by_owner", owner)
 	byOwnerAge := index.Composite(pets, "by_owner_age", field.List(owner, age.Desc()),
 		// The options wrap the indexer, which still has its fields.
 		index.Where(age.Gte(1)),
 		index.Covering(func(p *pet) string { return p.Name }, nil, "Name"))
 	custom := index.New(pets, "custom", byChipLength{})
-	require.NoError(t, sch.Validate())
 
 	paths := func(parts []field.Component[pet]) []string {
 		var paths []string
@@ -519,11 +516,13 @@ func TestFields(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, age.Eq(3).Values, cnd.Values)
 
-	// The indexes of a store are found through the schema, as the things that have the fields.
+	// The indexes of a store are found through its extensions, as the things that have the
+	// fields; the parts of its unit have their names.
+	parts := pets.Unit().Parts()
 	var found []string
-	for _, def := range pets.Namespace().Definitions() {
-		if x, ok := def.Object.(interface{ Fields() []field.Component[pet] }); ok {
-			found = append(found, def.Namespace().Name()+": "+strings.Join(paths(x.Fields()), ", "))
+	for i, ext := range pets.Extensions() {
+		if x, ok := ext.(interface{ Fields() []field.Component[pet] }); ok {
+			found = append(found, parts[i].Name+": "+strings.Join(paths(x.Fields()), ", "))
 		}
 	}
 	require.Equal(t, []string{"by_owner: Owner", "by_owner_age: Owner, Age desc", "custom: "}, found)

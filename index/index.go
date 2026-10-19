@@ -6,7 +6,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"reflect"
 	"strconv"
 	"strings"
 
@@ -14,7 +13,7 @@ import (
 	"github.com/ehsanranjbar/kvutil/cond"
 	"github.com/ehsanranjbar/kvutil/field"
 	"github.com/ehsanranjbar/kvutil/kv"
-	"github.com/ehsanranjbar/kvutil/schema"
+	"github.com/ehsanranjbar/kvutil/migrate"
 	extstore "github.com/ehsanranjbar/kvutil/store/ext"
 	refstore "github.com/ehsanranjbar/kvutil/store/ref"
 )
@@ -189,9 +188,10 @@ type fielded[V any] interface {
 	Fields() []field.Component[V]
 }
 
-// Namespace returns the namespace that the index keeps its entries in.
-func (x *Index[K, V]) Namespace() *schema.Namespace {
-	return x.refs.Namespace()
+// Prefix returns the prefix that the index keeps its entries under, which is given to it when it
+// is added to its store. The slice must not be modified.
+func (x *Index[K, V]) Prefix() []byte {
+	return x.refs.Prefix()
 }
 
 // Instantiate creates the instance of the index for a transaction.
@@ -208,27 +208,29 @@ type maintainer[K, V any] struct {
 	x *Index[K, V]
 }
 
-// UseNamespace implements the extstore.NamespaceUser interface.
-func (m maintainer[K, V]) UseNamespace(ns *schema.Namespace) {
+// Keep implements the extstore.Keeper interface.
+func (m maintainer[K, V]) Keep(prefix []byte) migrate.Part {
 	x := m.x
-	def := schema.Definition{
+	if x.desc.Unique {
+		x.refs = refstore.NewUnique(prefix)
+	} else {
+		x.refs = refstore.New(prefix)
+	}
+	return migrate.Part{
 		Kind:       "index",
-		KeyType:    reflect.TypeFor[K]().String(),
-		ValueType:  reflect.TypeFor[V]().String(),
 		Attributes: x.desc.attributes,
-		Descriptor: x.desc,
-		Object:     x,
 		// An index is derived from the records, so it is built for the ones that are there
 		// when it is defined, and again when it or the records have changed.
 		Rebuild: func(ctx context.Context, db kv.DB) error {
 			return Rebuild(ctx, db, x)
 		},
 	}
-	if x.desc.Unique {
-		x.refs = refstore.NewUnique(ns, def)
-	} else {
-		x.refs = refstore.New(ns, def)
-	}
+}
+
+// Fields returns the fields that the index finds the records by; see Index.Fields. It is how
+// a query finds the fields that can be looked up by going through the extensions of a store.
+func (m maintainer[K, V]) Fields() []field.Component[V] {
+	return m.x.Fields()
 }
 
 // Instantiate implements the extstore.Extension interface.

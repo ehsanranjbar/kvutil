@@ -1,6 +1,7 @@
 package typed_test
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
@@ -11,7 +12,8 @@ import (
 	"github.com/ehsanranjbar/kvutil/iterutil"
 	"github.com/ehsanranjbar/kvutil/kv"
 	"github.com/ehsanranjbar/kvutil/kv/memkv"
-	"github.com/ehsanranjbar/kvutil/schema"
+	"github.com/ehsanranjbar/kvutil/kv/prefix"
+	"github.com/ehsanranjbar/kvutil/migrate"
 	"github.com/ehsanranjbar/kvutil/store/typed"
 	"github.com/stretchr/testify/require"
 )
@@ -93,11 +95,14 @@ func (c pointKey) Read(bz []byte) (point, int, error) {
 
 func TestStore(t *testing.T) {
 	testkv.Each(t, func(t *testing.T, db kv.DB) {
-		sch := schema.New()
-		store := typed.New[int64, pet](sch.Namespace("pets"))
-		require.NoError(t, sch.Check(db))
+		store := typed.New[int64, pet]("pets")
+		require.NoError(t, store.Check(db))
 		require.Equal(t, "int64", store.KeyCodec().Name())
 		require.Equal(t, "msgpack", store.ValueCodec().Name())
+		require.Equal(t, []byte("pets"), store.Prefix())
+		require.Equal(t, []byte("petsd"), store.DataPrefix())
+		require.Equal(t, "typed", store.Unit().Kind())
+		require.Equal(t, "pets", store.Unit().Name())
 
 		err := db.Update(func(tx kv.Tx) error {
 			ins := store.Instantiate(tx)
@@ -137,11 +142,16 @@ func TestStore(t *testing.T) {
 
 			require.Equal(t, []int64{-1, 1}, scan(t, ins, kvutil.All[int64](), false))
 
-			// The store keeps its keys in its own namespace.
-			raw, err := sch.Namespace("other").Open(tx).Iterator(nil, nil)
+			// The store keeps its keys under its own prefix: the record of the store, and the records.
+			raw, err := tx.Iterator(nil, nil)
 			require.NoError(t, err)
 			defer raw.Close()
-			require.False(t, raw.Valid())
+
+			var keys []string
+			for ; raw.Valid(); raw.Next() {
+				keys = append(keys, string(raw.Key()[:5]))
+			}
+			require.Equal(t, []string{"petsd", "petsd", "petsm"}, keys)
 			return nil
 		})
 		require.NoError(t, err)
@@ -150,7 +160,7 @@ func TestStore(t *testing.T) {
 
 func TestIterator(t *testing.T) {
 	testkv.Each(t, func(t *testing.T, db kv.DB) {
-		store := typed.New[int64, pet](schema.New().Namespace("pets"))
+		store := typed.New[int64, pet]("pets")
 
 		err := db.Update(func(tx kv.Tx) error {
 			ins := store.Instantiate(tx)
@@ -217,7 +227,7 @@ func TestIterator(t *testing.T) {
 
 func TestEmptyStringKey(t *testing.T) {
 	db := memkv.New()
-	store := typed.New[string, pet](schema.New().Namespace("pets"))
+	store := typed.New[string, pet]("pets")
 
 	err := db.Update(func(tx kv.Tx) error {
 		ins := store.Instantiate(tx)
@@ -238,9 +248,9 @@ func TestEmptyStringKey(t *testing.T) {
 
 func TestCodecs(t *testing.T) {
 	db := memkv.New()
-	stored := func(t *testing.T, ns *schema.Namespace) (key, value []byte) {
+	stored := func(t *testing.T, dataPrefix []byte) (key, value []byte) {
 		err := db.View(func(tx kv.Tx) error {
-			it, err := ns.Open(tx).Iterator(nil, nil)
+			it, err := prefix.New(tx, dataPrefix).Iterator(nil, nil)
 			require.NoError(t, err)
 			defer it.Close()
 
@@ -258,23 +268,23 @@ func TestCodecs(t *testing.T) {
 		require.NoError(t, db.Update(write))
 	}
 
-	t.Run("SchemaFormat", func(t *testing.T) {
-		sch := schema.New(schema.WithFormat(codec.JSON))
-		store := typed.New[string, pet](sch.Namespace("json"))
+	t.Run("DefaultFormat", func(t *testing.T) {
+		store := typed.New[string, pet]("msgpack")
 		set(t, func(tx kv.Tx) error { return store.Instantiate(tx).Set("rex", &pet{Name: "rex", Age: 3}) })
 
-		key, value := stored(t, store.Namespace())
+		key, value := stored(t, store.DataPrefix())
 		require.Equal(t, []byte("rex"), key)
-		require.JSONEq(t, `{"Name":"rex","Age":3}`, string(value))
+		var got pet
+		require.NoError(t, codec.Msgpack.Unmarshal(value, &got))
+		require.Equal(t, pet{Name: "rex", Age: 3}, got)
 	})
 
 	t.Run("SelfEncodingValue", func(t *testing.T) {
-		sch := schema.New(schema.WithFormat(codec.JSON))
-		store := typed.New[string, tagged](sch.Namespace("tagged"))
+		store := typed.New[string, tagged]("tagged")
 		require.Equal(t, "binary", store.ValueCodec().Name())
 		set(t, func(tx kv.Tx) error { return store.Instantiate(tx).Set("a", &tagged{Tag: "x"}) })
 
-		_, value := stored(t, store.Namespace())
+		_, value := stored(t, store.DataPrefix())
 		require.Equal(t, []byte("tag:x"), value)
 
 		err := db.View(func(tx kv.Tx) error {
@@ -287,25 +297,25 @@ func TestCodecs(t *testing.T) {
 	})
 
 	t.Run("Explicit", func(t *testing.T) {
-		store := typed.NewWithCodecs(schema.New().Namespace("explicit"),
+		store := typed.NewWithCodecs([]byte("explicit"),
 			codec.StringKey[string](), codec.Formatted[tagged](codec.JSON))
 		set(t, func(tx kv.Tx) error { return store.Instantiate(tx).Set("a", &tagged{Tag: "x"}) })
 
-		_, value := stored(t, store.Namespace())
+		_, value := stored(t, store.DataPrefix())
 		require.JSONEq(t, `{"Tag":"x"}`, string(value))
 	})
 
 	t.Run("ExplicitValueOnly", func(t *testing.T) {
-		store := typed.NewWithCodecs[int64, tagged](schema.New().Namespace("value"),
+		store := typed.NewWithCodecs[int64, tagged]("value",
 			nil, codec.Formatted[tagged](codec.JSON))
 		require.Equal(t, "int64", store.KeyCodec().Name())
 		require.Equal(t, "json", store.ValueCodec().Name())
 	})
 
 	t.Run("UndecodableValue", func(t *testing.T) {
-		store := typed.New[string, pet](schema.New(schema.WithFormat(codec.JSON)).Namespace("broken"))
+		store := typed.NewWithCodecs[string, pet]("broken", nil, codec.Formatted[pet](codec.JSON))
 		set(t, func(tx kv.Tx) error {
-			require.NoError(t, store.Namespace().Open(tx).Set([]byte("a"), []byte("not json")))
+			require.NoError(t, prefix.New(tx, store.DataPrefix()).Set([]byte("a"), []byte("not json")))
 
 			_, err := store.Instantiate(tx).Get("a")
 			require.Error(t, err)
@@ -319,14 +329,13 @@ func TestMissingKeyCodec(t *testing.T) {
 	// A key type that has no codec is a mistake in the definition, which panics right there.
 	require.PanicsWithValue(t,
 		`store "points": no key codec for type typed_test.point; define the store with NewWithCodecs and give it one`,
-		func() { typed.New[point, pet](schema.New().Namespace("points")) })
+		func() { typed.New[point, pet]("points") })
 
 	// A key codec that is given makes the definition complete.
 	db := memkv.New()
-	sch := schema.New()
-	store := typed.NewWithCodecs[point, pet](sch.Namespace("points"),
+	store := typed.NewWithCodecs[point, pet]("points",
 		pointKey{base: codec.PairKey(codec.IntKey[int](), codec.IntKey[int]())}, nil)
-	require.NoError(t, sch.Check(db))
+	require.NoError(t, store.Check(db))
 	require.Equal(t, "point", store.KeyCodec().Name())
 	require.Equal(t, "msgpack", store.ValueCodec().Name())
 
@@ -343,32 +352,51 @@ func TestMissingKeyCodec(t *testing.T) {
 
 func TestCheckDetectsCodecChange(t *testing.T) {
 	testkv.Each(t, func(t *testing.T, db kv.DB) {
-		sch := schema.New()
-		typed.New[int64, pet](sch.Namespace("pets"))
-		require.NoError(t, sch.Check(db))
+		require.NoError(t, typed.New[int64, pet]("pets").Check(db))
+		require.NoError(t, typed.New[int64, pet]("pets").Check(db))
 
-		same := schema.New()
-		typed.New[int64, pet](same.Namespace("pets"))
-		require.NoError(t, same.Check(db))
+		otherFormat := typed.NewWithCodecs[int64, pet]("pets", nil, codec.Formatted[pet](codec.JSON))
+		require.ErrorIs(t, otherFormat.Check(db), migrate.ErrChanged)
 
-		otherFormat := schema.New(schema.WithFormat(codec.JSON))
-		typed.New[int64, pet](otherFormat.Namespace("pets"))
-		require.ErrorIs(t, otherFormat.Check(db), schema.ErrChanged)
-
-		otherKey := schema.New()
-		typed.New[int32, pet](otherKey.Namespace("pets"))
-		require.ErrorIs(t, otherKey.Check(db), schema.ErrChanged)
+		require.ErrorIs(t, typed.New[int32, pet]("pets").Check(db), migrate.ErrChanged)
 
 		// A type that is renamed is the same store.
 		type id int64
-		renamed := schema.New()
-		typed.New[id, pet](renamed.Namespace("pets"))
-		require.NoError(t, renamed.Check(db))
+		require.NoError(t, typed.New[id, pet]("pets").Check(db))
+
+		// Another codec with another version, and the migration to it, is the store from then on.
+		next := otherFormat.WithVersion(2)
+		migrate.Custom(next, 1, func(context.Context, *migrate.Migrator) error { return nil })
+		report, err := next.Migrate(context.Background(), db)
+		require.NoError(t, err)
+		require.Equal(t, `migrated typed "pets" from version 1 to 2`, report.String())
+		require.NoError(t, typed.NewWithCodecs[int64, pet]("pets", nil, codec.Formatted[pet](codec.JSON)).
+			WithVersion(2).Check(db))
 	})
 }
 
+func TestPrefix(t *testing.T) {
+	// A prefix is a string or bytes, and the store keeps a copy of it.
+	raw := []byte("raw")
+	fromBytes := typed.New[int64, pet](raw)
+	raw[0] = 'x'
+	require.Equal(t, []byte("raw"), fromBytes.Prefix())
+	require.Equal(t, []byte("rawd"), fromBytes.DataPrefix())
+
+	type name string
+	require.Equal(t, []byte("named"), typed.New[int64, pet](name("named")).Prefix())
+
+	// Whatever is not text is named by its bytes.
+	odd := typed.New[int64, pet]([]byte{0x01})
+	require.Equal(t, "0x01", odd.Unit().Name())
+	require.Equal(t, migrate.MetaKey([]byte{0x01}), []byte{0x01, 'm'})
+
+	require.Panics(t, func() { typed.New[int64, pet]("") })
+	require.Panics(t, func() { typed.New[int64, pet]([]byte(nil)) })
+}
+
 func TestTTL(t *testing.T) {
-	store := typed.New[string, pet](schema.New().Namespace("pets"))
+	store := typed.New[string, pet]("pets")
 
 	t.Run("Unsupported", func(t *testing.T) {
 		err := testkv.NewMem(t).Update(func(tx kv.Tx) error {

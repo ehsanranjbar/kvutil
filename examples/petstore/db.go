@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -14,16 +15,17 @@ import (
 	"github.com/ehsanranjbar/kvutil/field"
 	"github.com/ehsanranjbar/kvutil/index"
 	"github.com/ehsanranjbar/kvutil/iterutil"
+	"github.com/ehsanranjbar/kvutil/keyspace"
 	"github.com/ehsanranjbar/kvutil/kv"
 	"github.com/ehsanranjbar/kvutil/kv/badgerkv"
+	"github.com/ehsanranjbar/kvutil/migrate"
 	"github.com/ehsanranjbar/kvutil/relation"
-	"github.com/ehsanranjbar/kvutil/schema"
 	"github.com/ehsanranjbar/kvutil/store/record"
 	"github.com/google/uuid"
 )
 
 // File is an image with its metadata. It has no codec of its own, so it is stored in the
-// default format of the schema.
+// default format of its type.
 type File = record.Object[uuid.UUID, []byte]
 
 // DB is the database of the pet store: the stores, what is derived from them, and what runs
@@ -32,7 +34,7 @@ type DB struct {
 	*badgerkv.DB
 
 	// Migrated is what was done to the database when it was opened.
-	Migrated *schema.Report
+	Migrated *migrate.Report
 
 	// The collector folds what the writes left for the aggregations into their states.
 	collector *agg.Collector
@@ -75,18 +77,18 @@ func NewDB(opt badger.Options) (*DB, error) {
 func define(base *badgerkv.DB) (*DB, error) {
 	db := &DB{DB: base}
 
-	// The names of the namespaces are given short prefixes, which are kept in the database.
-	names, err := schema.NewNameRegistry(base)
+	// The stores are given long names, and the keyspace gives each of them a short prefix, which
+	// is kept in the database.
+	ks, err := keyspace.Open(base)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load the names: %w", err)
 	}
-	sch := schema.New(schema.WithPrefixAllocator(names))
 
 	// The ids are taken from sequences of Badger, which the general interface does not have.
-	sequences := sch.Namespace("sequences")
-	sequences.Define(schema.Definition{Kind: "sequences", Keys: true})
+	// They are raw keys under a prefix of their own, which no store is defined at.
+	sequences := ks.Prefix("sequences")
 	sequence := func(name string) (*badger.Sequence, error) {
-		seq, err := base.Sequence(append(sequences.Prefix(), name...), 10)
+		seq, err := base.Sequence(append(bytes.Clone(sequences), name...), 10)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get the sequence of %s: %w", name, err)
 		}
@@ -103,18 +105,19 @@ func define(base *badgerkv.DB) (*DB, error) {
 
 	// The stores are given no codecs. The ids are encoded by their types, the messages of
 	// protobuf encode themselves, and the files are in the default format.
-	db.categories = record.New[int64, types.Category](sch.Namespace("categories")).
+	db.categories = record.New[int64, types.Category](ks.Prefix("categories")).
 		WithIDFunc(badgerkv.SequenceID[int64, types.Category](categoryIDs))
 	// The pets are of the second version: see migratePets.
-	db.pets = record.New[int64, types.PetRecord](sch.Namespace("pets", schema.Version(2))).
+	db.pets = record.New[int64, types.PetRecord](ks.Prefix("pets")).
+		WithVersion(2).
 		WithIDFunc(badgerkv.SequenceID[int64, types.PetRecord](petIDs))
 	migratePets(db.pets)
-	db.images = record.New[uuid.UUID, File](sch.Namespace("images")).
+	db.images = record.New[uuid.UUID, File](ks.Prefix("images")).
 		WithIDFunc(func(*File) (uuid.UUID, error) { return uuid.New(), nil })
 
-	db.categoryPets = relation.Associate(sch.Namespace("category_pets"), db.categories, db.pets).
+	db.categoryPets = relation.Associate(ks.Prefix("category_pets"), db.categories, db.pets).
 		WithParentID(func(p *types.PetRecord) (int64, bool) { return p.CategoryId, true })
-	db.petImages = relation.Associate(sch.Namespace("pet_images"), db.pets, db.images)
+	db.petImages = relation.Associate(ks.Prefix("pet_images"), db.pets, db.images)
 
 	db.byStatus = index.On(db.pets, "by_status", field.Path[types.PetRecord, types.Status]("Status"))
 
@@ -137,7 +140,8 @@ func define(base *badgerkv.DB) (*DB, error) {
 	// The database is brought to these definitions before anything uses it: the pets of an
 	// older version are migrated, and an index or an aggregation that the database has not
 	// seen is built from the pets that are there.
-	db.Migrated, err = sch.Migrate(context.Background(), base)
+	db.Migrated, err = ks.Migrate(context.Background(),
+		db.categories, db.pets, db.images, db.categoryPets, db.petImages)
 	if err != nil {
 		return nil, fmt.Errorf("failed to migrate the database: %w", err)
 	}
@@ -146,7 +150,7 @@ func define(base *badgerkv.DB) (*DB, error) {
 	}
 
 	// Reading an aggregation does not wait for the collector, which runs in the background.
-	db.collector = agg.NewCollector(base, sch,
+	db.collector = agg.NewCollector(base, []agg.Source{db.pets},
 		agg.WithInterval(time.Second),
 		agg.WithErrorHandler(func(err error) { log.Println("collector:", err) }))
 	db.collector.Spawn(context.Background())

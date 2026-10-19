@@ -15,7 +15,6 @@ import (
 	"github.com/ehsanranjbar/kvutil/iterutil"
 	"github.com/ehsanranjbar/kvutil/kv"
 	"github.com/ehsanranjbar/kvutil/kv/memkv"
-	"github.com/ehsanranjbar/kvutil/schema"
 	extstore "github.com/ehsanranjbar/kvutil/store/ext"
 	"github.com/stretchr/testify/require"
 )
@@ -35,7 +34,7 @@ func keysOfSource[K, V any](t *testing.T, src index.Keyed[K, V], err error) []K 
 
 func TestCombine(t *testing.T) {
 	testkv.Each(t, func(t *testing.T, db kv.DB) {
-		store := extstore.New[int64, pet](schema.New().Namespace("pets"))
+		store := extstore.New[int64, pet]("pets")
 		byOwner := index.On(store, "by_owner", ownerField)
 		byTag := index.On(store, "by_tag", tagsField)
 		byAge := index.On(store, "by_age", ageField)
@@ -127,7 +126,7 @@ func TestCombineFindsWhatAScanFinds(t *testing.T) {
 
 	run := func(t *testing.T, keyOf func(i int) string, exactBitmap bool) {
 		db := memkv.New()
-		store := extstore.New[string, pet](schema.New().Namespace("pets"))
+		store := extstore.New[string, pet]("pets")
 		byOwner := index.On(store, "by_owner", ownerField)
 		byTag := index.On(store, "by_tag", tagsField)
 		byAge := index.On(store, "by_age", ageField)
@@ -285,11 +284,11 @@ func TestCombineFindsWhatAScanFinds(t *testing.T) {
 
 func TestBitmap(t *testing.T) {
 	testkv.Each(t, func(t *testing.T, db kv.DB) {
-		store := extstore.New[int64, pet](schema.New().Namespace("pets"))
+		store := extstore.New[int64, pet]("pets")
 		byOwner := index.On(store, "by_owner", ownerField)
 		byTag := index.On(store, "by_tag", tagsField)
 		byAge := index.On(store, "by_age", ageField)
-		named := extstore.New[string, pet](schema.New().Namespace("named"))
+		named := extstore.New[string, pet]("named")
 		namedByOwner := index.On(named, "by_owner", ownerField)
 
 		require.NoError(t, db.Update(func(tx kv.Tx) error {
@@ -357,7 +356,7 @@ func TestBitmap(t *testing.T) {
 
 func TestContains(t *testing.T) {
 	db := memkv.New()
-	store := extstore.New[int64, pet](schema.New().Namespace("pets"))
+	store := extstore.New[int64, pet]("pets")
 	byOwnerAge := index.Composite(store, "by_owner_age", field.List(ownerField, ageField))
 	byTag := index.On(store, "by_tag", tagsField)
 

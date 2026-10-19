@@ -14,7 +14,6 @@ import (
 	"github.com/ehsanranjbar/kvutil/kv/memkv"
 	"github.com/ehsanranjbar/kvutil/kv/prefix"
 	"github.com/ehsanranjbar/kvutil/query/ql"
-	"github.com/ehsanranjbar/kvutil/schema"
 	"github.com/ehsanranjbar/kvutil/store/record"
 	"github.com/ehsanranjbar/kvutil/store/typed"
 )
@@ -65,16 +64,15 @@ type City struct {
 	Population int
 }
 
-// A typed store has keys and values of Go types. It is defined once, in a namespace of a
-// schema, and is instantiated for each transaction.
+// A typed store has keys and values of Go types. It is defined once, under a prefix, and is
+// instantiated for each transaction.
 func Example_typedStore() {
-	sch := schema.New()
-	cities := typed.New[string, City](sch.Namespace("cities"))
+	cities := typed.New[string, City]("cities")
 
 	db := memkv.New()
 	// Once, when the program starts: the database is brought to what is defined, and a
 	// definition that is not the one that its data was written with is an error.
-	if _, err := sch.Migrate(context.Background(), db); err != nil {
+	if _, err := cities.Migrate(context.Background(), db); err != nil {
 		panic(err)
 	}
 
@@ -128,10 +126,8 @@ func (o *Order) SetId(id int64) { o.ID = id }
 // A record store keeps values that know their ids. Indexes and aggregations are defined on
 // it, and are kept up to date in the transactions that write the records.
 func Example_records() {
-	sch := schema.New()
-
 	var last int64
-	orders := record.New[int64, Order](sch.Namespace("orders")).
+	orders := record.New[int64, Order]("orders").
 		WithIDFunc(func(*Order) (int64, error) { last++; return last, nil })
 
 	customer := field.Path[Order, string]("Customer")
@@ -142,7 +138,7 @@ func Example_records() {
 		agg.ByTime(func(o *Order) time.Time { return o.At }, agg.Daily, agg.AllTime))
 
 	db := memkv.New()
-	if err := sch.Check(db); err != nil {
+	if err := orders.Check(db); err != nil {
 		panic(err)
 	}
 

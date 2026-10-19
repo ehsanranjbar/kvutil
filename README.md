@@ -27,8 +27,9 @@ index  agg  relation
 store/record      records that know their ids
 store/ext         a typed store that extensions are told of every write of
 store/typed       keys and values of Go types
-migrate           migrations of the records of a store from the version before
-schema            namespaces, definitions and their versions, and what brings a database to them
+keyspace          short prefixes by name, and the retirement of stores that are gone
+migrate           the unit that a store records of itself, its version, and what brings a
+                  database to them: migrations, builds of what is derived
 codec             order-preserving keys, values in a default format
 kv                bytes in transactions: the interface of an engine
 kv/badgerkv  kv/memkv  kv/prefix
@@ -74,18 +75,21 @@ err = db.View(func(tx kv.Tx) error {
 
 ## Typed stores
 
-A store is defined once, in a namespace of a schema, and is instantiated for each transaction.
-It is given no codecs: keys are encoded by their type so that they sort as their values do, and
-values are in the default format of the schema (msgpack, unless the type encodes itself).
+A store is defined once, under a prefix, and is instantiated for each transaction. It is given
+no codecs: keys are encoded by their type so that they sort as their values do, and values are
+in msgpack, unless the type encodes itself.
+
+A store keeps everything that is its own under its prefix: the records, its version and the
+names of its codecs, and the data of its extensions. The prefixes of different stores must not
+be the beginning of one another.
 
 ```go
-sch := schema.New()
-cities := typed.New[string, City](sch.Namespace("cities"))
+cities := typed.New[string, City]("cities")
 
 // Once, when the program starts: the database is brought to what is defined, and a definition
 // that is not the one that its data was written with is an error, so a changed codec cannot
 // corrupt it silently.
-if _, err := sch.Migrate(ctx, db); err != nil {
+if _, err := cities.Migrate(ctx, db); err != nil {
     panic(err)
 }
 
@@ -121,7 +125,7 @@ type Order struct {
 func (o *Order) GetId() int64   { return o.ID }
 func (o *Order) SetId(id int64) { o.ID = id }
 
-orders := record.New[int64, Order](sch.Namespace("orders")).
+orders := record.New[int64, Order]("orders").
     WithIDFunc(func(*Order) (int64, error) { last++; return last, nil })
 
 customer := field.Path[Order, string]("Customer")
@@ -150,7 +154,7 @@ folds the notes into the states in the background. Reads are exact all the same,
 the notes into account.
 
 ```go
-collector := agg.NewCollector(db, sch)
+collector := agg.NewCollector(db, []agg.Source{orders}) // the stores whose aggregations it collects
 collector.Spawn(ctx)          // runs in the background
 defer collector.Shutdown(ctx) // stops after the batch that it is in, so nothing is half written
 ```
@@ -163,13 +167,13 @@ like days, weeks and months.
 ## Relations
 
 ```go
-// Many to many, with data for every pair.
-memberships := relation.New[Role](sch.Namespace("memberships"), users, groups)
+// Many to many, with data for every pair. A relation has a prefix of its own.
+memberships := relation.New[Role]("memberships", users, groups)
 err := memberships.Instantiate(tx).Set(userID, groupID, &Role{Name: "lead"})
 groupsOf, err := memberships.Instantiate(tx).Rights(userID)
 
 // One to many. Deleting a parent deletes its children.
-ownership := relation.Associate(sch.Namespace("ownership"), owners, pets)
+ownership := relation.Associate("owned", owners, pets)
 err = pets.Instantiate(tx).Set(&Pet{Name: "kit"}, ownership.Under(ownerID))
 children, err := ownership.Instantiate(tx).Children(ownerID)
 ```
@@ -181,7 +185,7 @@ converted for the next version of a program to read them, the version is raised 
 says how, as a part of that program. The type that the records had stays in the code next to it.
 
 ```go
-users := typed.New[int64, User](sch.Namespace("users", schema.Version(2)))
+users := typed.New[int64, User]("users").WithVersion(2)
 
 // UserV1 is a user as version 1 wrote it.
 type UserV1 struct {
@@ -194,8 +198,15 @@ migrate.Records(users, 1, func(id int64, old *UserV1) (*User, error) {
     return &u, nil // nil deletes the record
 })
 
-report, err := sch.Migrate(ctx, db) // when the program starts, before it uses the database
-fmt.Println(report)                 // migrated unit "users" from version 1 to 2
+report, err := users.Migrate(ctx, db) // when the program starts, before it uses the database
+fmt.Println(report)                    // migrated typed "users" from version 1 to 2
+```
+
+A program with several stores migrates them together, in one call, which compares all of them
+with the database before it changes anything:
+
+```go
+report, err := migrate.Run(ctx, db, users, orders, memberships)
 ```
 
 `Migrate` does what the database needs and nothing else:
@@ -208,20 +219,34 @@ fmt.Println(report)                 // migrated unit "users" from version 1 to 2
 | The same version and another definition | Fails for a store: something changed without a version |
 | No index or aggregation that is defined, or another definition of it | Builds it from the records |
 | An index or aggregation that is not defined any more | Deletes it, as nothing keeps it up to date; it is built again if it comes back |
-| A store that is not defined any more | Fails, unless `sch.Retire("users")`, with the name that it had, says that its data is to be deleted |
+| An extension that keeps data and is not defined any more | Fails, unless `store.RetireExtension("audit")`, with the name that it was added with, says that its data is to be deleted |
 
 Records are converted in batches, and the place that a migration has come to is saved with
 every batch, so one that is interrupted goes on and converts no record twice. The indexes and
 the aggregations of a store are built again after its migration, so they need none of their own:
-adding, changing or removing an index is only a change of the code. Data that cannot be built
-again is retired by the name that it was defined with: `sch.Retire("users")` for a store, and
-`store.RetireExtension("audit")` for an extension of a store that keeps data of its own.
-`migrate.Custom` is for what is not one record becoming one record. A value that only gets new
-fields needs no version in the formats that leave out what they do not know, like the default one.
+adding, changing or removing an index is only a change of the code. `migrate.Custom` is for what
+is not one record becoming one record. A value that only gets new fields needs no version in the
+formats that leave out what they do not know, like the default one.
 
-`sch.Check(db)` is for the programs that must not change a database and for the databases that
-are always new, like the ones of tests: it records what is new and fails where `Migrate` would
-have work to do.
+`users.Check(db)` or `migrate.Check(db, ...)` is for the programs that must not change a
+database and for the databases that are always new, like the ones of tests: it records what is
+new and fails where `Migrate` would have work to do.
+
+## Short prefixes by name
+
+A prefix can be any bytes, written by hand. `keyspace` hands them out by name instead, one byte
+long by default, and keeps the names in the database, so the stores have readable names and the
+keys stay short. It also deletes the stores that the program has dropped, which `migrate.Run`
+alone reports as unknown.
+
+```go
+ks, err := keyspace.Open(db)
+users := typed.New[int64, User](ks.Prefix("users"))
+orders := record.New[int64, Order](ks.Prefix("orders"))
+ks.Retire("toys") // the store of the toys is gone from the program: its data is deleted
+
+report, err := ks.Migrate(ctx, users, orders) // like migrate.Run, and the units go by their names
+```
 
 ## Conditions as text
 

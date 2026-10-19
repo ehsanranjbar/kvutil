@@ -2,82 +2,110 @@
 package typed
 
 import (
+	"bytes"
+	"context"
 	"errors"
 	"fmt"
-	"reflect"
 	"time"
 
 	"github.com/ehsanranjbar/kvutil"
 	"github.com/ehsanranjbar/kvutil/codec"
 	"github.com/ehsanranjbar/kvutil/kv"
 	"github.com/ehsanranjbar/kvutil/kv/prefix"
-	"github.com/ehsanranjbar/kvutil/schema"
+	"github.com/ehsanranjbar/kvutil/migrate"
 )
 
 // ErrNilValue is returned when a nil value is given to be stored.
 var ErrNilValue = errors.New("typed: value is nil")
 
+// dataKey is what the prefix of the records is made of, after the prefix of the store.
+const dataKey = 'd'
+
 // Store is the definition of a store that encodes its keys and values with codecs.
 // It is defined once and is instantiated for each transaction.
+//
+// A store keeps its keys under a prefix of its own: the records under the prefix followed by
+// 'd', and what the store records of itself under the prefix followed by 'm'; see migrate.Unit.
 type Store[K, V any] struct {
-	ns         *schema.Namespace
+	prefix     []byte
+	dataPrefix []byte
+	unit       *migrate.Unit
 	keyCodec   codec.KeyCodec[K]
 	valueCodec codec.ValueCodec[V]
 }
 
-// New defines a new Store in the given namespace, with the codecs that its types have by default.
+// New defines a new Store under a prefix, with the codecs that its types have by default.
 // The key codec is derived from the type of the keys. The value codec is the type's own
-// MarshalBinary and UnmarshalBinary if it has them, and the format of the schema otherwise.
-// It panics if the type of the keys has no key codec, in which case the store must be defined
-// with NewWithCodecs.
-func New[K, V any](ns *schema.Namespace) *Store[K, V] {
-	return NewWithCodecs[K, V](ns, nil, nil)
+// MarshalBinary and UnmarshalBinary if it has them, and Msgpack otherwise.
+// It panics if the prefix is empty, and if the type of the keys has no key codec, in which
+// case the store must be defined with NewWithCodecs.
+func New[K, V any, P ~string | ~[]byte](prefix P) *Store[K, V] {
+	return NewWithCodecs[K, V](prefix, nil, nil)
 }
 
-// NewWithCodecs defines a new Store in the given namespace with the given codecs.
+// NewWithCodecs defines a new Store under a prefix with the given codecs.
 // A codec that is nil is the one that New would use.
-func NewWithCodecs[K, V any](
-	ns *schema.Namespace,
+func NewWithCodecs[K, V any, P ~string | ~[]byte](
+	prefix P,
 	keyCodec codec.KeyCodec[K],
 	valueCodec codec.ValueCodec[V],
 ) *Store[K, V] {
+	p := bytes.Clone([]byte(prefix))
 	if keyCodec == nil {
 		var err error
 		keyCodec, err = codec.KeyFor[K]()
 		if err != nil {
 			// A mistake in the definition, which is made in code when the program starts.
-			panic(fmt.Sprintf("store %q: %v; define the store with NewWithCodecs and give it one", ns.Path(), err))
+			panic(fmt.Sprintf("store %q: %v; define the store with NewWithCodecs and give it one",
+				migrate.Label(p), err))
 		}
 	}
 	if valueCodec == nil {
-		valueCodec = codec.ValueFor[V](ns.Schema().Format())
+		valueCodec = codec.ValueFor[V](nil)
 	}
 
-	ns.Define(schema.Definition{
-		Kind:      "typed",
-		Keys:      true,
-		KeyType:   reflect.TypeFor[K]().String(),
-		ValueType: reflect.TypeFor[V]().String(),
-		Attributes: func() map[string]string {
-			return map[string]string{"key": keyCodec.Name(), "value": valueCodec.Name()}
-		},
-	})
 	return &Store[K, V]{
-		ns:         ns,
+		prefix:     p,
+		dataPrefix: append(bytes.Clone(p), dataKey),
+		unit: migrate.NewUnit(p, "typed", func() map[string]string {
+			return map[string]string{"key": keyCodec.Name(), "value": valueCodec.Name()}
+		}),
 		keyCodec:   keyCodec,
 		valueCodec: valueCodec,
 	}
 }
 
-// Namespace returns the namespace of the store.
-func (s *Store[K, V]) Namespace() *schema.Namespace {
-	return s.ns
+// Prefix returns the prefix of the store. The slice must not be modified.
+func (s *Store[K, V]) Prefix() []byte {
+	return s.prefix
 }
 
-// DataNamespace returns the namespace that the records are kept in, which is the namespace of
-// the store itself.
-func (s *Store[K, V]) DataNamespace() *schema.Namespace {
-	return s.ns
+// DataPrefix returns the prefix that the records are kept under. The slice must not be modified.
+func (s *Store[K, V]) DataPrefix() []byte {
+	return s.dataPrefix
+}
+
+// Unit returns what the store records of itself, which is migrated as a whole.
+func (s *Store[K, V]) Unit() *migrate.Unit {
+	return s.unit
+}
+
+// WithVersion sets the version of the records of the store, which is 1 by default. The version
+// is raised when the records must be converted for the program to read them, and a migration
+// from every version before it says how; see the package migrate.
+func (s *Store[K, V]) WithVersion(v uint64) *Store[K, V] {
+	s.unit.SetVersion(v)
+	return s
+}
+
+// Migrate brings the database to what the store defines; see migrate.Run.
+func (s *Store[K, V]) Migrate(ctx context.Context, db kv.DB) (*migrate.Report, error) {
+	return migrate.Run(ctx, db, s)
+}
+
+// Check compares the database with what the store defines, without changing it; see migrate.Check.
+func (s *Store[K, V]) Check(db kv.DB) error {
+	return migrate.Check(db, s)
 }
 
 // KeyCodec returns the key codec of the store.
@@ -94,7 +122,7 @@ func (s *Store[K, V]) ValueCodec() codec.ValueCodec[V] {
 func (s *Store[K, V]) Instantiate(tx kv.Tx) *Instance[K, V] {
 	return &Instance[K, V]{
 		store: s,
-		tx:    s.ns.Open(tx),
+		tx:    prefix.New(tx, s.dataPrefix),
 	}
 }
 
@@ -109,7 +137,7 @@ func (s *Instance[K, V]) Writable() bool {
 	return s.tx.Writable()
 }
 
-// EncodeKey returns the key as it is stored in the namespace of the store.
+// EncodeKey returns the key as the store encodes it, without the prefix of the records.
 func (s *Instance[K, V]) EncodeKey(key K) ([]byte, error) {
 	kbz, err := s.store.keyCodec.Encode(key)
 	if err != nil {
@@ -299,7 +327,7 @@ func (it *Iterator[K, V]) Value() (*V, error) {
 	return it.ins.decodeValue(vbz)
 }
 
-// RawKey returns the current key as it is stored in the namespace of the store.
+// RawKey returns the current key as the store encodes it, without the prefix of the records.
 // The slice must not be modified and is valid until the iterator moves.
 func (it *Iterator[K, V]) RawKey() []byte {
 	return it.base.Key()

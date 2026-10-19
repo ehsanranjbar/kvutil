@@ -49,7 +49,7 @@ func (it *Iterator[I, T]) Value() (*T, error) {
 	return v, nil
 }
 
-// RawKey returns the current id as it is stored in the namespace of the store.
+// RawKey returns the current id as the store encodes it.
 // The slice must not be modified and is valid until the iterator moves.
 func (it *Iterator[I, T]) RawKey() []byte {
 	return it.base.RawKey()

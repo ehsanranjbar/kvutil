@@ -3,17 +3,19 @@
 package ext
 
 import (
+	"bytes"
+	"context"
 	"errors"
 	"fmt"
-	"reflect"
 	"time"
 
 	"github.com/ehsanranjbar/kvutil"
 	"github.com/ehsanranjbar/kvutil/codec"
+	"github.com/ehsanranjbar/kvutil/codec/lex"
 	"github.com/ehsanranjbar/kvutil/internal/ordmap"
 	"github.com/ehsanranjbar/kvutil/iterutil"
 	"github.com/ehsanranjbar/kvutil/kv"
-	"github.com/ehsanranjbar/kvutil/schema"
+	"github.com/ehsanranjbar/kvutil/migrate"
 	"github.com/ehsanranjbar/kvutil/store/typed"
 )
 
@@ -21,76 +23,101 @@ import (
 // extensions. A record that expires would not be reported to them as deleted.
 var ErrTTLWithExtensions = errors.New("ext: a store with extensions cannot have records that expire")
 
-var (
-	dataPrefix = []byte{'d'}
-	extPrefix  = []byte{'x'}
-)
+// extKey is what the prefix of the data of the extensions is made of, after the prefix of the
+// store. The data of an extension is under that and the name of the extension.
+const extKey = 'x'
 
 // Store is a wrapper around a serialized store with an ordered list of extensions
 // that are called on set and delete.
+//
+// It keeps its keys under the prefix that it is given, like the serialized store at the same
+// prefix does: the records and what the store records of itself, and the data of the extensions
+// that keep any under the prefix followed by 'x'.
 type Store[K, V any] struct {
-	ns          *schema.Namespace
 	data        *typed.Store[K, V]
-	extNS       *schema.Namespace
 	exts        *ordmap.Map[string, Extension[K, V]]
 	deleteHooks *ordmap.Map[string, DeleteHook[K]]
 }
 
-// New defines a new Store in the given namespace, with the codecs that its types have by default.
-// It panics if the type of the keys has no key codec, in which case the store must be defined
-// with NewWithCodecs.
-func New[K, V any](ns *schema.Namespace) *Store[K, V] {
-	return NewWithCodecs[K, V](ns, nil, nil)
+// New defines a new Store under a prefix, with the codecs that its types have by default.
+// It panics if the prefix is empty, and if the type of the keys has no key codec, in which
+// case the store must be defined with NewWithCodecs.
+func New[K, V any, P ~string | ~[]byte](prefix P) *Store[K, V] {
+	return NewWithCodecs[K, V](prefix, nil, nil)
 }
 
-// NewWithCodecs defines a new Store in the given namespace with the given codecs.
+// NewWithCodecs defines a new Store under a prefix with the given codecs.
 // A codec that is nil is the one that New would use.
-func NewWithCodecs[K, V any](
-	ns *schema.Namespace,
+func NewWithCodecs[K, V any, P ~string | ~[]byte](
+	prefix P,
 	keyCodec codec.KeyCodec[K],
 	valueCodec codec.ValueCodec[V],
 ) *Store[K, V] {
 	s := &Store[K, V]{
-		ns:          ns,
+		data:        typed.NewWithCodecs(prefix, keyCodec, valueCodec),
 		exts:        ordmap.New[string, Extension[K, V]](),
 		deleteHooks: ordmap.New[string, DeleteHook[K]](),
 	}
-	ns.Define(schema.Definition{
-		Kind:      "ext",
-		KeyType:   reflect.TypeFor[K]().String(),
-		ValueType: reflect.TypeFor[V]().String(),
-	})
-	s.data = typed.NewWithCodecs(ns.Sub("data", schema.WithPrefix(dataPrefix)), keyCodec, valueCodec)
-	// What the extensions keep depends on the records: an extension that is added to a store
-	// that has records must say what it makes of them.
-	s.extNS = ns.Sub("ext", schema.WithPrefix(extPrefix), schema.Dependent())
+	s.data.Unit().SetKind("ext")
 	return s
 }
 
 // WithExtension adds an extension to the store. Extensions are called in the order that they
-// are added. An extension that is a NamespaceUser is given a namespace of its own.
+// are added. An extension that is a Keeper is given a prefix of its own.
 func (s *Store[K, V]) WithExtension(name string, ext Extension[K, V]) *Store[K, V] {
 	s.AddExtension(name, ext)
 	return s
 }
 
+// WithVersion sets the version of the records of the store, which is 1 by default; see
+// typed.Store.WithVersion.
+func (s *Store[K, V]) WithVersion(v uint64) *Store[K, V] {
+	s.data.Unit().SetVersion(v)
+	return s
+}
+
 // RetireExtension says that the data of an extension that is not added to the store any more
-// is to be deleted from the database; see schema.Migrate. The name is the one that the
+// is to be deleted from the database; see migrate.Run. The name is the one that the
 // extension was added with. It is for an extension that keeps data that cannot be built again:
 // an index or an aggregation that is not defined any more is deleted without it.
 func (s *Store[K, V]) RetireExtension(name string) {
-	s.extNS.Retire(name)
+	s.data.Unit().Retire(name)
 }
 
 // AddExtension implements the Extensible interface. It is WithExtension without a result.
+// It panics if the name is empty or taken. An extension that is a Keeper is given the prefix
+// of its data, and what it records of itself is added to the unit of the store.
 func (s *Store[K, V]) AddExtension(name string, ext Extension[K, V]) {
-	// A name that is taken is reported by the schema. The extension is given its namespace
-	// all the same, so that it is complete, but it is not called by the store.
-	ns := s.extNS.Sub(name)
-	if nu, ok := ext.(NamespaceUser); ok {
-		nu.UseNamespace(ns)
+	if name == "" {
+		panic(fmt.Sprintf("store %q: the name of an extension must not be empty", migrate.Label(s.Prefix())))
+	}
+	if _, ok := s.exts.Get(name); ok {
+		panic(fmt.Sprintf("store %q: the extension %q is added more than once", migrate.Label(s.Prefix()), name))
+	}
+
+	if k, ok := ext.(Keeper); ok {
+		prefix := s.extensionPrefix(name)
+		part := k.Keep(prefix)
+		part.Name = name
+		part.Prefix = prefix
+		s.data.Unit().AddPart(part)
 	}
 	s.exts.Add(name, ext)
+}
+
+// extensionPrefix returns the prefix of the data of an extension.
+func (s *Store[K, V]) extensionPrefix(name string) []byte {
+	prefix := append(bytes.Clone(s.Prefix()), extKey)
+	return lex.AppendTerminated(prefix, []byte(name))
+}
+
+// Extensions returns the extensions of the store, in the order that they were added.
+func (s *Store[K, V]) Extensions() []any {
+	exts := make([]any, 0, s.exts.Len())
+	for _, ext := range s.exts.Iter() {
+		exts = append(exts, ext)
+	}
+	return exts
 }
 
 // Getter implements the Extensible interface.
@@ -109,18 +136,37 @@ func (s *Store[K, V]) Records(tx kv.Tx, r kvutil.Range[K]) (iterutil.Iterator[K,
 }
 
 // AddDeleteHook implements the DeleteHooks interface. Delete hooks are called after the extensions.
+// It panics if the name is taken.
 func (s *Store[K, V]) AddDeleteHook(name string, hook DeleteHook[K]) {
-	s.deleteHooks.Add(name, hook)
+	if err := s.deleteHooks.Add(name, hook); err != nil {
+		panic(fmt.Sprintf("store %q: the delete hook %q is added more than once", migrate.Label(s.Prefix()), name))
+	}
 }
 
-// Namespace returns the namespace of the store.
-func (s *Store[K, V]) Namespace() *schema.Namespace {
-	return s.ns
+// Prefix returns the prefix of the store. The slice must not be modified.
+func (s *Store[K, V]) Prefix() []byte {
+	return s.data.Prefix()
 }
 
-// DataNamespace returns the namespace that the records are kept in, under the one of the store.
-func (s *Store[K, V]) DataNamespace() *schema.Namespace {
-	return s.data.Namespace()
+// DataPrefix returns the prefix that the records are kept under. The slice must not be modified.
+func (s *Store[K, V]) DataPrefix() []byte {
+	return s.data.DataPrefix()
+}
+
+// Unit returns what the store records of itself, which is migrated as a whole: the unit of the
+// serialized store, with what the extensions that keep data record of themselves as its parts.
+func (s *Store[K, V]) Unit() *migrate.Unit {
+	return s.data.Unit()
+}
+
+// Migrate brings the database to what the store defines; see migrate.Run.
+func (s *Store[K, V]) Migrate(ctx context.Context, db kv.DB) (*migrate.Report, error) {
+	return migrate.Run(ctx, db, s)
+}
+
+// Check compares the database with what the store defines, without changing it; see migrate.Check.
+func (s *Store[K, V]) Check(db kv.DB) error {
+	return migrate.Check(db, s)
 }
 
 // Data returns the serialized store that holds the records.

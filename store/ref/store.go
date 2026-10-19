@@ -10,7 +10,6 @@ import (
 
 	"github.com/ehsanranjbar/kvutil/kv"
 	"github.com/ehsanranjbar/kvutil/kv/prefix"
-	"github.com/ehsanranjbar/kvutil/schema"
 )
 
 var (
@@ -31,28 +30,29 @@ var (
 //
 // A unique store has one primary key at most for a key. An entry is stored under its key alone,
 // with the primary key in front of its value, so that a key is looked up with a single read.
+//
+// The store keeps its entries right under its prefix, and records nothing of itself: whoever
+// owns the data, like an index, does.
 type Store struct {
-	ns     *schema.Namespace
+	prefix []byte
 	unique bool
 }
 
-// New defines a new Store in the given namespace, which is described by the definition.
-func New(ns *schema.Namespace, def schema.Definition) *Store {
-	def.Keys = true
-	ns.Define(def)
-	return &Store{ns: ns}
+// New defines a new Store under a prefix.
+func New(p []byte) *Store {
+	return &Store{prefix: bytes.Clone(p)}
 }
 
-// NewUnique defines a new unique Store in the given namespace, which is described by the definition.
-func NewUnique(ns *schema.Namespace, def schema.Definition) *Store {
-	s := New(ns, def)
+// NewUnique defines a new unique Store under a prefix.
+func NewUnique(p []byte) *Store {
+	s := New(p)
 	s.unique = true
 	return s
 }
 
-// Namespace returns the namespace of the store.
-func (s *Store) Namespace() *schema.Namespace {
-	return s.ns
+// Prefix returns the prefix of the store. The slice must not be modified.
+func (s *Store) Prefix() []byte {
+	return s.prefix
 }
 
 // Unique reports whether a key of the store refers to one primary key at most.
@@ -64,7 +64,7 @@ func (s *Store) Unique() bool {
 func (s *Store) Instantiate(tx kv.Tx) *Instance {
 	return &Instance{
 		store: s,
-		tx:    s.ns.Open(tx),
+		tx:    prefix.New(tx, s.prefix),
 	}
 }
 

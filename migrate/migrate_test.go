@@ -4,19 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"testing"
 
 	"github.com/ehsanranjbar/kvutil"
-	"github.com/ehsanranjbar/kvutil/agg"
 	"github.com/ehsanranjbar/kvutil/codec"
-	"github.com/ehsanranjbar/kvutil/field"
-	"github.com/ehsanranjbar/kvutil/index"
 	"github.com/ehsanranjbar/kvutil/internal/testkv"
 	"github.com/ehsanranjbar/kvutil/iterutil"
 	"github.com/ehsanranjbar/kvutil/kv"
 	"github.com/ehsanranjbar/kvutil/migrate"
-	"github.com/ehsanranjbar/kvutil/schema"
 	extstore "github.com/ehsanranjbar/kvutil/store/ext"
 	"github.com/ehsanranjbar/kvutil/store/record"
 	"github.com/ehsanranjbar/kvutil/store/typed"
@@ -44,11 +39,15 @@ type Pet struct {
 func (p *Pet) GetId() int64   { return p.id }
 func (p *Pet) SetId(id int64) { p.id = id }
 
-// The stores of both kinds can be migrated.
+// The stores of all kinds can be migrated.
 var (
 	_ migrate.Store[int64, Pet] = (*typed.Store[int64, Pet])(nil)
 	_ migrate.Store[int64, Pet] = (*extstore.Store[int64, Pet])(nil)
 	_ migrate.Store[int64, Pet] = (*record.Store[int64, Pet])(nil)
+
+	_ migrate.Migratable = (*typed.Store[int64, Pet])(nil)
+	_ migrate.Migratable = (*extstore.Store[int64, Pet])(nil)
+	_ migrate.Migratable = (*record.Store[int64, Pet])(nil)
 )
 
 func must[T any](v T, err error) T {
@@ -56,13 +55,6 @@ func must[T any](v T, err error) T {
 		panic(err)
 	}
 	return v
-}
-
-func run(t *testing.T, db kv.DB, sch *schema.Schema) {
-	t.Helper()
-
-	_, err := sch.Migrate(context.Background(), db)
-	require.NoError(t, err)
 }
 
 // toV2 converts a pet. A pet without a name is one that was never finished, and is dropped.
@@ -82,9 +74,8 @@ func TestRecords(t *testing.T) {
 		const n = 300
 
 		// The first version of the program writes its pets.
-		v1 := schema.New()
-		old := record.New[int64, PetV1](v1.Namespace("pets"))
-		run(t, db, v1)
+		old := record.New[int64, PetV1]("pets")
+		run(t, db, old)
 		require.NoError(t, db.Update(func(tx kv.Tx) error {
 			for id := int64(1); id <= n; id++ {
 				p := &PetV1{id: id, Name: fmt.Sprint("pet", id), Kind: []string{"dog", "bird"}[id%2]}
@@ -99,18 +90,17 @@ func TestRecords(t *testing.T) {
 		}))
 
 		// The second one has another type, and says how the pets get there.
-		v2 := schema.New()
-		pets := record.New[int64, Pet](v2.Namespace("pets", schema.Version(2)))
+		pets := record.New[int64, Pet]("pets").WithVersion(2)
 		var seen []int64
 		migrate.Records(pets, 1, func(id int64, old *PetV1) (*Pet, error) {
 			seen = append(seen, id)
 			return toV2(id, old)
 		}, migrate.WithBatchSize(7))
 
-		require.ErrorIs(t, v2.Check(db), schema.ErrNeedsMigration)
-		report, err := v2.Migrate(context.Background(), db)
+		require.ErrorIs(t, pets.Check(db), migrate.ErrNeedsMigration)
+		report, err := pets.Migrate(context.Background(), db)
 		require.NoError(t, err)
-		require.Equal(t, `migrated unit "pets" from version 1 to 2`, report.String())
+		require.Equal(t, `migrated record "pets" from version 1 to 2`, report.String())
 
 		// Every pet was given once, in the order of the ids, with its id.
 		require.Len(t, seen, n)
@@ -133,8 +123,8 @@ func TestRecords(t *testing.T) {
 
 		// It is done once.
 		seen = nil
-		run(t, db, v2)
-		require.NoError(t, v2.Check(db))
+		run(t, db, pets)
+		require.NoError(t, pets.Check(db))
 		require.Empty(t, seen)
 	})
 }
@@ -148,9 +138,8 @@ func TestRecordsInterrupted(t *testing.T) {
 	testkv.Each(t, func(t *testing.T, db kv.DB) {
 		const n = 100
 
-		v1 := schema.New()
-		old := typed.New[string, Counter](v1.Namespace("counters"))
-		run(t, db, v1)
+		old := typed.New[string, Counter]("counters")
+		run(t, db, old)
 		require.NoError(t, db.Update(func(tx kv.Tx) error {
 			for i := range n {
 				if err := old.Instantiate(tx).Set(fmt.Sprintf("c%03d", i), &Counter{N: i}); err != nil {
@@ -161,16 +150,15 @@ func TestRecordsInterrupted(t *testing.T) {
 		}))
 
 		errStopped := errors.New("stopped")
-		define := func(failAt string) (*schema.Schema, *typed.Store[string, Counter]) {
-			sch := schema.New()
-			counters := typed.New[string, Counter](sch.Namespace("counters", schema.Version(2)))
+		define := func(failAt string) *typed.Store[string, Counter] {
+			counters := typed.New[string, Counter]("counters").WithVersion(2)
 			migrate.Records(counters, 1, func(key string, old *Counter) (*Counter, error) {
 				if key == failAt {
 					return nil, errStopped
 				}
 				return &Counter{N: old.N + 1000}, nil
 			}, migrate.WithBatchSize(8))
-			return sch, counters
+			return counters
 		}
 		values := func(counters *typed.Store[string, Counter]) (ns []int) {
 			require.NoError(t, db.View(func(tx kv.Tx) error {
@@ -185,8 +173,8 @@ func TestRecordsInterrupted(t *testing.T) {
 
 		// It stops in the middle of a batch, twice, after the batches before it were written.
 		for _, failAt := range []string{"c037", "c038", "c090"} {
-			sch, counters := define(failAt)
-			_, err := sch.Migrate(context.Background(), db)
+			counters := define(failAt)
+			_, err := counters.Migrate(context.Background(), db)
 			require.ErrorIs(t, err, errStopped)
 			require.ErrorContains(t, err, `"counters"`)
 
@@ -202,34 +190,31 @@ func TestRecordsInterrupted(t *testing.T) {
 		}
 
 		// It goes on, and no counter is converted twice.
-		sch, counters := define("")
-		run(t, db, sch)
+		counters := define("")
+		run(t, db, counters)
 		for i, n := range values(counters) {
 			require.Equal(t, i+1000, n)
 		}
-		require.NoError(t, sch.Check(db))
+		require.NoError(t, counters.Check(db))
 	})
 }
 
 func TestRecordsWithAnotherCodec(t *testing.T) {
 	testkv.Each(t, func(t *testing.T, db kv.DB) {
 		// The first version wrote JSON, and the second one writes the default format.
-		v1 := schema.New()
-		old := extstore.NewWithCodecs[int64, PetV1](v1.Namespace("pets"), nil, codec.Formatted[PetV1](codec.JSON))
-		run(t, db, v1)
+		old := extstore.NewWithCodecs[int64, PetV1]("pets", nil, codec.Formatted[PetV1](codec.JSON))
+		run(t, db, old)
 		require.NoError(t, db.Update(func(tx kv.Tx) error {
 			return old.Instantiate(tx).Set(7, &PetV1{Name: "rex", Kind: "dog"})
 		}))
 
 		// Another codec without another version is a mistake.
-		same := schema.New()
-		extstore.New[int64, Pet](same.Namespace("pets"))
-		require.ErrorIs(t, same.Check(db), schema.ErrChanged)
+		same := extstore.New[int64, Pet]("pets")
+		require.ErrorIs(t, same.Check(db), migrate.ErrChanged)
 
-		v2 := schema.New()
-		pets := extstore.New[int64, Pet](v2.Namespace("pets", schema.Version(2)))
+		pets := extstore.New[int64, Pet]("pets").WithVersion(2)
 		migrate.Records(pets, 1, toV2, migrate.WithOldCodec(codec.Formatted[PetV1](codec.JSON)))
-		run(t, db, v2)
+		run(t, db, pets)
 
 		require.NoError(t, db.View(func(tx kv.Tx) error {
 			p := must(pets.Instantiate(tx).Get(7))
@@ -239,19 +224,18 @@ func TestRecordsWithAnotherCodec(t *testing.T) {
 
 		// Without the codec that the records were written with, they cannot be read.
 		db2 := testkv.NewMem(t)
-		run(t, db2, v1)
+		run(t, db2, old)
 		require.NoError(t, db2.Update(func(tx kv.Tx) error {
 			return old.Instantiate(tx).Set(7, &PetV1{Name: "rex", Kind: "dog"})
 		}))
-		wrong := schema.New()
-		migrate.Records(extstore.New[int64, Pet](wrong.Namespace("pets", schema.Version(2))), 1, toV2)
+		wrong := extstore.New[int64, Pet]("pets").WithVersion(2)
+		migrate.Records(wrong, 1, toV2)
 		_, err := wrong.Migrate(context.Background(), db2)
 		require.ErrorContains(t, err, "failed to decode the record as it was")
 
 		// The codec of the option is one of the old records.
 		require.Panics(t, func() {
-			sch := schema.New()
-			migrate.Records(extstore.New[int64, Pet](sch.Namespace("pets", schema.Version(2))), 1, toV2,
+			migrate.Records(extstore.New[int64, Pet]("pets").WithVersion(2), 1, toV2,
 				migrate.WithOldCodec(codec.Formatted[Pet](codec.JSON)))
 		})
 	})
@@ -259,9 +243,8 @@ func TestRecordsWithAnotherCodec(t *testing.T) {
 
 func TestCustom(t *testing.T) {
 	testkv.Each(t, func(t *testing.T, db kv.DB) {
-		v1 := schema.New()
-		old := record.New[int64, PetV1](v1.Namespace("pets"))
-		run(t, db, v1)
+		old := record.New[int64, PetV1]("pets")
+		run(t, db, old)
 		require.NoError(t, db.Update(func(tx kv.Tx) error {
 			for id := int64(1); id <= 20; id++ {
 				if err := old.Instantiate(tx).Set(&PetV1{id: id, Name: "pet", Kind: "dog"}); err != nil {
@@ -275,9 +258,8 @@ func TestCustom(t *testing.T) {
 		// must not do again when it goes on after it was interrupted.
 		errStopped := errors.New("stopped")
 		prepared := 0
-		define := func(failAt int64) (*schema.Schema, *record.Store[int64, Pet]) {
-			sch := schema.New()
-			pets := record.New[int64, Pet](sch.Namespace("pets", schema.Version(3)))
+		define := func(failAt int64) *record.Store[int64, Pet] {
+			pets := record.New[int64, Pet]("pets").WithVersion(3)
 			migrate.Custom(pets, 1, func(ctx context.Context, m *migrate.Migrator) error {
 				if m.Cursor() == nil {
 					prepared++
@@ -294,17 +276,16 @@ func TestCustom(t *testing.T) {
 				p.Legs *= 10
 				return p, nil
 			})
-			return sch, pets
+			return pets
 		}
 
-		sch, _ := define(13)
-		_, err := sch.Migrate(context.Background(), db)
+		_, err := define(13).Migrate(context.Background(), db)
 		require.ErrorIs(t, err, errStopped)
 
-		sch, pets := define(0)
-		report, err := sch.Migrate(context.Background(), db)
+		pets := define(0)
+		report, err := pets.Migrate(context.Background(), db)
 		require.NoError(t, err)
-		require.Equal(t, `migrated unit "pets" from version 1 to 3`, report.String())
+		require.Equal(t, `migrated record "pets" from version 1 to 3`, report.String())
 		require.Equal(t, 1, prepared)
 
 		require.NoError(t, db.View(func(tx kv.Tx) error {
@@ -319,101 +300,44 @@ func TestCustom(t *testing.T) {
 	})
 }
 
-// TestRecordsRebuildWhatIsDerived checks that the indexes and the aggregations of a store are
-// what its records give after the records were migrated, with nothing said of them.
-func TestRecordsRebuildWhatIsDerived(t *testing.T) {
+// TestRecordsOfAStoreWithExtensions checks that the migration of the records of a store leaves
+// what the extensions that keep data record of themselves where it is.
+func TestRecordsOfAStoreWithExtensions(t *testing.T) {
 	testkv.Each(t, func(t *testing.T, db kv.DB) {
-		const n = 60
-
-		// The first version, with an index and an aggregation by the names of the pets.
-		v1 := schema.New()
-		old := record.New[int64, PetV1](v1.Namespace("pets"))
-		index.On(old, "by_name", field.Path[PetV1, string]("Name"))
-		agg.Count(old, "per_name", func(p *PetV1) (string, bool) { return p.Name, true })
-		run(t, db, v1)
+		old := record.New[int64, PetV1]("pets")
+		old.AddExtension("log", logger[PetV1]{})
+		run(t, db, old)
 		require.NoError(t, db.Update(func(tx kv.Tx) error {
-			for id := int64(1); id <= n; id++ {
-				p := &PetV1{id: id, Name: []string{"rex", "tom", ""}[id%3], Kind: "dog"}
-				if err := old.Instantiate(tx).Set(p); err != nil {
-					return err
-				}
-			}
-			return nil
+			return old.Instantiate(tx).Set(&PetV1{id: 1, Name: "rex", Kind: "dog"})
 		}))
 
-		// The second one defines the same two, and one more of each, on the new type. The
-		// migration changes the names and drops the pets that have none.
-		define := func() (*schema.Schema, *record.Store[int64, Pet],
-			*index.FieldIndex[int64, Pet, string], *index.FieldIndex[int64, Pet, int],
-			*agg.Aggregation[int64, Pet, string, int64, int64], *agg.Aggregation[int64, Pet, agg.NoGroup, int, int]) {
-			sch := schema.New()
-			pets := record.New[int64, Pet](sch.Namespace("pets", schema.Version(2)))
-			byName := index.On(pets, "by_name", field.Path[Pet, string]("Name"))
-			byLegs := index.On(pets, "by_legs", field.Path[Pet, int]("Legs"))
-			perName := agg.Count(pets, "per_name", func(p *Pet) (string, bool) { return p.Name, true })
-			legs := agg.Sum(pets, "legs", func(p *Pet) (agg.NoGroup, int, bool) { return agg.NoGroup{}, p.Legs, true })
-			migrate.Records(pets, 1, func(id int64, old *PetV1) (*Pet, error) {
-				p, err := toV2(id, old)
-				if p != nil {
-					p.Name = strings.ToUpper(p.Name)
-				}
-				return p, err
-			}, migrate.WithBatchSize(9))
-			return sch, pets, byName, byLegs, perName, legs
-		}
+		pets := record.New[int64, Pet]("pets").WithVersion(2)
+		pets.AddExtension("log", logger[Pet]{})
+		migrate.Records(pets, 1, toV2)
+		require.Equal(t, []string{`migrated record "pets" from version 1 to 2`}, run(t, db, pets))
+		require.NoError(t, pets.Check(db))
 
-		sch, pets, byName, byLegs, perName, legs := define()
-		require.ErrorIs(t, sch.Check(db), schema.ErrNeedsMigration)
-		report, err := sch.Migrate(context.Background(), db)
-		require.NoError(t, err)
-		require.Equal(t, `migrated unit "pets" from version 1 to 2
-built index "pets/ext/by_name"
-built index "pets/ext/by_legs"
-built agg "pets/ext/per_name"
-built agg "pets/ext/legs"`, report.String())
-
-		verify := func(pets *record.Store[int64, Pet], rex, tom int) {
-			t.Helper()
-
-			require.NoError(t, db.View(func(tx kv.Tx) error {
-				count := func(it *index.Iterator[int64, Pet], err error) int {
-					require.NoError(t, err)
-					return len(must(iterutil.Of[int64, *Pet](it).Keys()))
-				}
-				require.Equal(t, rex, count(byName.Instantiate(tx).Match("REX")))
-				require.Equal(t, tom, count(byName.Instantiate(tx).Match("TOM")))
-				require.Zero(t, count(byName.Instantiate(tx).Match("rex")))
-				require.Zero(t, count(byName.Instantiate(tx).Match("")))
-				require.Equal(t, rex+tom, count(byLegs.Instantiate(tx).Match(4)))
-
-				for name, want := range map[string]int{"REX": rex, "TOM": tom, "rex": 0, "": 0} {
-					got, _, err := perName.Instantiate(tx).Get(name)
-					require.NoError(t, err)
-					require.Equal(t, int64(want), got, name)
-				}
-				total, _, err := legs.Instantiate(tx).Get(agg.NoGroup{})
-				require.NoError(t, err)
-				require.Equal(t, 4*(rex+tom), total)
-				return nil
-			}))
-		}
-		verify(pets, n/3, n/3)
-
-		// They are kept up to date from then on.
-		require.NoError(t, db.Update(func(tx kv.Tx) error {
-			if err := pets.Instantiate(tx).Set(&Pet{id: n + 1, Name: "REX", Species: "dog", Legs: 4}); err != nil {
-				return err
-			}
-			// The first pet is a tom.
-			return pets.Instantiate(tx).Delete(1)
-		}))
-		verify(pets, n/3+1, n/3-1)
-
-		// And there is nothing left to do.
-		sch, _, _, _, _, _ = define()
-		require.NoError(t, sch.Check(db))
-		report, err = sch.Migrate(context.Background(), db)
-		require.NoError(t, err)
-		require.Empty(t, report.String())
+		rec, ok := readRecord(t, db, "pets")
+		require.True(t, ok)
+		require.Equal(t, "record", rec.Kind)
+		require.Equal(t, uint64(2), rec.Version)
+		require.Contains(t, rec.Parts, "log")
+		require.Equal(t, "ready", rec.Parts["log"].State)
 	})
 }
+
+// logger is an extension that keeps data that cannot be built again.
+type logger[T any] struct{}
+
+func (logger[T]) Keep(prefix []byte) migrate.Part {
+	return migrate.Part{Kind: "log", StartEmpty: true}
+}
+
+func (logger[T]) Instantiate(kv.Tx) extstore.ExtensionInstance[int64, T] {
+	return loggerInstance[T]{}
+}
+
+type loggerInstance[T any] struct{}
+
+func (loggerInstance[T]) OnSet(int64, []byte, *T, *T, ...any) error { return nil }
+func (loggerInstance[T]) OnDelete(int64, []byte, *T) error          { return nil }
