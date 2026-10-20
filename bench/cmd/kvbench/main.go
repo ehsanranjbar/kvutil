@@ -26,7 +26,10 @@ import (
 	_ "github.com/ehsanranjbar/kvutil/bench/internal/workloads/bulkload"
 	_ "github.com/ehsanranjbar/kvutil/bench/internal/workloads/codecs"
 	_ "github.com/ehsanranjbar/kvutil/bench/internal/workloads/indexmaint"
+	_ "github.com/ehsanranjbar/kvutil/bench/internal/workloads/keyfetch"
 	_ "github.com/ehsanranjbar/kvutil/bench/internal/workloads/kvbasic"
+	_ "github.com/ehsanranjbar/kvutil/bench/internal/workloads/queries"
+	_ "github.com/ehsanranjbar/kvutil/bench/internal/workloads/sweep"
 )
 
 func main() {

@@ -98,6 +98,33 @@ func TestMeasureCountsAndExcludesWarmup(t *testing.T) {
 	}
 }
 
+func TestCaseInfoIsInTheResult(t *testing.T) {
+	p := Params{Scale: 100, Values: "small", Durability: Durable, Concurrency: 1, Duration: 20 * time.Millisecond, Warmup: 5 * time.Millisecond, Seed: 1}
+	rc, results := newContext(t, p)
+
+	info := map[string]string{"plan": "Seq Scan (rows=5)", "plan_nodes": "Seq Scan"}
+	err := rc.Measure(context.Background(), Case{Name: "q", Info: info}, func(context.Context, *Worker) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rc.Report(context.Background(), Case{Name: "r", Info: map[string]string{"x": "y"}}, time.Now(), time.Now(), metrics.Metrics{}); err != nil {
+		t.Fatal(err)
+	}
+	rs := results()
+	if len(rs) != 2 {
+		t.Fatalf("%d results", len(rs))
+	}
+	if rs[0].Metrics.Info["plan"] != "Seq Scan (rows=5)" || rs[0].Metrics.Info["plan_nodes"] != "Seq Scan" {
+		t.Errorf("info %v", rs[0].Metrics.Info)
+	}
+	if rs[1].Metrics.Info["x"] != "y" {
+		t.Errorf("info %v", rs[1].Metrics.Info)
+	}
+	if line := metrics.Summary(&rs[0]); !strings.Contains(line, "plan=Seq Scan") {
+		t.Errorf("summary %q", line)
+	}
+}
+
 func TestMeasureBeginExcludesPreparation(t *testing.T) {
 	p := Params{Concurrency: 1, Duration: 200 * time.Millisecond, Seed: 1}
 	rc, results := newContext(t, p)

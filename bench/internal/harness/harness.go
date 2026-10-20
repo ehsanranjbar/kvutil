@@ -147,6 +147,8 @@ type Case struct {
 	Timed bool
 	// Init sets up the state of a worker before it starts.
 	Init func(w *Worker)
+	// Info is text that goes into the result as it is, like the plan that a query ran with.
+	Info map[string]string
 }
 
 // RunContext is what a variant runs with.
@@ -178,6 +180,9 @@ func (rc *RunContext) retries() int64 {
 
 // emit writes a result of a case.
 func (rc *RunContext) emit(ctx context.Context, c Case, conc int, start, end time.Time, m metrics.Metrics) error {
+	if len(c.Info) > 0 {
+		m.Info = c.Info
+	}
 	if rc.SizeFn != nil {
 		if sz, err := rc.SizeFn(ctx); err == nil {
 			m.DiskBytes, m.WALBytes = sz.Data, sz.WAL

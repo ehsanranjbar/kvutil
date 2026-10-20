@@ -62,6 +62,9 @@ type Metrics struct {
 
 	// Extra is for the numbers that only some measurements have.
 	Extra map[string]float64 `json:"extra,omitempty"`
+	// Info is for the text that only some measurements have, like the plan that a database
+	// chose for a query (plan, plan_nodes, plans_seen).
+	Info map[string]string `json:"info,omitempty"`
 }
 
 // Result is one line of a results file: a measurement of a case of a workload.
@@ -142,6 +145,9 @@ func Summary(r *Result) string {
 			m.Errors, m.Retries)
 		if m.UnitsPerSec > 0 {
 			s += fmt.Sprintf("  %.0f %s/s", m.UnitsPerSec, m.UnitName)
+		}
+		if plan := m.Info["plan_nodes"]; plan != "" {
+			s += "  plan=" + plan
 		}
 		return s
 	case m.Records > 0:

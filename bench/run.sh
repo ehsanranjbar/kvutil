@@ -15,7 +15,7 @@ usage() {
   cat <<'EOF'
 usage: ./run.sh [options]
 
-  -w, --workload LIST     workloads, groups (kv, load, records, index) or all     (all)
+  -w, --workload LIST     workloads, groups (kv, load, records, index, query) or all  (all)
   -s, --scale N           records                                                (100000)
   -V, --values SIZE       small (~200 B) or large (~4 KB)                        (small)
   -d, --durability MODE   durable, relaxed or both                               (durable)

@@ -115,25 +115,46 @@ func (s *System) options(dir string) badger.Options {
 // It is a kv.DB, with the capabilities of the Badger one.
 type DB struct {
 	*badgerkv.DB
-	sys *System
-	dir string
+	sys  *System
+	dir  string
+	opts []badgerkv.Option
 }
 
 // Open creates a new, empty database. The name only helps whoever looks at the directory.
 func (s *System) Open(name string) (*DB, error) {
+	return s.OpenPrefetch(name, s.cfg.Prefetch)
+}
+
+// OpenPrefetch is Open with the iterators reading the given number of values ahead instead of the
+// number of the system: a workload that skips over keys wants none.
+func (s *System) OpenPrefetch(name string, prefetch int) (*DB, error) {
 	dir := filepath.Join(s.cfg.DataDir, fmt.Sprintf("kvb-%s-%d", name, s.seq.Add(1)))
 	if err := os.RemoveAll(dir); err != nil {
 		return nil, err
 	}
 	var opts []badgerkv.Option
-	if s.cfg.Prefetch > 0 {
-		opts = append(opts, badgerkv.WithPrefetch(s.cfg.Prefetch))
+	if prefetch > 0 {
+		opts = append(opts, badgerkv.WithPrefetch(prefetch))
 	}
 	db, err := badgerkv.Open(s.options(dir), opts...)
 	if err != nil {
 		return nil, err
 	}
-	return &DB{DB: db, sys: s, dir: dir}, nil
+	return &DB{DB: db, sys: s, dir: dir, opts: opts}, nil
+}
+
+// Reopen closes the database and opens it again from its files, which empties the block cache of
+// Badger (the pages that the operating system caches stay).
+func (d *DB) Reopen() error {
+	if err := d.DB.Close(); err != nil {
+		return err
+	}
+	db, err := badgerkv.Open(d.sys.options(d.dir), d.opts...)
+	if err != nil {
+		return err
+	}
+	d.DB = db
+	return nil
 }
 
 // Update implements kv.DB, and counts the times that the function is run again.
