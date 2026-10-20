@@ -311,6 +311,11 @@ func (c *conditional[V]) Fields() []field.Component[V] {
 	return nil
 }
 
+// held returns what the wrapped indexer keeps in the values of its entries.
+func (c *conditional[V]) held() []slot[V] {
+	return heldBy(c.Indexer)
+}
+
 // Ranges implements the RangePlanner interface, if the wrapped indexer does.
 func (c *conditional[V]) Ranges(conds ...cond.Cond[V]) ([]Bounds, []cond.Cond[V], error) {
 	l, ok := c.Indexer.(RangePlanner[V])

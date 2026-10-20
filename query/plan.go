@@ -66,6 +66,17 @@ type plan[K, V any] struct {
 	// check are the conditions that the records that are found are checked against.
 	check []cond.Cond[V]
 
+	// indexOnly is set if the rows are made from the entries of the index, without getting the
+	// records: the index holds what is selected, what the check needs, and what the order needs
+	// if the rows are sorted. The following are then set for the rows.
+	indexOnly bool
+	// accesses are where the index holds the selected items, in their order.
+	accesses []*index.Access[V]
+	// entryChecks are the check, on the entries.
+	entryChecks []entryCheck[K, V]
+	// sortAccesses are where the index holds the fields of the order, if the rows are sorted.
+	sortAccesses []*index.Access[V]
+
 	// order is the order that is asked for, and ordered is set if the records come in it.
 	order []field.Component[V]
 	// wanted is the order without the fields that have one value in all the records that are found.
@@ -92,7 +103,14 @@ type candidate[K, V any] struct {
 	ranges   []index.Bounds
 	check    []cond.Cond[V]
 	delivery delivery
-	cost     float64
+	// indexOnly is set if the rows can be made from the index alone; see plan.
+	indexOnly bool
+	cost      float64
+}
+
+// selection is what a projection selects, which decides if an index can do without the records.
+type selection[V any] struct {
+	items []field.Item[V]
 }
 
 // less reports whether a candidate is preferred: it costs less, or else it has fewer conditions
@@ -110,8 +128,9 @@ func (c *candidate[K, V]) less(o *candidate[K, V]) bool {
 	return c.position < o.position
 }
 
-// plan chooses how to run the query.
-func (q *Query[K, V]) plan() (*plan[K, V], error) {
+// plan chooses how to run the query. The selection is nil for a query that gives its records, and
+// is what a projection selects otherwise, which an index may hold so that no record is read.
+func (q *Query[K, V]) plan(sel *selection[V]) (*plan[K, V], error) {
 	if q.offset < 0 {
 		return nil, fmt.Errorf("%w: the offset is %d", ErrNegative, q.offset)
 	}
@@ -169,7 +188,7 @@ func (q *Query[K, V]) plan() (*plan[K, V], error) {
 	}
 
 	pl.wanted = wanted
-	e := estimator[K, V]{q: q, conj: conj, constant: constant, wanted: wanted, unordered: len(order) == 0}
+	e := estimator[K, V]{q: q, sel: sel, order: order, conj: conj, constant: constant, wanted: wanted, unordered: len(order) == 0}
 
 	var best *candidate[K, V]
 	if q.hint.kind != hintIndex {
@@ -202,7 +221,102 @@ func (q *Query[K, V]) plan() (*plan[K, V], error) {
 		pl.ranges = slices.Clone(pl.ranges)
 		slices.Reverse(pl.ranges)
 	}
+	if best.indexOnly {
+		pl.indexOnly = true
+		pl.accesses = make([]*index.Access[V], len(sel.items))
+		for i, item := range sel.items {
+			pl.accesses[i], _ = best.index.Access(item)
+		}
+		if !pl.ordered {
+			pl.sortAccesses = make([]*index.Access[V], len(order))
+			for i, f := range order {
+				pl.sortAccesses[i], _ = best.index.AccessField(f.Path(), f.CodecName())
+			}
+		}
+		for _, c := range pl.check {
+			pl.entryChecks = append(pl.entryChecks, compileCheck(best.index, c))
+		}
+	}
 	return pl, nil
+}
+
+// entryCheck checks a condition on the entry that an iterator of an index is at.
+type entryCheck[K, V any] func(it *index.Iterator[K, V]) (bool, error)
+
+// compileCheck returns the check of a condition that the index can check, which holdsCondition says.
+func compileCheck[K, V any](ix *index.Index[K, V], c cond.Cond[V]) entryCheck[K, V] {
+	switch c := c.(type) {
+	case *cond.Comparison[V]:
+		access, _ := ix.AccessField(c.Path, c.Codec)
+		return func(it *index.Iterator[K, V]) (bool, error) {
+			values, err := it.Encoded(access)
+			if err != nil {
+				return false, err
+			}
+			return c.MatchKeys(values), nil
+		}
+
+	case *cond.Conjunction[V]:
+		parts := compileChecks(ix, c.Conds)
+		return func(it *index.Iterator[K, V]) (bool, error) {
+			for _, part := range parts {
+				if ok, err := part(it); !ok || err != nil {
+					return false, err
+				}
+			}
+			return true, nil
+		}
+
+	case *cond.Disjunction[V]:
+		parts := compileChecks(ix, c.Conds)
+		return func(it *index.Iterator[K, V]) (bool, error) {
+			for _, part := range parts {
+				if ok, err := part(it); ok || err != nil {
+					return ok, err
+				}
+			}
+			return false, nil
+		}
+
+	case *cond.Negation[V]:
+		inner := compileCheck(ix, c.Cond)
+		return func(it *index.Iterator[K, V]) (bool, error) {
+			ok, err := inner(it)
+			return !ok && err == nil, err
+		}
+	}
+	panic(fmt.Sprintf("query: the condition %s cannot be checked on an index", c))
+}
+
+func compileChecks[K, V any](ix *index.Index[K, V], conds []cond.Cond[V]) []entryCheck[K, V] {
+	checks := make([]entryCheck[K, V], len(conds))
+	for i, c := range conds {
+		checks[i] = compileCheck(ix, c)
+	}
+	return checks
+}
+
+// holdsCondition reports whether an index holds what a condition needs, so that the condition can
+// be checked on its entries with the same result as on the record: it is a comparison of a field of
+// the key that has one value at most for a record, or of a field that the index includes (which
+// holds all the values of the record), or a conjunction, a disjunction or a negation of such.
+// A function needs the record, and so does a comparison that has an error, which Match returns.
+func holdsCondition[K, V any](ix *index.Index[K, V], c cond.Cond[V]) bool {
+	switch c := c.(type) {
+	case *cond.Comparison[V]:
+		if c.Err() != nil {
+			return false
+		}
+		access, ok := ix.AccessField(c.Path, c.Codec)
+		return ok && !access.ByEntry()
+	case *cond.Conjunction[V]:
+		return holdsConditions(ix, c.Conds)
+	case *cond.Disjunction[V]:
+		return holdsConditions(ix, c.Conds)
+	case *cond.Negation[V]:
+		return holdsCondition(ix, c.Cond)
+	}
+	return false
 }
 
 // indexes returns the indexes of the store, in the order of its extensions.
@@ -216,10 +330,50 @@ func (q *Query[K, V]) indexes() []*index.Index[K, V] {
 	return indexes
 }
 
+// holdsConditions reports whether an index holds what every one of the conditions needs.
+func holdsConditions[K, V any](ix *index.Index[K, V], conds []cond.Cond[V]) bool {
+	for _, c := range conds {
+		if !holdsCondition(ix, c) {
+			return false
+		}
+	}
+	return true
+}
+
+// canDoWithout reports whether the rows of the selection can be made from the entries of an index
+// that is read with the conditions left to check, and delivers the order that is asked for or
+// not. It can if the index holds, as one value of the record, every selected item; every one of
+// the conditions; and, if the rows have to be sorted, every field of the order.
+func (e *estimator[K, V]) canDoWithout(ix *index.Index[K, V], residual []cond.Cond[V], d delivery) bool {
+	if e.sel == nil {
+		return false
+	}
+	for _, item := range e.sel.items {
+		if access, ok := ix.Access(item); !ok || access.ByEntry() {
+			return false
+		}
+	}
+	if !holdsConditions(ix, residual) {
+		return false
+	}
+	if d == notDelivered {
+		for _, f := range e.order {
+			if access, ok := ix.AccessField(f.Path(), f.CodecName()); !ok || access.ByEntry() {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // estimator estimates the cost of the ways to read the records of a query.
 type estimator[K, V any] struct {
-	q    *Query[K, V]
-	conj []cond.Cond[V]
+	q *Query[K, V]
+	// sel is what is selected, which is nil if the records are asked for.
+	sel *selection[V]
+	// order is the order that is asked for, with each path once.
+	order []field.Component[V]
+	conj  []cond.Cond[V]
 	// constant are the paths of the fields that all the records that are found have one value of.
 	constant map[string]struct{}
 	// wanted is the order that is asked for, without the fields that are constant.
@@ -310,6 +464,19 @@ func (e *estimator[K, V]) index(position int, ix *index.Index[K, V]) (*candidate
 		rows = float64(len(ranges))
 	}
 	c.delivery = e.deliver(ix, fields, ranges, exact)
+	if e.sel != nil {
+		// Every entry of an index of some of the records satisfies its condition, so the
+		// conditions that it implies need no check on the entries.
+		rest := residual
+		if cnd, ok := desc.Condition.(cond.Cond[V]); ok && desc.Where != "" {
+			rest = slices.DeleteFunc(slices.Clone(residual), func(r cond.Cond[V]) bool {
+				return implies([]cond.Cond[V]{cnd}, r)
+			})
+		}
+		if e.canDoWithout(ix, rest, c.delivery) {
+			c.indexOnly, c.check = true, rest
+		}
+	}
 	c.cost = e.cost(c, rows, true)
 	return c, nil
 }
@@ -364,7 +531,11 @@ func (e *estimator[K, V]) cost(c *candidate[K, V], rows float64, indexed bool) f
 		need := float64(e.q.offset) + float64(e.q.limit)
 		read = math.Min(rows, math.Ceil(need/pass))
 	}
-	cost := read * fetchCost
+	// The records are not got where the rows are made from the index.
+	cost := 0.0
+	if !c.indexOnly {
+		cost = read * fetchCost
+	}
 	if indexed {
 		cost += read * entryCost
 	}

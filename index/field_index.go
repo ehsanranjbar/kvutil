@@ -2,10 +2,8 @@ package index
 
 import (
 	"errors"
-	"fmt"
 
 	"github.com/ehsanranjbar/kvutil"
-	"github.com/ehsanranjbar/kvutil/codec"
 	"github.com/ehsanranjbar/kvutil/cond"
 	"github.com/ehsanranjbar/kvutil/field"
 	"github.com/ehsanranjbar/kvutil/kv"
@@ -64,6 +62,11 @@ func (v *versionedIndexer[V]) Fields() []field.Component[V] {
 	return nil
 }
 
+// held returns what the wrapped indexer keeps in the values of its entries.
+func (v *versionedIndexer[V]) held() []slot[V] {
+	return heldBy(v.Indexer)
+}
+
 // Ranges implements the RangePlanner interface, if the wrapped indexer does.
 func (v *versionedIndexer[V]) Ranges(conds ...cond.Cond[V]) ([]Bounds, []cond.Cond[V], error) {
 	l, ok := v.Indexer.(RangePlanner[V])
@@ -73,75 +76,11 @@ func (v *versionedIndexer[V]) Ranges(conds ...cond.Cond[V]) ([]Bounds, []cond.Co
 	return l.Ranges(conds...)
 }
 
-// Covering stores a value with every entry of the index, which can be read from the index
-// without getting the record. The paths name the fields that the value has, for the
-// descriptor of the index. A nil codec is the default one of the type of the value.
-func Covering[V, C any](get func(*V) C, c codec.ValueCodec[C], paths ...string) Option[V] {
-	return func(indexer Indexer[V]) Indexer[V] {
-		return covered(indexer, get, c, paths...)
-	}
-}
-
-// covered wraps an indexer so that a value is stored with every entry that it returns.
-func covered[V, C any](indexer Indexer[V], get func(*V) C, c codec.ValueCodec[C], paths ...string) Indexer[V] {
-	if c == nil {
-		c = codec.ValueFor[C](nil)
-	}
-	return &coveringIndexer[V, C]{
-		Indexer: indexer,
-		get:     get,
-		codec:   c,
-		paths:   paths,
-	}
-}
-
-type coveringIndexer[V, C any] struct {
-	Indexer[V]
-	get   func(*V) C
-	codec codec.ValueCodec[C]
-	paths []string
-}
-
-// Index implements the Indexer interface.
-func (c *coveringIndexer[V, C]) Index(v *V) ([]Entry, error) {
-	entries, err := c.Indexer.Index(v)
-	if err != nil || len(entries) == 0 {
-		return entries, err
-	}
-
-	value, err := c.codec.Encode(c.get(v))
-	if err != nil {
-		return nil, fmt.Errorf("failed to encode the covered value: %w", err)
-	}
-	for i := range entries {
-		entries[i].Value = value
-	}
-	return entries, nil
-}
-
-// Descriptor implements the Indexer interface.
-func (c *coveringIndexer[V, C]) Descriptor() Descriptor {
-	desc := c.Indexer.Descriptor()
-	desc.Covered = c.paths
-	desc.Encoding += "+" + c.codec.Name()
-	return desc
-}
-
-// Fields returns the fields of the wrapped indexer, if it is one of fields.
-func (c *coveringIndexer[V, C]) Fields() []field.Component[V] {
-	if f, ok := c.Indexer.(fielded[V]); ok {
-		return f.Fields()
-	}
-	return nil
-}
-
-// Ranges implements the RangePlanner interface, if the wrapped indexer does.
-func (c *coveringIndexer[V, C]) Ranges(conds ...cond.Cond[V]) ([]Bounds, []cond.Cond[V], error) {
-	l, ok := c.Indexer.(RangePlanner[V])
-	if !ok {
-		return nil, nil, errors.New("the indexer cannot be looked up with conditions")
-	}
-	return l.Ranges(conds...)
+// WhereFunc keeps only the records that a function returns true for in the index; it is
+// Where(cond.Func(name, f)). The name stands for what the function does, and must change when
+// the function does; see Where.
+func WhereFunc[V any](name string, f func(*V) bool) Option[V] {
+	return Where(cond.Func(name, f))
 }
 
 func with[V any](indexer Indexer[V], opts []Option[V]) Indexer[V] {

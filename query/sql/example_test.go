@@ -26,10 +26,12 @@ type Novel struct {
 // without one.
 func Example() {
 	novels := extstore.New[int64, Novel]("novels")
+	title := field.Path[Novel, string]("Title")
+	// The title is kept with the entries, so a query can select it without reading the novels.
 	index.Composite(novels, "by_author_year", field.List(
 		field.Path[Novel, string]("Author"),
 		field.Path[Novel, int]("Year"),
-	))
+	), index.Including(title))
 	// A field that is computed is known to the parser by the index that is defined on it.
 	index.On(novels, "by_decade", field.Of("Decade", func(n *Novel) int { return n.Year / 10 * 10 }))
 
@@ -90,6 +92,37 @@ func Example() {
 			return err
 		}
 		fmt.Println("condition:", c)
+
+		// Where returns a query, so it can select values and count like any other: the titles
+		// come from the index alone here.
+		q, err := parser.Where(`Author = 'Herbert' AND Year >= 1970`)
+		if err != nil {
+			return err
+		}
+		selection := q.Select(title)
+		plan, err := selection.Explain()
+		if err != nil {
+			return err
+		}
+		fmt.Println("selected:", plan)
+		rows := selection.Run(tx)
+		defer rows.Close()
+		for ; rows.Valid(); rows.Next() {
+			row, err := rows.Value()
+			if err != nil {
+				return err
+			}
+			t, _ := row.Get(title)
+			fmt.Println("  ", row.Key(), t)
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		n, err := q.Count(tx)
+		if err != nil {
+			return err
+		}
+		fmt.Println("count:", n)
 		return nil
 	})
 	if err != nil {
@@ -124,6 +157,10 @@ func Example() {
 	//   StoreScan, then check [length("Title") > 10; InPrint = true]
 	//   [The Dosadi Experiment]
 	// condition: (Author = "Herbert") and (Year >= 1970) and ("Title" LIKE '%dune')
+	// selected: IndexOnlyScan by_author_year: 1 range
+	//    3 Children of Dune
+	//    4 The Dosadi Experiment
+	// count: 2
 	// Athor = 'Herbert': true false
 	// Author = "Herbert": true false
 	// Year = 'soon': true false

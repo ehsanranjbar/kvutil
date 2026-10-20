@@ -83,6 +83,24 @@ func (c *Comparison[V]) Match(v *V) (bool, error) {
 	return false, nil
 }
 
+// MatchKeys reports whether the comparison is satisfied by one of the values of a field that are
+// given already encoded, each as the field encodes a value ascending: the form that Values and
+// the sides of the comparison are in, and that an index holds the values of an included field in.
+// It is what Match does for a record whose values are these, and it is false for no values.
+// A comparison that has an error (Err) is satisfied by no value here, while Match returns the
+// error: whoever checks encoded values leaves such a comparison to Match.
+func (c *Comparison[V]) MatchKeys(keys [][]byte) bool {
+	if c.err != nil {
+		return false
+	}
+	for _, key := range keys {
+		if c.has(key) {
+			return true
+		}
+	}
+	return false
+}
+
 // has reports whether an encoded value satisfies the comparison.
 func (c *Comparison[V]) has(key []byte) bool {
 	if c.Op != OpRange {

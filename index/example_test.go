@@ -5,7 +5,6 @@ import (
 	"fmt"
 
 	"github.com/ehsanranjbar/kvutil"
-	"github.com/ehsanranjbar/kvutil/codec"
 	"github.com/ehsanranjbar/kvutil/cond"
 	"github.com/ehsanranjbar/kvutil/field"
 	"github.com/ehsanranjbar/kvutil/index"
@@ -48,8 +47,8 @@ func Example() {
 	// One book at most can have an ISBN.
 	byISBN := index.Unique(books, "by_isbn", ISBN)
 	// The title is stored with the entries, so it can be listed without reading the books.
-	byYear := index.On(books, "by_year", Year,
-		index.Covering(func(b *Book) string { return b.Title }, nil, "Title"))
+	title := index.Cover("Title", func(b *Book) string { return b.Title })
+	byYear := index.On(books, "by_year", Year, index.Covering(title))
 	// Several fields in one key: by author, and from the latest year for the same author.
 	byAuthorYear := index.Composite(books, "by_author_year", field.List(Author, Year.Desc()))
 	// Only the books that are in print are in the index.
@@ -117,15 +116,11 @@ func Example() {
 		}
 		defer it.Close()
 		for ; it.Valid(); it.Next() {
-			covered, err := it.Covered()
+			t, _, err := it.Get(title)
 			if err != nil {
 				return err
 			}
-			title, err := codec.ValueFor[string](nil).Decode(covered)
-			if err != nil {
-				return err
-			}
-			fmt.Println("before 1970:", title)
+			fmt.Println("before 1970:", t)
 		}
 
 		// Conditions on the fields of a composite index.

@@ -57,6 +57,15 @@
 // the identical condition only. The query is still checked against all its conditions, and its
 // results do not depend on the index. Hinting an index (Using) whose condition is not implied
 // is an error.
+//
+// # Projections
+//
+// A query gives records. Select makes of it a projection, which gives rows with the values of the
+// items that are selected (fields, and values that an index covers), and Count gives the number
+// of records. An index holds the fields of its key, the fields it includes (index.Including) and
+// the values it covers (index.Covering), so it can give a row without the record, if it holds
+// all that the rows need: that is an IndexOnlyScan in the plan, which costs no fetch of records.
+// A row can still give its record (Row.Record), which is read when it is asked for.
 package query
 
 import (
@@ -119,6 +128,8 @@ type Query[K, V any] struct {
 
 	// planned is the plan of this query, which is made once.
 	planned *planned[K, V]
+	// counting is the projection that Count runs, which is made once.
+	counting *counting[K, V]
 }
 
 type planned[K, V any] struct {
@@ -127,15 +138,21 @@ type planned[K, V any] struct {
 	err  error
 }
 
+type counting[K, V any] struct {
+	once sync.Once
+	p    *Projection[K, V]
+}
+
 // From returns the query of all the records of a store.
 func From[K, V any](store Store[K, V]) *Query[K, V] {
-	return &Query[K, V]{store: store, planned: &planned[K, V]{}}
+	return &Query[K, V]{store: store, planned: &planned[K, V]{}, counting: &counting[K, V]{}}
 }
 
 // derive returns a copy of the query, to change.
 func (q *Query[K, V]) derive() *Query[K, V] {
 	c := *q
 	c.planned = &planned[K, V]{}
+	c.counting = &counting[K, V]{}
 	return &c
 }
 
@@ -201,7 +218,7 @@ func (q *Query[K, V]) FullScan() *Query[K, V] {
 // planOnce returns the plan of the query, which is made the first time.
 func (q *Query[K, V]) planOnce() (*plan[K, V], error) {
 	q.planned.once.Do(func() {
-		q.planned.plan, q.planned.err = q.plan()
+		q.planned.plan, q.planned.err = q.plan(nil)
 	})
 	return q.planned.plan, q.planned.err
 }
@@ -213,7 +230,7 @@ func (q *Query[K, V]) planOnce() (*plan[K, V], error) {
 func (q *Query[K, V]) Run(tx kv.Tx) iterutil.AdvancedIterator[K, *V] {
 	pl, err := q.planOnce()
 	if err != nil {
-		return iterutil.Of(&failed[K, V]{err: err})
+		return iterutil.Of(&failed[K, *V]{err: err})
 	}
 	return iterutil.Of(pl.open(tx, q.store))
 }
@@ -234,6 +251,9 @@ func (q *Query[K, V]) Run(tx kv.Tx) iterutil.AdvancedIterator[K, *V] {
 //     shown in brackets if the plan relies on it, as in "(reversed, in order of Year desc)",
 //     which is then read from the end. After the colon come the number of ranges that are read
 //     and the conditions that the records are checked against, if there are any.
+//   - IndexOnlyScan name: like IndexLookup, for a projection (Select) that the index answers from
+//     its entries, without getting the records. It is shown instead of IndexLookup when the
+//     index holds what is selected, what is checked, and what the rows are sorted by.
 //   - StoreScan: all the records of the store, with the conditions that they are checked against.
 //   - Empty: nothing is read, as no record can satisfy the conditions or none is asked for.
 //
@@ -246,44 +266,49 @@ func (q *Query[K, V]) Explain() (string, error) {
 	return pl.String(), nil
 }
 
-// open starts the plan in a transaction.
-func (pl *plan[K, V]) open(tx kv.Tx, store Store[K, V]) node[K, V] {
+// open starts the plan in a transaction, for the records that it finds.
+func (pl *plan[K, V]) open(tx kv.Tx, store Store[K, V]) node[K, *V] {
 	if pl.empty {
-		return none[K, V]{}
+		return none[K, *V]{}
 	}
 
-	var n node[K, V]
+	var n node[K, *V]
 	if pl.index != nil {
 		it, err := pl.index.Instantiate(tx).ScanAll(pl.ranges, pl.reversed)
 		if err != nil {
-			return &failed[K, V]{err: fmt.Errorf("index %q: %w", pl.index.Name(), err)}
+			return &failed[K, *V]{err: fmt.Errorf("index %q: %w", pl.index.Name(), err)}
 		}
-		n = &source[K, V]{Iterator: it}
+		n = &source[K, *V]{Iterator: it}
 	} else {
 		records, err := store.Records(tx, kvutil.All[K]())
 		if err != nil {
-			return &failed[K, V]{err: err}
+			return &failed[K, *V]{err: err}
 		}
-		n = &source[K, V]{Iterator: records}
+		n = &source[K, *V]{Iterator: records}
 	}
 
 	if len(pl.check) > 0 {
 		n = newFilter(n, pl.check)
 	}
 	if !pl.ordered {
-		keep := 0
-		if pl.topN {
-			keep = pl.offset + pl.limit
-			if keep <= 0 {
-				keep = math.MaxInt
-			}
-		}
-		n = newSorter(n, pl.order, store.KeyCodec().Encode, keep)
+		n = newSorter(n, descendings(pl.order), recordSortKeys(pl.order), store.KeyCodec().Encode, pl.keep())
 	}
 	if pl.offset > 0 || pl.limited {
 		n = newPage(n, pl.offset, pl.limit, pl.limited)
 	}
 	return n
+}
+
+// keep returns the number of the items that a sort keeps, which is 0 for all of them.
+func (pl *plan[K, V]) keep() int {
+	if !pl.topN {
+		return 0
+	}
+	keep := pl.offset + pl.limit
+	if keep <= 0 {
+		keep = math.MaxInt
+	}
+	return keep
 }
 
 // String returns the plan as a tree.
@@ -312,6 +337,9 @@ func (pl *plan[K, V]) String() string {
 	var access string
 	if pl.index != nil {
 		access = "IndexLookup " + pl.index.Name()
+		if pl.indexOnly {
+			access = "IndexOnlyScan " + pl.index.Name()
+		}
 		switch {
 		case pl.inOrder && pl.reversed:
 			access += fmt.Sprintf(" (reversed, in order of %s)", orderText(pl.wanted))

@@ -130,6 +130,10 @@ type Index[K, V any] struct {
 	indexer Indexer[V]
 	desc    Descriptor
 	refs    *refstore.Store
+	// fields are the fields of the keys, which are nil for an indexer that is not one of fields,
+	// and slots are what the values of the entries hold.
+	fields []field.Component[V]
+	slots  []slot[V]
 }
 
 // New defines a new index on a store, whose entries are computed by the given indexer.
@@ -169,6 +173,10 @@ func newIndex[K, V any](
 		store:   store,
 		indexer: indexer,
 		desc:    desc,
+		slots:   heldBy(indexer),
+	}
+	if f, ok := indexer.(fielded[V]); ok {
+		x.fields = f.Fields()
 	}
 	store.AddExtension(name, maintainer[K, V]{x: x})
 	return x

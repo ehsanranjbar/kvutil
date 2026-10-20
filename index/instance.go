@@ -137,6 +137,7 @@ type Iterator[K, V any] struct {
 	seen   map[string]struct{} // the primary keys that were returned, if they have to be remembered
 	filter []cond.Cond[V]      // the conditions that the records are checked against
 	record *V                  // the record of the current entry, once it is read
+	viewed entryView           // what the current entry holds, once it is split
 	err    error
 }
 
@@ -166,6 +167,7 @@ func (it *Iterator[K, V]) settle() {
 		}
 
 		it.record = nil
+		it.viewed = entryView{}
 		if !it.cur.Valid() {
 			it.err = it.cur.Close()
 			it.cur = nil
@@ -309,12 +311,6 @@ func (it *Iterator[K, V]) IndexKey() ([]byte, error) {
 // The slice must not be modified and is valid until the iterator moves.
 func (it *Iterator[K, V]) RawKey() ([]byte, error) {
 	return it.cur.PrimaryKey()
-}
-
-// Covered returns the value that is stored with the current entry.
-// The slice must not be modified and is valid until the iterator moves.
-func (it *Iterator[K, V]) Covered() ([]byte, error) {
-	return it.cur.Value()
 }
 
 // Close implements the iterutil.Iterator interface.

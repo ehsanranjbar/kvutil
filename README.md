@@ -145,8 +145,9 @@ total, _, err := revenue.Instantiate(tx).Get("ann")                 // of all ti
 ```
 
 **Indexes** are on one field (`index.On`, `index.Unique`), on several (`index.Composite`), on a
-part of the records (`index.Where`), and can carry values to read without the records
-(`index.Covering`). `Lookup` takes conditions, uses the index for the ones that it can serve and
+part of the records (`index.Where`, or `index.WhereFunc` for a Go function), and can carry
+fields and values to read without the records (`index.Including`, `index.Covering`; see
+[Selecting values](#selecting-values)). `Lookup` takes conditions, uses the index for the ones that it can serve and
 checks the others on what it finds. The results of several indexes are combined with
 `index.Intersect`, `Union` and `Except`, or as bitmaps.
 
@@ -312,12 +313,66 @@ identical condition only. The query is still checked against all its conditions,
 index whose condition is not implied is an error.
 
 `Explain` shows the plan as a tree of operators: `StoreScan`, `IndexLookup` (with the order
-that it gives, and `reversed` if it is read from its end), `Sort` and `TopN` (when the order is
+that it gives, and `reversed` if it is read from its end), `IndexOnlyScan` (the same, for a
+projection that the index answers alone), `Sort` and `TopN` (when the order is
 not given), `Limit` and `Empty` (when the conditions contradict each other, or the limit is 0).
 The planner merges the comparisons of a field, keeps `NOT` and `OR` to be checked on the
 records, estimates the cost of each index without any statistics (the numbers are in
 `query/plan.go`), and takes the cheapest. `Using("by_customer")` and `FullScan()` are hints,
 and an index that cannot serve the query is an error.
+
+## Selecting values
+
+A query gives records. `Select` makes of it a projection, which gives rows with the values of the
+items that are selected instead, and `Count` gives how many records a query has. An index can
+answer them without reading the records, if it holds what they need. An index holds the fields of
+its key, and it can hold more with every entry:
+
+```go
+// A field that is not in the key, with every entry: all its values, if it has several.
+// A value computed from the record, with a name, which is selected like a field.
+shout := index.Cover("Shout", func(o *Order) string { return strings.ToUpper(o.Customer) })
+byCustomer := index.On(orders, "by_customer", customer,
+    index.Including(total),    // conditions on it can be checked on the entries as well
+    index.Covering(shout))     // a different codec: index.Cover(name, get, codec)
+
+p := query.From(orders).Where(customer.Eq("ann"), total.Gte(50)).OrderBy(total.Desc()).Limit(10).
+    Select(total, shout)       // no items: the keys only
+
+fmt.Println(p.Explain())
+// Limit 10
+// └─ TopN by Total desc
+//    └─ IndexOnlyScan by_customer: 1 range, then check [Total >= 50]
+
+for key, row := range iterutil.Of(p.Run(tx)).All(&err) { // the rows come in the order of the query
+    t, ok := row.Get(total)       // typed by the item: an int64; false if it has no value
+    s, _ := row.Get(shout)
+    all, ok := row.GetAll(tags)   // every value of an item that may have several
+    o, err := row.Record()        // the record: read when it is asked for, if the plan did not
+}
+
+n, err := query.From(orders).Where(customer.Eq("ann")).Count(tx) // the records that Run would give
+```
+
+`Item` is anything that can be selected, a field or a cover, so one `Select` takes items of
+different types, and `Get` knows the type from the item it is given. A row has the values of the
+items that were selected only: `Get` on any other item is false.
+
+An index answers a projection alone (an `IndexOnlyScan` in the plan, which reads no record) when
+it holds: every selected item, as a field of its key that has one value for a record at most, as a
+field that it includes, or as a cover; every condition it does not serve with its ranges, as a
+comparison of a field that it holds, or a conjunction, a disjunction or a negation of such
+(a function needs the record, and so does a field of the key that may have several values, as an
+entry has one of them only); and, if the rows have to be sorted, every field of the order. Anything
+else makes the plan an `IndexLookup`, with the records got. The values of a row are the same
+whatever the plan is, and so are the keys and their order. `Count` is a projection of the keys
+only, without the order: it is index-only whenever the conditions can be checked on an index.
+
+`Iterator.Get(item)` of an index iterator reads a field of the key, an included field or a cover
+from the entry, and fails with `index.ErrNotHeld` for anything else. What an index holds is part
+of what it is identified by: the names and codecs of its included fields and covers, so a change
+of them is a migration (`Migrate` builds the index again). The format of an entry is described in
+[index/hold.go](index/hold.go).
 
 ## Conditions as text
 

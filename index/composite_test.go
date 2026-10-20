@@ -451,7 +451,7 @@ func TestVersions(t *testing.T) {
 
 	// The version of an option is one too, after the versions of the fields.
 	withOption := index.On(store, "with_option", computed.WithVersion("3"), index.Versioned[pet]("f@1"), index.Where(ageField.Gte(1)),
-		index.Versioned[pet]("g@2"), index.Covering(name, nil, "Name"))
+		index.Versioned[pet]("g@2"), index.Covering(index.Cover("Name", name)))
 	require.Equal(t, "Shouted@3;f@1;g@2", withOption.Descriptor().Version)
 	require.Equal(t, "Age >= 1", withOption.Descriptor().Where, "the wrapped indexer is still what it was")
 	require.Equal(t, []string{"Name"}, withOption.Descriptor().Covered)
@@ -569,7 +569,7 @@ func TestFields(t *testing.T) {
 	byOwnerAge := index.Composite(pets, "by_owner_age", field.List(owner, age.Desc()),
 		// The options wrap the indexer, which still has its fields.
 		index.Where(age.Gte(1)),
-		index.Covering(func(p *pet) string { return p.Name }, nil, "Name"))
+		index.Covering(index.Cover("Name", func(p *pet) string { return p.Name })))
 	custom := index.New(pets, "custom", byChipLength{})
 
 	paths := func(parts []field.Component[pet]) []string {

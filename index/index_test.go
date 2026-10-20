@@ -9,7 +9,6 @@ import (
 
 	badger "github.com/dgraph-io/badger/v4"
 	"github.com/ehsanranjbar/kvutil"
-	"github.com/ehsanranjbar/kvutil/codec"
 	"github.com/ehsanranjbar/kvutil/codec/lex"
 	"github.com/ehsanranjbar/kvutil/cond"
 	"github.com/ehsanranjbar/kvutil/field"
@@ -60,6 +59,7 @@ func age(p *pet) int     { return p.Age }
 
 // The fields that the indexes of the tests are on.
 var (
+	petName    = index.Cover("Name", name)
 	nameField  = field.Of("Name", name)
 	ageField   = field.Of("Age", age)
 	ownerField = field.Path[pet, string]("Owner")
@@ -303,7 +303,7 @@ func TestUniqueConcurrency(t *testing.T) {
 func TestCovering(t *testing.T) {
 	testkv.Each(t, func(t *testing.T, db kv.DB) {
 		store := extstore.New[int64, pet]("pets")
-		byAge := index.On(store, "by_age", ageField, index.Covering(name, nil, "Name"))
+		byAge := index.On(store, "by_age", ageField, index.Covering(petName))
 		require.Equal(t, []string{"Name"}, byAge.Descriptor().Covered)
 
 		names := func(tx kv.Tx) []string {
@@ -313,8 +313,9 @@ func TestCovering(t *testing.T) {
 			var names []string
 			for ; it.Valid(); it.Next() {
 				// The name comes from the index, without the record being read.
-				name, err := codec.ValueFor[string](nil).Decode(must(it.Covered()))
+				name, ok, err := it.Get(petName)
 				require.NoError(t, err)
+				require.True(t, ok)
 				names = append(names, name)
 			}
 			return names
@@ -431,7 +432,7 @@ func TestCatalog(t *testing.T) {
 				index.On(store, "by_name", nameField.Desc())
 			},
 			"Covering": func(store *extstore.Store[int64, pet]) {
-				index.On(store, "by_name", nameField, index.Covering(age, nil, "Age"))
+				index.On(store, "by_name", nameField, index.Covering(index.Cover("Age", age)))
 			},
 			"Where": func(store *extstore.Store[int64, pet]) {
 				index.On(store, "by_name", nameField, index.Where(ageField.Gt(1)))
@@ -521,7 +522,7 @@ func newFixture() fixture {
 	index.On(store, "by_name", nameField)
 	index.On(store, "by_name_desc", nameField.Desc())
 	index.On(store, "by_tag", tagsField)
-	index.On(store, "by_age", ageField, index.Covering(name, nil, "Name"))
+	index.On(store, "by_age", ageField, index.Covering(index.Cover("Name", name)))
 	index.Unique(store, "by_chip", chipField)
 	index.Composite(store, "by_owner_age", field.List(ownerField, ageField.Desc()))
 	index.Composite(store, "by_tag_name", field.List(tagsField, nameField))

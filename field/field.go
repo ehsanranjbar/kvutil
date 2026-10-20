@@ -387,6 +387,16 @@ func (f Field[V, F]) ascending(v *V) ([][]byte, error) {
 	return keys, nil
 }
 
+// ReadKey implements the Component interface. It reads a value that Encode wrote, from the front
+// of bz.
+func (f Field[V, F]) ReadKey(bz []byte) (any, int, error) {
+	value, n, err := f.codec.Read(bz)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to decode %s: %w", f.path, err)
+	}
+	return value, n, nil
+}
+
 // Keys implements the Component interface.
 func (f Field[V, F]) Keys(v *V) ([][]byte, error) {
 	keys, err := f.ascending(v)
@@ -415,7 +425,41 @@ type Component[V any] interface {
 	// Keys returns the values that a record has, each encoded as a part of a key: in the form
 	// that marks where it ends, with its bytes inverted if the field is descending.
 	Keys(v *V) ([][]byte, error)
+	// ReadKey reads a value from the front of bz, which was encoded by the key codec in the
+	// ascending form that marks where it ends (not inverted, even for a field that is
+	// descending), and returns it with the number of bytes that it took.
+	ReadKey(bz []byte) (value any, n int, err error)
 }
+
+// Item is anything that a query can select: a field, or a value that an index covers
+// (index.Cover). It is not generic over the type of its values, so that a query can select items
+// of different types; Selectable is the item for whoever knows the type. It is implemented by
+// Field and by index.Covered.
+type Item[V any] interface {
+	// Path returns the name of the item. Items that are selected together have different names.
+	Path() string
+	// Multi reports whether a record may have several values for the item.
+	Multi() bool
+	// AnyValues returns the values that a record has for the item, which are empty if it has none.
+	AnyValues(v *V) []any
+}
+
+// Selectable is an item whose values are of the type F, so that they can be read as such: from
+// the row of a query, and from the entry of an index. It is implemented by Field and by
+// index.Covered. The methods that mention F are what lets the compiler infer F from the item
+// that is given, as in row.Get(Year).
+type Selectable[V, F any] interface {
+	Item[V]
+	// Values returns the values that a record has for the item.
+	Values(v *V) []F
+}
+
+var (
+	_ Component[struct{}]       = Field[struct{}, int]{}
+	_ Item[struct{}]            = Field[struct{}, int]{}
+	_ Selectable[struct{}, int] = Field[struct{}, int]{}
+	_ Untyped[struct{}]         = Field[struct{}, int]{}
+)
 
 // List returns fields of different types as the parts of the keys of an index.
 func List[V any](parts ...Component[V]) []Component[V] {

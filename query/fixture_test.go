@@ -3,10 +3,12 @@ package query_test
 import (
 	"fmt"
 	"math/rand/v2"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/ehsanranjbar/kvutil/codec"
 	"github.com/ehsanranjbar/kvutil/field"
 	"github.com/ehsanranjbar/kvutil/index"
 	"github.com/ehsanranjbar/kvutil/kv"
@@ -45,6 +47,17 @@ var (
 	// items that have tags.
 	total    = sql.Expr[Item, int]("Rank + Score")
 	upperTag = sql.Expr[Item, string]("upper(Tags)")
+
+	// Values that some of the indexes cover, computed from an item.
+	codeUpper   = index.Cover("CodeUpper", func(it *Item) string { return strings.ToUpper(it.Code) })
+	rankSquared = index.Cover("RankSquared", func(it *Item) int { return it.Rank * it.Rank })
+	// With a codec of its own.
+	labelLen = index.Cover("LabelLen", func(it *Item) int {
+		if it.Label == nil {
+			return -1
+		}
+		return len(*it.Label)
+	}, codec.Formatted[int](codec.JSON))
 )
 
 const itemCount = 400
@@ -59,19 +72,27 @@ type fixture struct {
 // ties between them are resolved.
 func defineItems() *extstore.Store[int64, Item] {
 	items := extstore.New[int64, Item]("items")
-	index.Composite(items, "by_group_rank", field.List(group, rank.Desc()))
-	index.Composite(items, "by_score_label", field.List(score, label))
-	index.Unique(items, "by_code", code)
-	index.UniqueComposite(items, "by_group_code", field.List(group, code.Desc()))
-	index.Composite(items, "by_tag_rank", field.List(tags, rank))
-	index.On(items, "by_note", note)
+	// The indexes hold fields that are not in their keys (Including), of one value for an item,
+	// of none or one, and of several, and values that are computed from an item (Covering).
+	index.Composite(items, "by_group_rank", field.List(group, rank.Desc()),
+		index.Including(extra, weight, ready), index.Covering(codeUpper))
+	index.Composite(items, "by_score_label", field.List(score, label),
+		index.Including(note, tags), index.Covering(rankSquared))
+	index.Unique(items, "by_code", code, index.Including(group, rank, score, label, weight))
+	index.UniqueComposite(items, "by_group_code", field.List(group, code.Desc()),
+		index.Including(rank, extra), index.Covering(rankSquared, labelLen))
+	index.Composite(items, "by_tag_rank", field.List(tags, rank),
+		index.Including(group, extra, note), index.Covering(codeUpper))
+	index.On(items, "by_note", note, index.Including(group, extra, weight), index.Covering(rankSquared))
 	// Indexes of some of the items, by a condition in Go and by one in SQL, which a query reads
 	// if its conditions imply theirs.
-	index.On(items, "ready_by_rank", rank, index.Where(ready.Eq(true)))
-	index.On(items, "ab_by_score", score, sql.Where[Item](`"Group" IN ('a', 'b') AND Rank >= 3`))
+	index.On(items, "ready_by_rank", rank, index.Where(ready.Eq(true)),
+		index.Including(score, weight, tags), index.Covering(codeUpper))
+	index.On(items, "ab_by_score", score, sql.Where[Item](`"Group" IN ('a', 'b') AND Rank >= 3`),
+		index.Including(rank, group, extra))
 	// Indexes of expressions, of one value for an item and of several.
-	index.On(items, "by_total", total)
-	index.On(items, "by_upper_tag", upperTag)
+	index.On(items, "by_total", total, index.Including(group, tags, weight), index.Covering(labelLen))
+	index.On(items, "by_upper_tag", upperTag, index.Including(rank, group, extra), index.Covering(rankSquared))
 	return items
 }
 

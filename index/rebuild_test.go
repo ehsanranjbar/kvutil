@@ -38,7 +38,7 @@ func newKennel(indexes bool, oldFrom int) *kennel {
 		k.byTag = index.On(k.pets, "by_tag", tagsField)
 		k.byChip = index.Unique(k.pets, "by_chip", chipField)
 		k.byOwner = index.Composite(k.pets, "by_owner_age", field.List(ownerField, ageField.Desc()),
-			index.Covering(name, nil, "Name"))
+			index.Covering(petName))
 		k.olds = index.On(k.pets, "olds", ageField, index.Where(ageField.Gte(oldFrom)))
 	}
 	return k
@@ -105,8 +105,10 @@ func (k *kennel) verify(t *testing.T, db kv.DB, oldFrom int) {
 		for ; named.Valid(); named.Next() {
 			entries++
 			id := must(named.Key())
-			covered := must(named.Covered())
-			require.Contains(t, string(covered), all[id].Name)
+			covered, ok, err := named.Get(petName)
+			require.NoError(t, err)
+			require.True(t, ok)
+			require.Equal(t, all[id].Name, covered)
 		}
 		require.NoError(t, named.Err())
 		require.Equal(t, len(all), entries)
