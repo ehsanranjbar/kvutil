@@ -8,12 +8,12 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"uuid"
 
 	"github.com/ehsanranjbar/kvutil/agg"
 	"github.com/ehsanranjbar/kvutil/examples/petstore/types"
 	"github.com/ehsanranjbar/kvutil/kv"
 	"github.com/ehsanranjbar/kvutil/relation"
-	"github.com/google/uuid"
 	echo "github.com/labstack/echo/v4"
 )
 

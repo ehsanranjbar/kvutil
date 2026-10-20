@@ -5,7 +5,6 @@ go 1.27
 require (
 	github.com/RoaringBitmap/roaring/v2 v2.3.4
 	github.com/dgraph-io/badger/v4 v4.9.6
-	github.com/google/uuid v1.6.0
 	github.com/rqlite/sql v0.0.0-20261016220845-5c0832fea6e1
 	github.com/stretchr/testify v1.11.1
 	github.com/vmihailenco/msgpack/v5 v5.4.1

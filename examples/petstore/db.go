@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"time"
+	"uuid"
 
 	badger "github.com/dgraph-io/badger/v4"
 	"github.com/ehsanranjbar/kvutil/agg"
@@ -20,7 +21,6 @@ import (
 	"github.com/ehsanranjbar/kvutil/migrate"
 	"github.com/ehsanranjbar/kvutil/relation"
 	"github.com/ehsanranjbar/kvutil/store/record"
-	"github.com/google/uuid"
 )
 
 // File is an image with its metadata. It has no codec of its own, so it is stored in the
@@ -274,7 +274,7 @@ func (db *DB) CreateFile(tx kv.Tx, petId int64, data []byte, metadata string) (u
 	// The pet that the image belongs to is told to the relation.
 	err := db.images.Instantiate(tx).Set(f, db.petImages.Under(petId))
 	if err != nil {
-		return uuid.Nil, err
+		return uuid.Nil(), err
 	}
 	return f.Id, nil
 }

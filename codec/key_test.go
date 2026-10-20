@@ -7,9 +7,9 @@ import (
 	"math/rand/v2"
 	"testing"
 	"time"
+	"uuid"
 
 	"github.com/ehsanranjbar/kvutil/codec"
-	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
 

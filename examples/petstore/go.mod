@@ -5,7 +5,6 @@ go 1.27
 require (
 	github.com/dgraph-io/badger/v4 v4.9.6
 	github.com/ehsanranjbar/kvutil v0.0.0
-	github.com/google/uuid v1.6.0
 	github.com/labstack/echo/v4 v4.13.3
 	google.golang.org/protobuf v1.36.7
 )

@@ -5,11 +5,11 @@ import (
 	"reflect"
 	"testing"
 	"time"
+	"uuid"
 
 	"github.com/ehsanranjbar/kvutil"
 	"github.com/ehsanranjbar/kvutil/cond"
 	"github.com/ehsanranjbar/kvutil/field"
-	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
 
