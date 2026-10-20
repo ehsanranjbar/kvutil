@@ -24,7 +24,7 @@ func keysOfSource[K, V any](t *testing.T, src index.Keyed[K, V], err error) []K 
 	t.Helper()
 	require.NoError(t, err)
 
-	keys, err := iterutil.Of[K, *V](src).Keys()
+	keys, err := iterutil.Of(src).Keys()
 	require.NoError(t, err)
 	if keys == nil {
 		keys = []K{}
@@ -305,12 +305,12 @@ func TestBitmap(t *testing.T) {
 		}))
 
 		require.NoError(t, db.View(func(tx kv.Tx) error {
-			ann, exact, err := index.Bitmap[int64, pet](must(byOwner.Instantiate(tx).Match("ann")))
+			ann, exact, err := index.Bitmap(must(byOwner.Instantiate(tx).Match("ann")))
 			require.NoError(t, err)
 			require.True(t, exact)
-			cats, _, err := index.Bitmap[int64, pet](must(byTag.Instantiate(tx).Match("cat")))
+			cats, _, err := index.Bitmap(must(byTag.Instantiate(tx).Match("cat")))
 			require.NoError(t, err)
-			old, _, err := index.Bitmap[int64, pet](must(byAge.Instantiate(tx).Lookup(ageField.Gt(5))))
+			old, _, err := index.Bitmap(must(byAge.Instantiate(tx).Lookup(ageField.Gt(5))))
 			require.NoError(t, err)
 			require.Equal(t, uint64(3), ann.GetCardinality())
 
@@ -340,7 +340,7 @@ func TestBitmap(t *testing.T) {
 
 			// Keys that are not numbers are in a bitmap as hashes, which cannot be turned back
 			// into keys.
-			annNamed, exact, err := index.Bitmap[string, pet](must(namedByOwner.Instantiate(tx).Match("ann")))
+			annNamed, exact, err := index.Bitmap(must(namedByOwner.Instantiate(tx).Match("ann")))
 			require.NoError(t, err)
 			require.False(t, exact)
 			require.Equal(t, uint64(3), annNamed.GetCardinality())

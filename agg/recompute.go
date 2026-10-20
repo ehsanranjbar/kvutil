@@ -154,7 +154,7 @@ func (r *recomputeKind[X, S]) computeSpan(tx *prefix.Tx, b Bucket, group []byte,
 			err = fmt.Errorf("agg %q: the function panicked: %v", r.name, p)
 		}
 	}()
-	state, err = r.compute(iterutil.Of[time.Time, X](it))
+	state, err = r.compute(iterutil.Of(it))
 	if err != nil {
 		return state, false, fmt.Errorf("agg %q: %w", r.name, err)
 	}

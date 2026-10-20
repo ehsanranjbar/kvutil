@@ -272,7 +272,7 @@ func TestFlatMap(t *testing.T) {
 	// The types of the keys and the values can change.
 	pairs, err := iterutil.Of(newNumbers(3)).
 		FlatMap(func(k int, v string) (iterutil.Iterator[string, int], error) {
-			return iterutil.Of[int, string](newNumbers(k)).Map(func(int, string) (int, error) { return k, nil }).
+			return iterutil.Of(newNumbers(k)).Map(func(int, string) (int, error) { return k, nil }).
 				FlatMap(func(_ int, n int) (iterutil.Iterator[string, int], error) {
 					return &one[string, int]{key: v, value: n}, nil
 				}), nil
@@ -322,7 +322,7 @@ func TestFlatMap(t *testing.T) {
 					return newNumbers(2), nil
 				}
 				inner = newNumbers(3)
-				return iterutil.Of[int, string](inner).Lookup(func(v string) (string, error) {
+				return iterutil.Of(inner).Lookup(func(v string) (string, error) {
 					if v == "n1" {
 						return "", errFailure
 					}

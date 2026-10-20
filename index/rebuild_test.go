@@ -50,9 +50,9 @@ func (k *kennel) verify(t *testing.T, db kv.DB, oldFrom int) {
 
 	require.NoError(t, db.View(func(tx kv.Tx) error {
 		all := map[int64]*pet{}
-		it := must(k.pets.Instantiate(tx).Iterator(kvutil.All[int64]()))
+		it := must(k.pets.Instantiate(tx).All())
 		var err error
-		for id, p := range iterutil.Of[int64, *pet](it).All(&err) {
+		for id, p := range iterutil.Of(it).All(&err) {
 			all[id] = p
 		}
 		require.NoError(t, err)

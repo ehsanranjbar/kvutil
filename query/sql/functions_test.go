@@ -77,14 +77,14 @@ func testFunctions() sql.Functions {
 		}))
 }
 
-func withFunctions(fs sql.Functions) sql.Option[Book] { return sql.WithFunctions[Book](fs) }
+func withFunctions(fs sql.Functions) sql.Option[Book] { return sql.WithFunctions(fs) }
 
 func TestFunctionsOfEveryType(t *testing.T) {
 	fns := testFunctions()
 	parse := func(text string) cond.Cond[Book] {
 		t.Helper()
 
-		c, err := sql.ParseWhere(text, withFunctions(fns))
+		c, err := sql.ParseWhere[Book](text, withFunctions(fns))
 		require.NoError(t, err, text)
 		return c
 	}
@@ -202,7 +202,7 @@ func TestFunctionsAreCheckedWhenParsed(t *testing.T) {
 		`CASE WHEN InPrint THEN double(Year) END`:        sql.ErrType,
 		`later(Released) > Author`:                       sql.ErrType,
 	} {
-		_, err := sql.ParseWhere(text, withFunctions(fns))
+		_, err := sql.ParseWhere[Book](text, withFunctions(fns))
 		require.ErrorIs(t, err, want, text)
 	}
 
@@ -217,7 +217,7 @@ func TestFunctionsAreCheckedWhenParsed(t *testing.T) {
 		// A field of an interface type may be anything, so it is found out when there is a book.
 		`double(Data) = 1`, `is_old(Data)`, `shout(Flag) = 'TRUE!'`,
 	} {
-		_, err := sql.ParseWhere(text, withFunctions(fns))
+		_, err := sql.ParseWhere[Book](text, withFunctions(fns))
 		require.NoError(t, err, text)
 	}
 }
@@ -227,7 +227,7 @@ func TestFunctionsFailWhileEvaluating(t *testing.T) {
 	parse := func(text string) cond.Cond[Book] {
 		t.Helper()
 
-		c, err := sql.ParseWhere(text, withFunctions(fns))
+		c, err := sql.ParseWhere[Book](text, withFunctions(fns))
 		require.NoError(t, err, text)
 		return c
 	}
@@ -264,11 +264,11 @@ func TestFunctionsFailWhileEvaluating(t *testing.T) {
 		Add(sql.Func2("never2", func(int, string) string { panic("called") })).
 		Add(sql.Func3("never3", func(int, int, string) string { panic("called") }))
 	for _, text := range []string{`never(Subtitle) IS NULL`, `never2(Year, Subtitle) IS NULL`, `never3(Year, Year, Subtitle) IS NULL`, `never(NULL) IS NULL`} {
-		c, err := sql.ParseWhere(text, withFunctions(never))
+		c, err := sql.ParseWhere[Book](text, withFunctions(never))
 		require.NoError(t, err, text)
 		require.True(t, match(t, c, &Book{Year: 1}), text)
 	}
-	_, err = sql.ParseWhere(`main.double(Year) = 1`, withFunctions(testFunctions()))
+	_, err = sql.ParseWhere[Book](`main.double(Year) = 1`, withFunctions(testFunctions()))
 	require.ErrorIs(t, err, sql.ErrSyntax)
 
 	// A function that returns what it is not declared to.
@@ -347,7 +347,7 @@ func TestFunctionNamesAndSets(t *testing.T) {
 	// The names are not case sensitive, like the names of the functions that there always are.
 	upper := sql.Functions{}.Add(sql.Func1("DoUbLe", func(n int) int { return n * 2 }))
 	for _, text := range []string{`double(Year) = 3930`, `DOUBLE(Year) = 3930`, `DoUbLe(Year) = 3930`} {
-		c, err := sql.ParseWhere(text, withFunctions(upper))
+		c, err := sql.ParseWhere[Book](text, withFunctions(upper))
 		require.NoError(t, err, text)
 		require.True(t, match(t, c, dune), text)
 	}
@@ -368,11 +368,11 @@ func TestFunctionNamesAndSets(t *testing.T) {
 	// A set is a value: adding to it makes another one.
 	base := sql.Functions{}.Add(double)
 	more := base.Add(sql.Func1("triple", func(n int) int { return n * 3 }))
-	_, err := sql.ParseWhere(`triple(Year) = 1`, withFunctions(base))
+	_, err := sql.ParseWhere[Book](`triple(Year) = 1`, withFunctions(base))
 	require.ErrorIs(t, err, sql.ErrUnknownFunction)
-	_, err = sql.ParseWhere(`triple(Year) = 5895 AND double(Year) = 3930`, withFunctions(more))
+	_, err = sql.ParseWhere[Book](`triple(Year) = 5895 AND double(Year) = 3930`, withFunctions(more))
 	require.NoError(t, err)
-	_, err = sql.ParseWhere(`double(Year) = 1`, withFunctions(sql.Functions{}))
+	_, err = sql.ParseWhere[Book](`double(Year) = 1`, withFunctions(sql.Functions{}))
 	require.ErrorIs(t, err, sql.ErrUnknownFunction)
 	// The same name can be added to the sets that were not added to.
 	_ = base.Add(sql.Func1("quad", func(n int) int { return n * 4 }))
@@ -472,10 +472,10 @@ func TestFunctionsInConcurrentUse(t *testing.T) {
 func TestFunctionsOfAStoreAreCheckedByType(t *testing.T) {
 	// A function with a result that is a number is compared as a number.
 	fns := sql.Functions{}.Add(sql.Func1("cents", func(f float64) int64 { return int64(f * 100) }))
-	c, err := sql.ParseWhere(`cents(Price) = 950 AND cents(Price) BETWEEN 900 AND 1000 AND cents(Price) IN (1, 950)`, withFunctions(fns))
+	c, err := sql.ParseWhere[Book](`cents(Price) = 950 AND cents(Price) BETWEEN 900 AND 1000 AND cents(Price) IN (1, 950)`, withFunctions(fns))
 	require.NoError(t, err)
 	require.True(t, match(t, c, dune))
-	_, err = sql.ParseWhere(`cents(Price) = 'x'`, withFunctions(fns))
+	_, err = sql.ParseWhere[Book](`cents(Price) = 'x'`, withFunctions(fns))
 	require.ErrorIs(t, err, sql.ErrType)
 
 	// The records of a query come from the iterator of the functions' results too.
@@ -494,7 +494,7 @@ func TestFunctionsOfAStoreAreCheckedByType(t *testing.T) {
 			it, err := p.Query(tx, where)
 			require.NoError(t, err)
 			defer it.Close()
-			keys, err := iterutil.Of[int64, *Book](it).Keys()
+			keys, err := iterutil.Of(it).Keys()
 			require.NoError(t, err)
 			require.NotEmpty(t, keys)
 			return nil
@@ -506,7 +506,7 @@ func TestFunctionsOfAStoreAreCheckedByType(t *testing.T) {
 func TestFunctionsWithFields(t *testing.T) {
 	fns := sql.Functions{}.Add(sql.Func1("double", func(n int) int { return n * 2 }))
 	decade := field.Of("Decade", func(b *Book) int { return b.Year / 10 * 10 })
-	c, err := sql.ParseWhere(`double(Decade) = 3920`, withFunctions(fns), sql.WithFields[Book](decade))
+	c, err := sql.ParseWhere[Book](`double(Decade) = 3920`, withFunctions(fns), sql.WithFields(decade))
 	require.NoError(t, err)
 	require.True(t, match(t, c, dune))
 }

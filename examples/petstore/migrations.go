@@ -4,7 +4,6 @@ import (
 	"time"
 
 	"github.com/ehsanranjbar/kvutil/examples/petstore/types"
-	"github.com/ehsanranjbar/kvutil/migrate"
 	"github.com/ehsanranjbar/kvutil/store/record"
 )
 
@@ -23,7 +22,7 @@ func migratePets(pets *record.Store[int64, types.PetRecord]) {
 	// version before stays in the program, next to its migration, and is what the function
 	// is given.
 	upgraded := time.Now().Unix()
-	migrate.Records(pets, 1, func(_ int64, p *types.PetRecord) (*types.PetRecord, error) {
+	pets.MigrateFrom(1, func(_ int64, p *types.PetRecord) (*types.PetRecord, error) {
 		if p.CreatedAt == 0 {
 			p.CreatedAt = upgraded
 		}

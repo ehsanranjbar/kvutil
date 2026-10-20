@@ -210,16 +210,16 @@ func randomIndexSpec(rng *rand.Rand) spec {
 		// An expression of the several values of an item, and the items that are ready.
 		s.conds = []cond.Cond[Item]{upperTag.Eq(fmt.Sprintf("T%d", rng.IntN(4)))}
 		if rng.IntN(3) == 0 {
-			s.conds = append(s.conds, cond.Or[Item](
-				cond.And[Item](ready.Eq(true), rank.Eq(rng.IntN(10))),
-				cond.And[Item](ready.Eq(true), rank.Eq(rng.IntN(10)))))
+			s.conds = append(s.conds, cond.Or(
+				cond.And(ready.Eq(true), rank.Eq(rng.IntN(10))),
+				cond.And(ready.Eq(true), rank.Eq(rng.IntN(10)))))
 		}
 		s.order = [][]field.Component[Item]{{rank}, {code}}[rng.IntN(2)]
 	case 14:
 		// A disjunction whose branches all say that the items are ready.
-		s.conds = []cond.Cond[Item]{cond.Or[Item](
-			cond.And[Item](ready.Eq(true), rank.Eq(rng.IntN(10))),
-			cond.And[Item](ready.Eq(true), score.Lt(rng.IntN(5))),
+		s.conds = []cond.Cond[Item]{cond.Or(
+			cond.And(ready.Eq(true), rank.Eq(rng.IntN(10))),
+			cond.And(ready.Eq(true), score.Lt(rng.IntN(5))),
 			ready.Eq(true))}
 		s.order = [][]field.Component[Item]{{rank}, {rank.Desc()}}[rng.IntN(2)]
 	case 0:

@@ -47,12 +47,12 @@ func TestLookupNeedsAValueOfTheFieldsThatRecordsMayLack(t *testing.T) {
 		}{
 			"the sensor alone":               {[]cond.Cond[reading]{sensor.Eq("a")}, true},
 			"nothing":                        {nil, true},
-			"a negation of the value":        {[]cond.Cond[reading]{sensor.Eq("a"), cond.Not[reading](value.Eq(1))}, true},
-			"a disjunction on the value":     {[]cond.Cond[reading]{cond.Or[reading](value.Eq(1), value.Eq(2))}, true},
+			"a negation of the value":        {[]cond.Cond[reading]{sensor.Eq("a"), cond.Not(value.Eq(1))}, true},
+			"a disjunction on the value":     {[]cond.Cond[reading]{cond.Or(value.Eq(1), value.Eq(2))}, true},
 			"the value":                      {[]cond.Cond[reading]{value.Eq(1)}, false},
 			"a range of the value":           {[]cond.Cond[reading]{value.Gte(0)}, false},
 			"the values":                     {[]cond.Cond[reading]{value.In(1, 2)}, false},
-			"the value inside a conjunction": {[]cond.Cond[reading]{cond.And[reading](sensor.Eq("a"), value.Eq(1))}, false},
+			"the value inside a conjunction": {[]cond.Cond[reading]{cond.And(sensor.Eq("a"), value.Eq(1))}, false},
 			"no values is no value":          {[]cond.Cond[reading]{value.In()}, true},
 		} {
 			t.Run(name, func(t *testing.T) {

@@ -63,16 +63,16 @@ func TestImplication(t *testing.T) {
 		// The same path with another encoding: the encoded values cannot be compared.
 		{"a value of another encoding", conds(fn32.Eq(5)), fn.Eq(5), false},
 		{"a range of another encoding", conds(fn32.Gte(5)), fn.Gte(3), false},
-		{"a negation of another encoding", conds(cond.Not[rec](fn32.Eq(5))), cond.Not[rec](fn.Eq(5)), false},
+		{"a negation of another encoding", conds(cond.Not(fn32.Eq(5))), cond.Not(fn.Eq(5)), false},
 
 		// Negations, by the contrapositive.
-		{"a negation is itself", conds(cond.Not[rec](fn.Eq(5))), cond.Not[rec](fn.Eq(5)), true},
-		{"not a wider range is not a narrower one", conds(cond.Not[rec](fn.Gte(3))), cond.Not[rec](fn.Gte(5)), true},
-		{"not a narrower range is not a wider one", conds(cond.Not[rec](fn.Gte(5))), cond.Not[rec](fn.Gte(3)), false},
-		{"not values is not one of them", conds(cond.Not[rec](fn.In(4, 5))), cond.Not[rec](fn.Eq(5)), true},
-		{"not a value is not values", conds(cond.Not[rec](fn.Eq(5))), cond.Not[rec](fn.In(4, 5)), false},
+		{"a negation is itself", conds(cond.Not(fn.Eq(5))), cond.Not(fn.Eq(5)), true},
+		{"not a wider range is not a narrower one", conds(cond.Not(fn.Gte(3))), cond.Not(fn.Gte(5)), true},
+		{"not a narrower range is not a wider one", conds(cond.Not(fn.Gte(5))), cond.Not(fn.Gte(3)), false},
+		{"not values is not one of them", conds(cond.Not(fn.In(4, 5))), cond.Not(fn.Eq(5)), true},
+		{"not a value is not values", conds(cond.Not(fn.Eq(5))), cond.Not(fn.In(4, 5)), false},
 		{"not a function is itself", conds(cond.Not(even)), cond.Not(even), true},
-		{"a negation is not what it negates", conds(cond.Not[rec](fn.Eq(5))), fn.Eq(5), false},
+		{"a negation is not what it negates", conds(cond.Not(fn.Eq(5))), fn.Eq(5), false},
 
 		// Values and ranges.
 		{"a value is in a range", conds(fn.Eq(5)), fn.Gte(5), true},
@@ -121,38 +121,38 @@ func TestImplication(t *testing.T) {
 		{"several values: each condition is its own", conds(ftags.Eq("a"), ftags.Eq("b")), ftags.Eq("b"), true},
 
 		// Conjunctions of the index.
-		{"every part is implied", conds(fn.Eq(5), fs.Eq("a")), cond.And[rec](fn.Gte(3), fs.Eq("a")), true},
-		{"a part that is not implied", conds(fn.Eq(5)), cond.And[rec](fn.Gte(3), fs.Eq("a")), false},
-		{"parts that are implied by one condition each", conds(cond.And[rec](fn.Eq(5), fs.Eq("a"))),
-			cond.And[rec](fn.Gte(3), fs.Eq("a")), true},
-		{"ranges of the index are one", conds(fn.Between(4, 5)), cond.And[rec](fn.Gte(3), fn.Lte(6)), true},
-		{"ranges of the index are one, not a wider one", conds(fn.Between(4, 7)), cond.And[rec](fn.Gte(3), fn.Lte(6)), false},
-		{"values and ranges of the index", conds(fn.Eq(5)), cond.And[rec](fn.In(4, 5, 6), fn.Gte(5)), true},
+		{"every part is implied", conds(fn.Eq(5), fs.Eq("a")), cond.And(fn.Gte(3), fs.Eq("a")), true},
+		{"a part that is not implied", conds(fn.Eq(5)), cond.And(fn.Gte(3), fs.Eq("a")), false},
+		{"parts that are implied by one condition each", conds(cond.And(fn.Eq(5), fs.Eq("a"))),
+			cond.And(fn.Gte(3), fs.Eq("a")), true},
+		{"ranges of the index are one", conds(fn.Between(4, 5)), cond.And(fn.Gte(3), fn.Lte(6)), true},
+		{"ranges of the index are one, not a wider one", conds(fn.Between(4, 7)), cond.And(fn.Gte(3), fn.Lte(6)), false},
+		{"values and ranges of the index", conds(fn.Eq(5)), cond.And(fn.In(4, 5, 6), fn.Gte(5)), true},
 		{"a condition that is true", nil, isTrue, true},
 		{"a condition that is true, whatever the conditions", conds(fn.Eq(5)), isTrue, true},
-		{"a part that is true", conds(fn.Eq(5)), cond.And[rec](fn.Eq(5), isTrue), true},
+		{"a part that is true", conds(fn.Eq(5)), cond.And(fn.Eq(5), isTrue), true},
 		{"a condition that is false", conds(fn.Eq(5)), isFalse, false},
-		{"a condition that nothing satisfies", conds(fn.Eq(5)), cond.And[rec](fn.Eq(5), fn.Eq(6)), false},
+		{"a condition that nothing satisfies", conds(fn.Eq(5)), cond.And(fn.Eq(5), fn.Eq(6)), false},
 		{"conditions that are true or false whatever the record", conds(fn.Eq(5), isTrue), fn.Eq(5), true},
 
 		// Disjunctions of the index.
-		{"a branch is implied", conds(fn.Eq(2)), cond.Or[rec](fn.Eq(1), fn.Eq(2)), true},
-		{"no branch is implied", conds(fn.Eq(3)), cond.Or[rec](fn.Eq(1), fn.Eq(2)), false},
-		{"values that are among the branches are not a branch", conds(fn.In(1, 2)), cond.Or[rec](fn.Eq(1), fn.Eq(2)), false},
-		{"a branch of other fields", conds(fs.Eq("a")), cond.Or[rec](fn.Eq(1), fs.Eq("a")), true},
-		{"a branch that is a conjunction", conds(fn.Eq(1), fs.Eq("a")), cond.Or[rec](cond.And[rec](fn.Eq(1), fs.Eq("a")), fm.Eq(3)), true},
-		{"a branch that is a conjunction, partly", conds(fn.Eq(1)), cond.Or[rec](cond.And[rec](fn.Eq(1), fs.Eq("a")), fm.Eq(3)), false},
-		{"a disjunction and a part", conds(fs.Eq("a")), cond.And[rec](cond.Or[rec](fn.Eq(1), fs.Eq("a")), fs.Gte("a")), true},
+		{"a branch is implied", conds(fn.Eq(2)), cond.Or(fn.Eq(1), fn.Eq(2)), true},
+		{"no branch is implied", conds(fn.Eq(3)), cond.Or(fn.Eq(1), fn.Eq(2)), false},
+		{"values that are among the branches are not a branch", conds(fn.In(1, 2)), cond.Or(fn.Eq(1), fn.Eq(2)), false},
+		{"a branch of other fields", conds(fs.Eq("a")), cond.Or(fn.Eq(1), fs.Eq("a")), true},
+		{"a branch that is a conjunction", conds(fn.Eq(1), fs.Eq("a")), cond.Or(cond.And(fn.Eq(1), fs.Eq("a")), fm.Eq(3)), true},
+		{"a branch that is a conjunction, partly", conds(fn.Eq(1)), cond.Or(cond.And(fn.Eq(1), fs.Eq("a")), fm.Eq(3)), false},
+		{"a disjunction and a part", conds(fs.Eq("a")), cond.And(cond.Or(fn.Eq(1), fs.Eq("a")), fs.Gte("a")), true},
 
 		// Disjunctions of the conditions.
-		{"every branch implies it", conds(cond.Or[rec](fn.Eq(1), fn.Eq(2))), fn.In(1, 2, 3), true},
-		{"a branch does not imply it", conds(cond.Or[rec](fn.Eq(1), fn.Eq(4))), fn.In(1, 2, 3), false},
-		{"every branch says the same", conds(cond.Or[rec](cond.And[rec](fflag.Eq(true), fn.Eq(1)), cond.And[rec](fflag.Eq(true), fm.Eq(2)))),
+		{"every branch implies it", conds(cond.Or(fn.Eq(1), fn.Eq(2))), fn.In(1, 2, 3), true},
+		{"a branch does not imply it", conds(cond.Or(fn.Eq(1), fn.Eq(4))), fn.In(1, 2, 3), false},
+		{"every branch says the same", conds(cond.Or(cond.And(fflag.Eq(true), fn.Eq(1)), cond.And(fflag.Eq(true), fm.Eq(2)))),
 			fflag.Eq(true), true},
-		{"a branch says another", conds(cond.Or[rec](cond.And[rec](fflag.Eq(true), fn.Eq(1)), fm.Eq(2))), fflag.Eq(true), false},
-		{"a branch implies it with the others", conds(fflag.Eq(true), cond.Or[rec](fn.Eq(1), fn.Eq(2))), cond.And[rec](fflag.Eq(true), fn.Lt(3)), true},
-		{"a disjunction in a disjunction", conds(cond.Or[rec](cond.Or[rec](fn.Eq(1), fn.Eq(2)), fn.Eq(3))), fn.Between(1, 3), true},
-		{"a disjunction does not imply a branch", conds(cond.Or[rec](fn.Eq(1), fn.Eq(2))), fn.Eq(1), false},
+		{"a branch says another", conds(cond.Or(cond.And(fflag.Eq(true), fn.Eq(1)), fm.Eq(2))), fflag.Eq(true), false},
+		{"a branch implies it with the others", conds(fflag.Eq(true), cond.Or(fn.Eq(1), fn.Eq(2))), cond.And(fflag.Eq(true), fn.Lt(3)), true},
+		{"a disjunction in a disjunction", conds(cond.Or(cond.Or(fn.Eq(1), fn.Eq(2)), fn.Eq(3))), fn.Between(1, 3), true},
+		{"a disjunction does not imply a branch", conds(cond.Or(fn.Eq(1), fn.Eq(2))), fn.Eq(1), false},
 		{"nothing for no branch", conds(isFalse), fn.Eq(1), false},
 
 		// Anything else is implied by the identical condition.
@@ -160,12 +160,12 @@ func TestImplication(t *testing.T) {
 		{"a function is not another", conds(even), odd, false},
 		{"a function is not a comparison", conds(even), fn.Eq(2), false},
 		{"a comparison is not a function", conds(fn.Eq(2)), even, false},
-		{"a function among conditions", conds(fn.Eq(2), even, fs.Eq("a")), cond.And[rec](even, fs.Eq("a")), true},
-		{"a negation is itself", conds(cond.Not[rec](fflag.Eq(true))), cond.Not[rec](fflag.Eq(true)), true},
-		{"a negation is not its opposite", conds(fflag.Eq(false)), cond.Not[rec](fflag.Eq(true)), false},
-		{"a negation is not the opposite", conds(cond.Not[rec](fflag.Eq(true))), fflag.Eq(false), false},
-		{"a negation is not another", conds(cond.Not[rec](fn.Eq(1))), cond.Not[rec](fn.Eq(2)), false},
-		{"a negation in a disjunction", conds(cond.Not[rec](fflag.Eq(true))), cond.Or[rec](fn.Eq(1), cond.Not[rec](fflag.Eq(true))), true},
+		{"a function among conditions", conds(fn.Eq(2), even, fs.Eq("a")), cond.And(even, fs.Eq("a")), true},
+		{"a negation is itself", conds(cond.Not(fflag.Eq(true))), cond.Not(fflag.Eq(true)), true},
+		{"a negation is not its opposite", conds(fflag.Eq(false)), cond.Not(fflag.Eq(true)), false},
+		{"a negation is not the opposite", conds(cond.Not(fflag.Eq(true))), fflag.Eq(false), false},
+		{"a negation is not another", conds(cond.Not(fn.Eq(1))), cond.Not(fn.Eq(2)), false},
+		{"a negation in a disjunction", conds(cond.Not(fflag.Eq(true))), cond.Or(fn.Eq(1), cond.Not(fflag.Eq(true))), true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			// The planner has the conditions of the query normalised.
@@ -178,11 +178,11 @@ func TestImplication(t *testing.T) {
 // TestImplicationOnTheNormalisedConditions checks that the conditions of a query are used as the
 // planner has them, normalised.
 func TestImplicationOnTheNormalisedConditions(t *testing.T) {
-	queries, empty := normalise(conds(fn.Gte(3), fn.Lte(7), fs.Eq("a"), cond.And[rec](fm.In(1, 2), fm.Gt(1))))
+	queries, empty := normalise(conds(fn.Gte(3), fn.Lte(7), fs.Eq("a"), cond.And(fm.In(1, 2), fm.Gt(1))))
 	require.False(t, empty)
 
-	require.True(t, implies(queries, cond.And[rec](fn.Between(2, 8), fm.Eq(2))))
-	require.False(t, implies(queries, cond.And[rec](fn.Between(4, 8))))
+	require.True(t, implies(queries, cond.And(fn.Between(2, 8), fm.Eq(2))))
+	require.False(t, implies(queries, cond.And(fn.Between(4, 8))))
 }
 
 // TestImplicationIsSound checks, on random conditions and every record there can be, that the

@@ -288,11 +288,16 @@ func (fs Functions) Add(f Function) Functions {
 // WithFunctions gives the parser functions that its texts can call, besides the ones that there
 // always are. The parser does not see the functions of any other parser. It replaces the
 // functions that an option before it gave.
-func WithFunctions[V any](fs Functions) Option[V] {
-	return func(c *core[V]) {
-		c.functions = fs
-	}
+//
+// It does not depend on the type of the records, so it is a plain value that every parser takes.
+func WithFunctions(fs Functions) FunctionsOption {
+	return FunctionsOption{fs: fs}
 }
+
+// FunctionsOption is the option that WithFunctions returns. It is an Option of any type of records.
+type FunctionsOption struct{ fs Functions }
+
+func (o FunctionsOption) apply(t optionTarget) { t.setFunctions(o.fs) }
 
 // internal returns the function as the evaluator has the ones that there always are.
 func (f Function) internal() *function {

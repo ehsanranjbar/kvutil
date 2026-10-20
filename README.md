@@ -103,7 +103,7 @@ err = db.View(func(tx kv.Tx) error {
     if err != nil {
         return err
     }
-    for name, city := range iterutil.Of[string, *City](it).All(&err) {
+    for name, city := range iterutil.Of(it).All(&err) {
         fmt.Println(name, city.Country, city.Population)
     }
     return err
@@ -186,18 +186,17 @@ converted for the next version of a program to read them, the version is raised 
 says how, as a part of that program. The type that the records had stays in the code next to it.
 
 ```go
-users := typed.New[int64, User]("users").WithVersion(2)
-
 // UserV1 is a user as version 1 wrote it.
 type UserV1 struct {
     Name string
 }
 
-migrate.Records(users, 1, func(id int64, old *UserV1) (*User, error) {
-    var u User
-    fmt.Sscan(old.Name, &u.First, &u.Last)
-    return &u, nil // nil deletes the record
-})
+users := typed.New[int64, User]("users").WithVersion(2).
+    MigrateFrom(1, func(id int64, old *UserV1) (*User, error) {
+        var u User
+        fmt.Sscan(old.Name, &u.First, &u.Last)
+        return &u, nil // nil deletes the record
+    })
 
 report, err := users.Migrate(ctx, db) // when the program starts, before it uses the database
 fmt.Println(report)                    // migrated typed "users" from version 1 to 2
@@ -342,7 +341,7 @@ false where a condition is expected), and an error of a function fails the evalu
 fns := sql.Functions{}.
     Add(sql.Func1("initial", func(s string) string { return s[:1] }).WithVersion("1")).
     Add(sql.Func2("age", func(year, now int) int { return now - year }))
-p := sql.For(orders, sql.WithFunctions[Order](fns)) // other parsers do not see them
+p := sql.For(orders, sql.WithFunctions(fns)) // other parsers do not see them
 it, err := p.Query(tx, `initial(Customer) = 'a' AND age(Year, 2000) > 30`)
 ```
 

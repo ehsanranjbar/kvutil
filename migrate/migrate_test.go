@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/ehsanranjbar/kvutil"
 	"github.com/ehsanranjbar/kvutil/codec"
 	"github.com/ehsanranjbar/kvutil/internal/testkv"
 	"github.com/ehsanranjbar/kvutil/iterutil"
@@ -109,8 +108,8 @@ func TestRecords(t *testing.T) {
 		}
 
 		require.NoError(t, db.View(func(tx kv.Tx) error {
-			it := must(pets.Instantiate(tx).Iterator(kvutil.All[int64]()))
-			got := must(iterutil.Of[int64, *Pet](it).Values())
+			it := must(pets.Instantiate(tx).All())
+			got := must(iterutil.Of(it).Values())
 			require.Len(t, got, n-n/10)
 			for _, p := range got {
 				require.NotZero(t, p.id%10)
@@ -162,8 +161,8 @@ func TestRecordsInterrupted(t *testing.T) {
 		}
 		values := func(counters *typed.Store[string, Counter]) (ns []int) {
 			require.NoError(t, db.View(func(tx kv.Tx) error {
-				it := must(counters.Instantiate(tx).Iterator(kvutil.All[string]()))
-				for _, c := range must(iterutil.Of[string, *Counter](it).Values()) {
+				it := must(counters.Instantiate(tx).All())
+				for _, c := range must(iterutil.Of(it).Values()) {
 					ns = append(ns, c.N)
 				}
 				return nil
@@ -289,8 +288,8 @@ func TestCustom(t *testing.T) {
 		require.Equal(t, 1, prepared)
 
 		require.NoError(t, db.View(func(tx kv.Tx) error {
-			it := must(pets.Instantiate(tx).Iterator(kvutil.All[int64]()))
-			got := must(iterutil.Of[int64, *Pet](it).Values())
+			it := must(pets.Instantiate(tx).All())
+			got := must(iterutil.Of(it).Values())
 			require.Len(t, got, 20)
 			for _, p := range got {
 				require.Equal(t, Pet{id: p.id, Name: "pet", Species: "dog", Legs: 40}, *p)

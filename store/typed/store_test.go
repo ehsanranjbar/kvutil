@@ -202,7 +202,7 @@ func TestIterator(t *testing.T) {
 				require.Equal(t, reversed, scan(t, ins, test.r, true), test.name+" reversed")
 			}
 
-			it, err := ins.Iterator(kvutil.All[int64]())
+			it, err := ins.All()
 			require.NoError(t, err)
 			defer it.Close()
 

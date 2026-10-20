@@ -73,7 +73,7 @@ built agg "pets/legs"`, report.String())
 			require.NoError(t, db.View(func(tx kv.Tx) error {
 				count := func(it *index.Iterator[int64, Pet], err error) int {
 					require.NoError(t, err)
-					return len(must(iterutil.Of[int64, *Pet](it).Keys()))
+					return len(must(iterutil.Of(it).Keys()))
 				}
 				require.Equal(t, rex, count(byName.Instantiate(tx).Match("REX")))
 				require.Equal(t, tom, count(byName.Instantiate(tx).Match("TOM")))

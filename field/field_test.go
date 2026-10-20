@@ -333,7 +333,7 @@ func TestComputed(t *testing.T) {
 		require.ErrorIs(t, err, errNegative, c.String())
 		require.False(t, ok)
 	}
-	ok, err = cond.Not[Book](age.Eq(1)).Match(failing)
+	ok, err = cond.Not(age.Eq(1)).Match(failing)
 	require.ErrorIs(t, err, errNegative)
 	require.False(t, ok)
 	c2, err := age.EqAny(35)

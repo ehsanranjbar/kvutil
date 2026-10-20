@@ -330,9 +330,9 @@ func TestLookupFindsWhatAScanFinds(t *testing.T) {
 		func() cond.Cond[pet] { return comparison(random[string]{nameField, nameOf, rng}) },
 		func() cond.Cond[pet] { return comparison(random[string]{tagsField, tagOf, rng}) },
 		// Two sides of a range, given apart.
-		func() cond.Cond[pet] { return cond.And[pet](ageField.Gte(ageOf()), ageField.Lt(ageOf())) },
-		func() cond.Cond[pet] { return cond.Or[pet](ownerField.Eq(owner()), nameField.Eq(nameOf())) },
-		func() cond.Cond[pet] { return cond.Not[pet](tagsField.Eq(tagOf())) },
+		func() cond.Cond[pet] { return cond.And(ageField.Gte(ageOf()), ageField.Lt(ageOf())) },
+		func() cond.Cond[pet] { return cond.Or(ownerField.Eq(owner()), nameField.Eq(nameOf())) },
+		func() cond.Cond[pet] { return cond.Not(tagsField.Eq(tagOf())) },
 		func() cond.Cond[pet] {
 			return cond.Func("even_age", func(p *pet) bool { return p.Age%2 == 0 })
 		},
@@ -445,7 +445,7 @@ func TestVersions(t *testing.T) {
 	// The version of a field is a part of the descriptor, named by the field.
 	versioned := index.On(store, "versioned", computed.WithVersion("3"))
 	require.Equal(t, "Shouted@3", versioned.Descriptor().Version)
-	both := index.Composite(store, "both", field.List[pet](nameField, computed.WithVersion("4"), ageField.WithVersion("5")))
+	both := index.Composite(store, "both", field.List(nameField, computed.WithVersion("4"), ageField.WithVersion("5")))
 	require.Equal(t, "Shouted@4,Age@5", both.Descriptor().Version)
 	require.Empty(t, index.On(store, "unversioned", computed).Descriptor().Version)
 

@@ -213,9 +213,9 @@ func (q *Query[K, V]) planOnce() (*plan[K, V], error) {
 func (q *Query[K, V]) Run(tx kv.Tx) iterutil.AdvancedIterator[K, *V] {
 	pl, err := q.planOnce()
 	if err != nil {
-		return iterutil.Of[K, *V](&failed[K, V]{err: err})
+		return iterutil.Of(&failed[K, V]{err: err})
 	}
-	return iterutil.Of[K, *V](pl.open(tx, q.store))
+	return iterutil.Of(pl.open(tx, q.store))
 }
 
 // Explain says how Run would run the query, as a tree of the operators, from the last one to

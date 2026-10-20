@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"slices"
 
+	"github.com/RoaringBitmap/roaring/v2/roaring64"
 	"github.com/ehsanranjbar/kvutil/cond"
 	"github.com/ehsanranjbar/kvutil/kv"
 	extstore "github.com/ehsanranjbar/kvutil/store/ext"
@@ -137,6 +138,12 @@ type Iterator[K, V any] struct {
 	filter []cond.Cond[V]      // the conditions that the records are checked against
 	record *V                  // the record of the current entry, once it is read
 	err    error
+}
+
+// Bitmap reads the primary keys of the records that the iterator has left into a bitmap, and
+// closes it; see the function Bitmap. No record is read.
+func (it *Iterator[K, V]) Bitmap() (*roaring64.Bitmap, bool, error) {
+	return Bitmap(it)
 }
 
 // settle moves to the first entry, from where the iterator is, that belongs to a record that

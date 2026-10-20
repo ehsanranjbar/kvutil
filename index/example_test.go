@@ -169,7 +169,7 @@ func Example() {
 		if err != nil {
 			return err
 		}
-		recent, _, err := index.Bitmap[int64, Book](must(byYear.Instantiate(tx).Lookup(Year.Gte(1970))))
+		recent, _, err := index.Bitmap(must(byYear.Instantiate(tx).Lookup(Year.Gte(1970))))
 		if err != nil {
 			return err
 		}

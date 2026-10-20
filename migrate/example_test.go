@@ -4,11 +4,9 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/ehsanranjbar/kvutil"
 	"github.com/ehsanranjbar/kvutil/iterutil"
 	"github.com/ehsanranjbar/kvutil/kv"
 	"github.com/ehsanranjbar/kvutil/kv/memkv"
-	"github.com/ehsanranjbar/kvutil/migrate"
 	"github.com/ehsanranjbar/kvutil/store/typed"
 )
 
@@ -49,12 +47,12 @@ func Example() {
 
 	// The store is of the second version now, and the migration from the first one is
 	// defined with it.
-	users := typed.New[int64, User]("users").WithVersion(2)
-	migrate.Records(users, 1, func(id int64, old *UserV1) (*User, error) {
-		var u User
-		fmt.Sscan(old.Name, &u.First, &u.Last)
-		return &u, nil
-	})
+	users := typed.New[int64, User]("users").WithVersion(2).
+		MigrateFrom(1, func(id int64, old *UserV1) (*User, error) {
+			var u User
+			fmt.Sscan(old.Name, &u.First, &u.Last)
+			return &u, nil
+		})
 
 	// When the program starts, before it uses the database.
 	report, err := users.Migrate(context.Background(), db)
@@ -64,11 +62,11 @@ func Example() {
 	fmt.Println(report)
 
 	err = db.View(func(tx kv.Tx) error {
-		it, err := users.Instantiate(tx).Iterator(kvutil.All[int64]())
+		it, err := users.Instantiate(tx).All()
 		if err != nil {
 			return err
 		}
-		for id, u := range iterutil.Of[int64, *User](it).All(&err) {
+		for id, u := range iterutil.Of(it).All(&err) {
 			fmt.Println(id, u.Last+",", u.First)
 		}
 		return err

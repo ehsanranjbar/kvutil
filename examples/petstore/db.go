@@ -9,7 +9,6 @@ import (
 	"time"
 
 	badger "github.com/dgraph-io/badger/v4"
-	"github.com/ehsanranjbar/kvutil"
 	"github.com/ehsanranjbar/kvutil/agg"
 	"github.com/ehsanranjbar/kvutil/examples/petstore/types"
 	"github.com/ehsanranjbar/kvutil/field"
@@ -190,13 +189,13 @@ type CategoryCount struct {
 
 // CountPetsByCategory returns the number of the pets of every category.
 func (db *DB) CountPetsByCategory(tx kv.Tx) ([]CategoryCount, error) {
-	it, err := db.categories.Instantiate(tx).Iterator(kvutil.All[int64]())
+	it, err := db.categories.Instantiate(tx).All()
 	if err != nil {
 		return nil, err
 	}
 
 	counts := db.perCategory.Instantiate(tx)
-	return iterutil.Of[int64, *types.Category](it).
+	return iterutil.Of(it).
 		Map(func(id int64, cat *types.Category) (CategoryCount, error) {
 			n, _, err := counts.Get(id)
 			return CategoryCount{Id: id, Name: cat.Name, Pets: n}, err
@@ -239,7 +238,7 @@ func (db *DB) ListPets(tx kv.Tx, status *types.Status, limit, offset int) ([]*ty
 	if status != nil {
 		pets, err = db.byStatus.Instantiate(tx).Match(*status)
 	} else {
-		pets, err = db.pets.Instantiate(tx).Iterator(kvutil.All[int64]())
+		pets, err = db.pets.Instantiate(tx).All()
 	}
 	if err != nil {
 		return nil, err

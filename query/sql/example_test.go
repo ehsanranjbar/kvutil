@@ -152,7 +152,7 @@ func Example_functions() {
 			}
 			return (year-1)/100 + 1, nil
 		}))
-	parser := sql.For(novels, sql.WithFunctions[Novel](functions))
+	parser := sql.For(novels, sql.WithFunctions(functions))
 
 	db := memkv.New()
 	if err := novels.Check(db); err != nil {

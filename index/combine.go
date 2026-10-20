@@ -192,7 +192,7 @@ func (c Combiner) collect[K, V any](sources []Keyed[K, V]) ([]*keySet, error) {
 			set.add(raw)
 		}
 		if failure == nil {
-			failure = iterutil.Of[K, *V](src).Err()
+			failure = iterutil.Of(src).Err()
 		}
 		if err := src.Close(); failure == nil {
 			failure = err
@@ -227,7 +227,7 @@ func (c *combined[K, V]) settle() {
 	for !c.settled && c.err == nil && c.i < len(c.sources) {
 		src := c.sources[c.i]
 		if !src.Valid() {
-			c.err = iterutil.Of[K, *V](src).Err()
+			c.err = iterutil.Of(src).Err()
 			c.i++
 			continue
 		}

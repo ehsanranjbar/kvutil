@@ -82,7 +82,7 @@ func TestExprAndWhereAreDefinitionsThatPanic(t *testing.T) {
 	require.Panics(t, func() { sql.Expr[Book, string](`lower(Nope)`) })
 	require.Panics(t, func() { sql.Expr[Book, string](`nope(Author)`) })
 	require.Panics(t, func() { sql.Expr[Book, string](`shout(Author)`) }, "functions are given")
-	require.NotPanics(t, func() { sql.Expr[Book, string](`shout(Author)`, sql.WithFunctions[Book](fns)) })
+	require.NotPanics(t, func() { sql.Expr[Book, string](`shout(Author)`, sql.WithFunctions(fns)) })
 	require.Panics(t, func() { sql.Where[Book](`Nope = 1`) })
 	require.Panics(t, func() { sql.Where[Book](`nope(Year) = 1`) })
 	require.Panics(t, func() { sql.Where[Book](`Year = 'x'`) })
@@ -160,7 +160,7 @@ func TestExprValues(t *testing.T) {
 	require.Equal(t, []int{1965}, sql.Expr[Book, int](`Year * 1.0`).Values(dune), "a whole number is an int")
 
 	// A comparison of the field is one of an index.
-	require.Equal(t, lower.Eq("herbert").Values, mustParse(t, `lower(Author) = 'herbert'`, sql.WithFields[Book](lower)).(*cond.Comparison[Book]).Values)
+	require.Equal(t, lower.Eq("herbert").Values, mustParse(t, `lower(Author) = 'herbert'`, sql.WithFields(lower)).(*cond.Comparison[Book]).Values)
 }
 
 func mustParse(t *testing.T, text string, opts ...sql.Option[Book]) cond.Cond[Book] {
@@ -205,7 +205,7 @@ func TestExprErrorsAreNotDropped(t *testing.T) {
 		}
 		return args[0], nil
 	}))
-	f := sql.Expr[Book, int](`boom(Year)`, sql.WithFunctions[Book](boom))
+	f := sql.Expr[Book, int](`boom(Year)`, sql.WithFunctions(boom))
 	_, err = f.Keys(&Book{Year: -1})
 	require.ErrorIs(t, err, sql.ErrEvaluation)
 	require.ErrorIs(t, err, errBoom)
@@ -240,7 +240,7 @@ func TestExprErrorsAreNotDropped(t *testing.T) {
 	// A condition of an index that fails.
 	testkv.Each(t, func(t *testing.T, db kv.DB) {
 		books := extstore.New[int64, Book]("books")
-		index.On(books, "by_year", year, sql.Where[Book](`boom(Year) > 0`, sql.WithFunctions[Book](boom)))
+		index.On(books, "by_year", year, sql.Where[Book](`boom(Year) > 0`, sql.WithFunctions(boom)))
 		require.NoError(t, books.Check(db))
 
 		require.NoError(t, db.Update(func(tx kv.Tx) error { return books.Instantiate(tx).Set(1, &Book{Year: 5}) }))
@@ -370,7 +370,7 @@ func TestExpressionIndexes(t *testing.T) {
 			requireQuery(t, db, lib, p, where, c)
 		}
 		// A field that is given to the parser is the same for a text.
-		with := sql.For(lib.books, sql.WithFields[Book](lowerAuthor))
+		with := sql.For(lib.books, sql.WithFields(lowerAuthor))
 		c, err := with.Parse(`lower(Author) = 'herbert'`)
 		require.NoError(t, err)
 		require.IsType(t, &cond.Comparison[Book]{}, c)
@@ -545,7 +545,7 @@ func (p program) store(indexes bool) *extstore.Store[int64, Book] {
 	if p.loudVersion != "" {
 		loud = loud.WithVersion(p.loudVersion)
 	}
-	opts := []sql.Option[Book]{sql.WithFunctions[Book](sql.Functions{}.Add(shout).Add(loud).Add(other))}
+	opts := []sql.Option[Book]{sql.WithFunctions(sql.Functions{}.Add(shout).Add(loud).Add(other))}
 
 	expr, where := p.expr, p.where
 	if expr == "" {

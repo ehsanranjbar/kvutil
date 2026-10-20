@@ -76,6 +76,17 @@ func (s *Store[K, V]) WithVersion(v uint64) *Store[K, V] {
 	return s
 }
 
+// MigrateFrom adds the migration of the records from a version to the next one: the function
+// is given every record in the type it had and returns it as it is to be; see migrate.Records.
+func (s *Store[K, V]) MigrateFrom[Old any](
+	from uint64,
+	convert func(key K, old *Old) (*V, error),
+	opts ...migrate.Option,
+) *Store[K, V] {
+	migrate.Records(s, from, convert, opts...)
+	return s
+}
+
 // RetireExtension says that the data of an extension that is not added to the store any more
 // is to be deleted from the database; see migrate.Run. The name is the one that the
 // extension was added with. It is for an extension that keeps data that cannot be built again:
@@ -246,6 +257,12 @@ func (s *Instance[K, V]) Has(key K) (bool, error) {
 // Iterator iterates over the records whose keys are in the range, in ascending order.
 func (s *Instance[K, V]) Iterator(r kvutil.Range[K]) (*typed.Iterator[K, V], error) {
 	return s.data.Iterator(r)
+}
+
+// All iterates over every record, in ascending order of the keys; it is Iterator of every key.
+// The iterator must be closed.
+func (s *Instance[K, V]) All() (*typed.Iterator[K, V], error) {
+	return s.data.All()
 }
 
 // ReverseIterator iterates over the records whose keys are in the range, in descending order.

@@ -98,6 +98,17 @@ func (s *Store[K, V]) WithVersion(v uint64) *Store[K, V] {
 	return s
 }
 
+// MigrateFrom adds the migration of the records from a version to the next one: the function
+// is given every record in the type it had and returns it as it is to be; see migrate.Records.
+func (s *Store[K, V]) MigrateFrom[Old any](
+	from uint64,
+	convert func(key K, old *Old) (*V, error),
+	opts ...migrate.Option,
+) *Store[K, V] {
+	migrate.Records(s, from, convert, opts...)
+	return s
+}
+
 // Migrate brings the database to what the store defines; see migrate.Run.
 func (s *Store[K, V]) Migrate(ctx context.Context, db kv.DB) (*migrate.Report, error) {
 	return migrate.Run(ctx, db, s)
@@ -226,6 +237,12 @@ func (s *Instance[K, V]) Delete(key K) error {
 // The zero range has every record in it. The iterator must be closed.
 func (s *Instance[K, V]) Iterator(r kvutil.Range[K]) (*Iterator[K, V], error) {
 	return s.iterator(r, false)
+}
+
+// All iterates over every record, in ascending order of the keys; it is Iterator of every key.
+// The iterator must be closed.
+func (s *Instance[K, V]) All() (*Iterator[K, V], error) {
+	return s.Iterator(kvutil.All[K]())
 }
 
 // ReverseIterator iterates over the records whose keys are in the range, in descending order.

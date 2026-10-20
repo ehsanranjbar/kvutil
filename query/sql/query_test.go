@@ -201,7 +201,7 @@ func requireQuery(t *testing.T, db kv.DB, lib *library, p *sql.Parser[int64, Boo
 		require.NoError(t, err, where)
 		defer it.Close()
 
-		keys, err := iterutil.Of[int64, *Book](it).Keys()
+		keys, err := iterutil.Of(it).Keys()
 		require.NoError(t, err, where)
 		// There is no order to the books of a query that has none.
 		slices.Sort(keys)

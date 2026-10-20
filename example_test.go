@@ -99,7 +99,7 @@ func Example_typedStore() {
 		if err != nil {
 			return err
 		}
-		for name, city := range iterutil.Of[string, *City](it).All(&err) {
+		for name, city := range iterutil.Of(it).All(&err) {
 			fmt.Println(name, city.Country, city.Population)
 		}
 		return err
@@ -166,7 +166,7 @@ func Example_records() {
 		if err != nil {
 			return err
 		}
-		ids, err := iterutil.Of[int64, *Order](it).Keys()
+		ids, err := iterutil.Of(it).Keys()
 		if err != nil {
 			return err
 		}

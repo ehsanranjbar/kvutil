@@ -136,8 +136,8 @@ func TestTranslation(t *testing.T) {
 		`Author = 'Herbert'`:  author.Eq("Herbert"),
 		`Author == 'Herbert'`: author.Eq("Herbert"),
 		`'Herbert' = Author`:  author.Eq("Herbert"),
-		`Author != 'Herbert'`: cond.Not[Book](author.Eq("Herbert")),
-		`Author <> 'Herbert'`: cond.Not[Book](author.Eq("Herbert")),
+		`Author != 'Herbert'`: cond.Not(author.Eq("Herbert")),
+		`Author <> 'Herbert'`: cond.Not(author.Eq("Herbert")),
 		`Author = ''`:         author.Eq(""),
 		`Author = 'O''Hara'`:  author.Eq("O'Hara"),
 		`Year > 1965`:         year.Gt(1965),
@@ -173,36 +173,36 @@ func TestTranslation(t *testing.T) {
 		`InPrint = TRUE`:                inPrint.Eq(true),
 		`InPrint = true`:                inPrint.Eq(true),
 		`InPrint == FALSE`:              inPrint.Eq(false),
-		`InPrint != TRUE`:               cond.Not[Book](inPrint.Eq(true)),
+		`InPrint != TRUE`:               cond.Not(inPrint.Eq(true)),
 		`InPrint = 'false'`:             inPrint.Eq(false),
 
 		// A field that is true or false is a condition by itself.
 		`InPrint`:     inPrint.Eq(true),
 		`(InPrint)`:   inPrint.Eq(true),
-		`NOT InPrint`: cond.Not[Book](inPrint.Eq(true)),
+		`NOT InPrint`: cond.Not(inPrint.Eq(true)),
 		`TRUE`:        cond.And[Book](),
 		`FALSE`:       cond.Or[Book](),
 
 		// IS with a value is = with it.
 		`Year IS 1965`:     year.Eq(1965),
-		`Year IS NOT 1965`: cond.Not[Book](year.Eq(1965)),
+		`Year IS NOT 1965`: cond.Not(year.Eq(1965)),
 
 		`Year IN (1965, 1970)`:            year.In(1965, 1970),
 		`Year IN (1965)`:                  year.In(1965),
-		`Year NOT IN (1965, '1970')`:      cond.Not[Book](year.In(1965, 1970)),
+		`Year NOT IN (1965, '1970')`:      cond.Not(year.In(1965, 1970)),
 		`Author IN ('Herbert', 'Austen')`: author.In("Herbert", "Austen"),
 		`Year IN ()`:                      cond.Or[Book](),
 		`Year NOT IN ()`:                  cond.And[Book](),
 		`Year BETWEEN 1960 AND 1970`:      year.Between(1960, 1970),
-		`Year NOT BETWEEN 1960 AND 1970`:  cond.Not[Book](year.Between(1960, 1970)),
+		`Year NOT BETWEEN 1960 AND 1970`:  cond.Not(year.Between(1960, 1970)),
 		`Price BETWEEN -1 AND 9.5`:        price.Between(-1, 9.5),
 
 		// A field of several values is compared by each of them.
 		`Tags = 'scifi'`:           tags.Eq("scifi"),
 		`'scifi' IN Tags`:          tags.Eq("scifi"),
-		`'scifi' NOT IN Tags`:      cond.Not[Book](tags.Eq("scifi")),
+		`'scifi' NOT IN Tags`:      cond.Not(tags.Eq("scifi")),
 		`Tags IN ('scifi', 'new')`: tags.In("scifi", "new"),
-		`Tags != 'scifi'`:          cond.Not[Book](tags.Eq("scifi")),
+		`Tags != 'scifi'`:          cond.Not(tags.Eq("scifi")),
 		`Tags BETWEEN 'a' AND 'd'`: tags.Between("a", "d"),
 
 		// The fields of fields, written in every way.
@@ -217,24 +217,24 @@ func TestTranslation(t *testing.T) {
 		`Publisher.City < 'M'`:          city.Lt("M"),
 		`'London' = "Publisher"."City"`: city.Eq("London"),
 
-		`Author = 'Herbert' AND Year >= 1970`:     cond.And[Book](author.Eq("Herbert"), year.Gte(1970)),
-		`Author = 'Herbert' and Year >= 1970`:     cond.And[Book](author.Eq("Herbert"), year.Gte(1970)),
-		`Author = 'Herbert' OR Year >= 1970`:      cond.Or[Book](author.Eq("Herbert"), year.Gte(1970)),
-		`NOT (Author = 'Herbert')`:                cond.Not[Book](author.Eq("Herbert")),
-		`NOT Author = 'Herbert'`:                  cond.Not[Book](author.Eq("Herbert")),
+		`Author = 'Herbert' AND Year >= 1970`:     cond.And(author.Eq("Herbert"), year.Gte(1970)),
+		`Author = 'Herbert' and Year >= 1970`:     cond.And(author.Eq("Herbert"), year.Gte(1970)),
+		`Author = 'Herbert' OR Year >= 1970`:      cond.Or(author.Eq("Herbert"), year.Gte(1970)),
+		`NOT (Author = 'Herbert')`:                cond.Not(author.Eq("Herbert")),
+		`NOT Author = 'Herbert'`:                  cond.Not(author.Eq("Herbert")),
 		`(Author = 'Herbert')`:                    author.Eq("Herbert"),
-		`((Author = 'Herbert') AND (Year > 0))`:   cond.And[Book](author.Eq("Herbert"), year.Gt(0)),
-		`Author = 'a' AND Year = 1 AND Price = 2`: cond.And[Book](author.Eq("a"), year.Eq(1), price.Eq(2)),
-		`Author = 'a' OR Year = 1 OR Price = 2`:   cond.Or[Book](author.Eq("a"), year.Eq(1), price.Eq(2)),
-		`Author = 'a' AND (Year = 1 AND Price = 2)`: cond.And[Book](
+		`((Author = 'Herbert') AND (Year > 0))`:   cond.And(author.Eq("Herbert"), year.Gt(0)),
+		`Author = 'a' AND Year = 1 AND Price = 2`: cond.And(author.Eq("a"), year.Eq(1), price.Eq(2)),
+		`Author = 'a' OR Year = 1 OR Price = 2`:   cond.Or(author.Eq("a"), year.Eq(1), price.Eq(2)),
+		`Author = 'a' AND (Year = 1 AND Price = 2)`: cond.And(
 			author.Eq("a"), year.Eq(1), price.Eq(2)),
 		// AND binds more than OR does.
-		`Author = 'a' OR Year = 1 AND Price = 2`: cond.Or[Book](
-			author.Eq("a"), cond.And[Book](year.Eq(1), price.Eq(2))),
-		`(Author = 'a' OR Year = 1) AND Price = 2`: cond.And[Book](
-			cond.Or[Book](author.Eq("a"), year.Eq(1)), price.Eq(2)),
-		`NOT (Author = 'a' OR NOT InPrint) AND TRUE`: cond.And[Book](
-			cond.Not(cond.Or[Book](author.Eq("a"), cond.Not[Book](inPrint.Eq(true)))), cond.And[Book]()),
+		`Author = 'a' OR Year = 1 AND Price = 2`: cond.Or(
+			author.Eq("a"), cond.And(year.Eq(1), price.Eq(2))),
+		`(Author = 'a' OR Year = 1) AND Price = 2`: cond.And(
+			cond.Or(author.Eq("a"), year.Eq(1)), price.Eq(2)),
+		`NOT (Author = 'a' OR NOT InPrint) AND TRUE`: cond.And(
+			cond.Not(cond.Or(author.Eq("a"), cond.Not(inPrint.Eq(true)))), cond.And[Book]()),
 	} {
 		got, err := sql.ParseWhere[Book](text)
 		require.NoError(t, err, text)

@@ -110,7 +110,7 @@ func TestStoreWithoutExtensions(t *testing.T) {
 			require.NoError(t, err)
 			require.False(t, ok)
 
-			it, err := ins.Iterator(kvutil.All[int64]())
+			it, err := ins.All()
 			require.NoError(t, err)
 			defer it.Close()
 			require.True(t, it.Valid())

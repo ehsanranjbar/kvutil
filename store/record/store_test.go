@@ -130,7 +130,7 @@ func TestStore(t *testing.T) {
 			require.Equal(t, e3, v)
 
 			// Iterator
-			it, err := ins.Iterator(kvutil.All[uuid.UUID]())
+			it, err := ins.All()
 			require.NoError(t, err)
 			ids, err := iterutil.Of(it).Keys()
 			require.NoError(t, err)
@@ -229,7 +229,7 @@ func TestIterators(t *testing.T) {
 			require.Equal(t, []int64{}, forward(kvutil.From[int64](9)))
 
 			// Seeking.
-			it := must(ins.Iterator(kvutil.All[int64]()))
+			it := must(ins.All())
 			defer it.Close()
 			require.NoError(t, it.Seek(3))
 			require.True(t, it.Valid())
@@ -371,7 +371,7 @@ func TestSequenceID(t *testing.T) {
 	require.NoError(t, err)
 
 	err = db.View(func(tx kv.Tx) error {
-		require.Equal(t, []int64{1, 2, 3}, idsOf(t, must(store.Instantiate(tx).Iterator(kvutil.All[int64]()))))
+		require.Equal(t, []int64{1, 2, 3}, idsOf(t, must(store.Instantiate(tx).All())))
 		return nil
 	})
 	require.NoError(t, err)
@@ -405,7 +405,7 @@ func TestAccessors(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, &card{Number: 7, Owner: "bob"}, got)
 
-			it, err := ins.Iterator(kvutil.All[int64]())
+			it, err := ins.All()
 			require.NoError(t, err)
 			defer it.Close()
 			numbers := []int64{}

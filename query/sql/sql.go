@@ -89,7 +89,7 @@
 //	functions := sql.Functions{}.
 //		Add(sql.Func1("initial", func(s string) string { return s[:1] })).
 //		Add(sql.Func2("age", func(year, now int) int { return now - year }))
-//	parser := sql.For(books, sql.WithFunctions[Book](functions))
+//	parser := sql.For(books, sql.WithFunctions(functions))
 //	parser.Query(tx, `initial(Author) = 'H' AND age(Year, 2000) > 30`)
 //
 // A call is checked when the text is parsed, as the calls of the functions above are: the name
@@ -165,18 +165,44 @@ var (
 // implemented by the stores of the packages ext and record.
 type Store[K, V any] = query.Store[K, V]
 
-// Option is an option of a parser.
-type Option[V any] func(*core[V])
+// Option is an option of a parser of the records of type V. V is not used by the options that
+// do not depend on it, like the one of WithFunctions, which are an Option of every V.
+type Option[V any] interface {
+	// apply gives the option to what a parser is made of. It does not mention V, so that an
+	// option that does not depend on V can implement Option of every V.
+	apply(t optionTarget)
+}
+
+// optionTarget is what an option is applied to, which is a core[V] of some V.
+type optionTarget interface {
+	setFunctions(fs Functions)
+	// addFields adds the fields, which are a []field.Untyped[V] of the V of the target.
+	addFields(fields any)
+}
+
+func (c *core[V]) setFunctions(fs Functions) { c.functions = fs }
+
+func (c *core[V]) addFields(fields any) {
+	fs, ok := fields.([]field.Untyped[V])
+	if !ok {
+		// WithFields is an Option of the type of its fields, so this cannot happen through the API.
+		panic(fmt.Sprintf("sql: fields of the type %T given to a parser of %T", fields, *new(V)))
+	}
+	for _, f := range fs {
+		c.columns[f.Path()] = fieldColumn(f)
+	}
+}
+
+// fieldsOption is the option that WithFields returns.
+type fieldsOption[V any] struct{ fields []field.Untyped[V] }
+
+func (o fieldsOption[V]) apply(t optionTarget) { t.addFields(o.fields) }
 
 // WithFields gives the parser fields that it cannot find itself, which are the ones that are
 // computed by a function and that no index is defined on. A field that is given is used
 // instead of the one of the same path that the parser would find.
 func WithFields[V any](fields ...field.Untyped[V]) Option[V] {
-	return func(c *core[V]) {
-		for _, f := range fields {
-			c.columns[f.Path()] = fieldColumn(f)
-		}
-	}
+	return fieldsOption[V]{fields: fields}
 }
 
 // ParseWhere parses a WHERE clause, without the word WHERE, for records that are not in a
@@ -202,7 +228,7 @@ type core[V any] struct {
 func newCore[V any](store interface{ Extensions() []any }, opts []Option[V]) *core[V] {
 	c := &core[V]{store: store, columns: map[string]*column[V]{}}
 	for _, opt := range opts {
-		opt(c)
+		opt.apply(c)
 	}
 	return c
 }

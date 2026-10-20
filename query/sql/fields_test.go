@@ -58,13 +58,13 @@ func TestFieldsOfIndexes(t *testing.T) {
 	require.Equal(t, "float64", c.(*cond.Comparison[Book]).Codec)
 	_, err = sql.ParseWhere[Book](`Decade = 1960`)
 	require.ErrorIs(t, err, sql.ErrUnknownField)
-	c, err = sql.ParseWhere(`Decade = 1960 AND Decade * 2 = 3920`, sql.WithFields[Book](decade))
+	c, err = sql.ParseWhere[Book](`Decade = 1960 AND Decade * 2 = 3920`, sql.WithFields(decade))
 	require.NoError(t, err)
 	require.True(t, match(t, c, dune))
 	require.False(t, match(t, c, &Book{Year: 1970}))
 
 	// A field that is given comes before the one of an index.
-	c, err = sql.For(books, sql.WithFields[Book](price)).Parse(`Price = 9.5`)
+	c, err = sql.For(books, sql.WithFields(price)).Parse(`Price = 9.5`)
 	require.NoError(t, err)
 	require.Equal(t, "float64", c.(*cond.Comparison[Book]).Codec)
 }

@@ -143,6 +143,17 @@ func (s *Store[I, T]) WithVersion(v uint64) *Store[I, T] {
 	return s
 }
 
+// MigrateFrom adds the migration of the records from a version to the next one: the function
+// is given every record in the type it had and returns it as it is to be; see migrate.Records.
+func (s *Store[I, T]) MigrateFrom[Old any](
+	from uint64,
+	convert func(id I, old *Old) (*T, error),
+	opts ...migrate.Option,
+) *Store[I, T] {
+	migrate.Records(s, from, convert, opts...)
+	return s
+}
+
 // Extensions returns the extensions of the store, in the order that they were added.
 func (s *Store[I, T]) Extensions() []any {
 	return s.base.Extensions()
@@ -253,6 +264,12 @@ func (s *Instance[I, T]) Iterator(r kvutil.Range[I]) (*Iterator[I, T], error) {
 		return nil, err
 	}
 	return &Iterator[I, T]{base: it, setID: s.store.setID}, nil
+}
+
+// All iterates over every record, in ascending order of the ids; it is Iterator of every id.
+// The iterator must be closed.
+func (s *Instance[I, T]) All() (*Iterator[I, T], error) {
+	return s.Iterator(kvutil.All[I]())
 }
 
 // ReverseIterator iterates over the records whose ids are in the range, in descending order.
