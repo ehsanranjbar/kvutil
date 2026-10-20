@@ -143,6 +143,9 @@ func simplify[V any](c cond.Cond[V]) (cond.Cond[V], truth) {
 		case 1:
 			return flat[0], unknown
 		}
+		if in := orToIn(flat); in != nil {
+			return in, unknown
+		}
 		return cond.Or(flat...), unknown
 
 	case *cond.Negation[V]:
@@ -156,6 +159,44 @@ func simplify[V any](c cond.Cond[V]) (cond.Cond[V], truth) {
 		return cond.Not(s), unknown
 	}
 	return c, unknown
+}
+
+// orToIn returns the one comparison, of the values of all of them, that is satisfied by what the
+// branches of a disjunction are satisfied by, if they are all comparisons of one field that are
+// equal to a value or to one of several (Eq and In), and nil otherwise. For a field of several
+// values it holds too: a record has one of the values in any of the sets if and only if it has
+// one in the union of them.
+func orToIn[V any](branches []cond.Cond[V]) cond.Cond[V] {
+	var (
+		first  *cond.Comparison[V]
+		values [][]byte
+		texts  []string
+	)
+	for _, b := range branches {
+		c, ok := b.(*cond.Comparison[V])
+		if !ok || c.Err() != nil || (c.Op != cond.OpEq && c.Op != cond.OpIn) {
+			return nil
+		}
+		if first == nil {
+			first = c
+		} else if c.Path != first.Path || c.Codec != first.Codec || c.Multi != first.Multi {
+			return nil
+		}
+		values = append(values, c.Values...)
+		if text := c.String(); !slices.Contains(texts, text) {
+			texts = append(texts, text)
+		}
+	}
+
+	m := *first
+	m.Describe(strings.Join(texts, " or "))
+	m.Values = sortedSet(values)
+	m.Low, m.High = nil, nil
+	m.Op = cond.OpIn
+	if len(m.Values) == 1 {
+		m.Op = cond.OpEq
+	}
+	return &m
 }
 
 // merge returns the one comparison that is satisfied by what all the comparisons of a field are

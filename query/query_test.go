@@ -144,7 +144,10 @@ func TestPlans(t *testing.T) {
 			"Sort by Rank\n└─ StoreScan, then check [not (Ready = false)]"},
 		{"an index of some records is read for a disjunction of them", from().Where(cond.Or(
 			cond.And(ready.Eq(true), rank.Eq(3)), cond.And(ready.Eq(true), rank.Eq(4)))).OrderBy(rank),
-			"IndexLookup ready_by_rank (in order of Rank): 1 range, then check [((Ready = true) and (Rank = 3)) or ((Ready = true) and (Rank = 4))]"},
+			"Sort by Rank\n└─ Union\n   ├─ IndexLookup ready_by_rank: 1 range, then check [Ready = true]\n   └─ IndexLookup ready_by_rank: 1 range, then check [Ready = true]"},
+		{"an index of some records is read for a disjunction of them, with a limit", from().Where(cond.Or(
+			cond.And(ready.Eq(true), rank.Eq(3)), cond.And(ready.Eq(true), rank.Eq(4)))).Limit(5),
+			"Limit 5\n└─ Union\n   ├─ IndexLookup ready_by_rank: 1 range, then check [Ready = true]\n   └─ IndexLookup ready_by_rank: 1 range, then check [Ready = true]"},
 		{"an index of some records is not read when it is not cheaper", from().Where(ready.Eq(true), code.Eq("i0007")),
 			`IndexLookup by_code: 1 range, then check [Ready = true]`},
 
@@ -213,7 +216,7 @@ func TestHintsThatCannotBeFollowed(t *testing.T) {
 		"a field of several values":     from().OrderBy(rank).Using("by_tag_rank"),
 		"only for its order":            from().OrderBy(note).Using("by_note"),
 		"a negation needs no value":     from().Where(cond.Not(label.Eq("l1")), score.Eq(2)).Using("by_score_label"),
-		"a disjunction needs no value":  from().Where(cond.Or(label.Eq("l1"), label.Eq("l2")), score.Eq(2)).Using("by_score_label"),
+		"a disjunction needs no value":  from().Where(cond.Or(label.Eq("l1"), rank.Eq(2)), score.Eq(2)).Using("by_score_label"),
 		"an index of some records":      from().Where(rank.Eq(3)).Using("ready_by_rank"),
 		"an index of others":            from().Where(rank.Eq(3), ready.Eq(false)).Using("ready_by_rank"),
 		"an index of some, or others":   from().Where(cond.Or(ready.Eq(true), rank.Eq(3))).Using("ready_by_rank"),
@@ -360,6 +363,11 @@ func TestEvaluationFailsWhileIterating(t *testing.T) {
 
 		// An item in the middle fails, so there are records before it.
 		bad := f.items[200]
+		// An item with a tag, which the index of the tags has an entry for.
+		tagged := f.items[200]
+		for id := int64(200); len(tagged.Tags) == 0; id++ {
+			tagged = f.items[id]
+		}
 		for name, test := range map[string]struct {
 			q       *query.Query[int64, Item]
 			records bool
@@ -375,6 +383,16 @@ func TestEvaluationFailsWhileIterating(t *testing.T) {
 			"scan, hinted":          {from().Where(group.Eq(bad.Group), failing{bad.Code}).FullScan(), true},
 			"index of a hint":       {from().Where(group.Eq(bad.Group), failing{bad.Code}).Using("by_group_code").OrderBy(rank), false},
 			"offset past the error": {from().Where(failing{f.items[itemCount].Code}).Offset(itemCount - 1).Limit(5), false},
+			// The plans that read several indexes.
+			"union": {from().Where(cond.Or(group.Eq(bad.Group), code.Eq("i0005")), failing{bad.Code}), true},
+			"union, the failing branch is last": {
+				from().Where(cond.Or(code.Eq("i0005"), group.Eq(bad.Group)), failing{bad.Code}), true},
+			"union, sorted": {from().Where(cond.Or(group.Eq(bad.Group), code.Eq("i0005")), failing{bad.Code}).OrderBy(extra), false},
+			"union, top":    {from().Where(cond.Or(group.Eq(bad.Group), code.Eq("i0005")), failing{bad.Code}).OrderBy(extra).Limit(3), false},
+			"intersection, streamed": {
+				from().Where(group.Eq(tagged.Group), tags.Eq(tagged.Tags[0]), failing{tagged.Code}).UsingAll("by_group_rank", "by_tag_rank"), true},
+			"intersection, sorted": {
+				from().Where(group.Eq(tagged.Group), tags.Eq(tagged.Tags[0]), failing{tagged.Code}).OrderBy(extra).UsingAll("by_group_rank", "by_tag_rank"), false},
 		} {
 			t.Run(name, func(t *testing.T) {
 				require.NoError(t, db.View(func(tx kv.Tx) error {
@@ -441,6 +459,22 @@ func TestCloseReleases(t *testing.T) {
 			from().Where(failing{"i0003"}),
 			from().Where(failing{"i0003"}).OrderBy(extra),
 			from().Where(group.Eq("a"), failing{"i0003"}).OrderBy(rank.Desc()),
+			// Plans that read several indexes.
+			from().Where(cond.Or(group.Eq("a"), code.Eq("i0005"))),
+			from().Where(cond.Or(group.Eq("a"), code.Eq("i0005"), tags.Eq("t1"))).Limit(3),
+			from().Where(cond.Or(group.Eq("a"), code.Eq("i0005"))).OrderBy(rank, code),
+			from().Where(cond.Or(group.Eq("a"), code.Eq("i0005"))).OrderBy(rank).Limit(4).Offset(2),
+			from().Where(cond.Or(group.Eq("a"), code.Eq("i0005")), failing{"i0003"}),
+			from().Where(cond.Or(group.Eq("a"), cond.And(code.Eq("i0005"), code.Eq("i0006")))),
+			from().Where(group.Eq("a"), tags.Eq("t1")),
+			from().Where(group.Eq("a"), tags.Eq("t1")).OrderBy(rank.Desc()),
+			from().Where(group.Eq("a"), tags.Eq("t1")).OrderBy(extra).Limit(5),
+			from().Where(group.Eq("a"), tags.Eq("t1")).Limit(5).UsingAll("by_group_rank", "by_tag_rank"),
+			from().Where(group.Eq("a"), tags.Eq("t1"), failing{"i0003"}),
+			from().Where(group.Eq("a"), tags.Eq("t1"), note.Eq("n1")).UsingAll("by_note", "by_tag_rank", "by_group_rank"),
+			from().Where(group.Eq("a"), tags.Eq("t1"), note.Eq("n1")).OrderBy(rank.Desc()).UsingAll("by_note", "by_tag_rank", "by_group_rank"),
+			from().Where(group.Eq("a"), tags.Eq("t1")).Limit(0).UsingAll("by_tag_rank", "by_group_rank"),
+			from().Where(cond.Or(group.Eq("a"), code.Eq("i0005"))).UsingAll("by_code", "by_group_rank").Limit(2),
 		}
 		for _, q := range queries {
 			// Not started, started, and read to the end, and closed twice.
@@ -453,6 +487,8 @@ func TestCloseReleases(t *testing.T) {
 				}
 				require.NoError(t, it.Close())
 				require.NoError(t, it.Close())
+
+				_, _ = q.Count(tx)
 
 				it = q.Run(tx)
 				for ; it.Valid(); it.Next() {

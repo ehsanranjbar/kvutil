@@ -138,7 +138,9 @@ func TestImplication(t *testing.T) {
 		// Disjunctions of the index.
 		{"a branch is implied", conds(fn.Eq(2)), cond.Or(fn.Eq(1), fn.Eq(2)), true},
 		{"no branch is implied", conds(fn.Eq(3)), cond.Or(fn.Eq(1), fn.Eq(2)), false},
-		{"values that are among the branches are not a branch", conds(fn.In(1, 2)), cond.Or(fn.Eq(1), fn.Eq(2)), false},
+		{"values that are among the branches are not a branch", conds(fn.In(1, 2)), cond.Or(fn.Eq(1), fn.Eq(2)), true},
+		{"values that are not all among the branches", conds(fn.In(1, 3)), cond.Or(fn.Eq(1), fn.Eq(2)), false},
+		{"values that are among the branches, of an or of the other kind", conds(fn.In(1, 2)), cond.Or(fn.Eq(1), fn.In(2, 5)), true},
 		{"a branch of other fields", conds(fs.Eq("a")), cond.Or(fn.Eq(1), fs.Eq("a")), true},
 		{"a branch that is a conjunction", conds(fn.Eq(1), fs.Eq("a")), cond.Or(cond.And(fn.Eq(1), fs.Eq("a")), fm.Eq(3)), true},
 		{"a branch that is a conjunction, partly", conds(fn.Eq(1)), cond.Or(cond.And(fn.Eq(1), fs.Eq("a")), fm.Eq(3)), false},

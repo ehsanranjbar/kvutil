@@ -305,7 +305,7 @@ func TestExpressionIndexes(t *testing.T) {
 			{`upper(Tags) = 'SCIFI'`, `IndexLookup by_upper_tags: 1 range`},
 			{`upper(Tags) IN ('SCIFI', 'NEW')`, `IndexLookup by_upper_tags: 2 ranges`},
 			{`lower(Subtitle) = 'a novel'`, `IndexLookup by_lower_subtitle: 1 range`},
-			{`lower(Subtitle) = 'a novel' AND lower(Author) = 'herbert'`, `IndexLookup by_lower_author: 1 range, then check [lower("Subtitle") = "a novel"]`},
+			{`lower(Subtitle) = 'a novel' AND lower(Author) = 'herbert'`, "Intersect\n├─ IndexLookup by_lower_author: 1 range, then check [lower(\"Subtitle\") = \"a novel\"]\n└─ IndexKeys by_lower_subtitle: 1 range"},
 			{`lower(Subtitle) = ''`, `IndexLookup by_lower_subtitle: 1 range`},
 			// Used with others.
 			{`lower(Author) = 'herbert' AND Year > 1900 AND Title LIKE '%dune%'`,

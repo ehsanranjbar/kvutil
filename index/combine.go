@@ -3,9 +3,9 @@ package index
 import (
 	"encoding/binary"
 	"errors"
-	"hash/fnv"
 
 	"github.com/RoaringBitmap/roaring/v2/roaring64"
+	"github.com/ehsanranjbar/kvutil/internal/keyhash"
 	"github.com/ehsanranjbar/kvutil/iterutil"
 )
 
@@ -327,12 +327,10 @@ func keyOf(value uint64, size int) []byte {
 	return buf[8-size:]
 }
 
-// keyHash returns the hash that a key is in a bitmap as. It is a variable so that the tests can
-// make keys have the same hash.
-var keyHash = func(raw []byte) uint64 {
-	h := fnv.New64a()
-	h.Write(raw)
-	return h.Sum64()
+// keyHash returns the hash that a key is in a bitmap as. The hash is a variable of an internal
+// package so that the tests can make keys have the same hash.
+func keyHash(raw []byte) uint64 {
+	return keyhash.Func(raw)
 }
 
 // exact reports whether the keys of the set are in the bitmap as numbers.

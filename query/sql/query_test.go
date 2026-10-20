@@ -238,14 +238,25 @@ func TestQueryChoosesTheFewestRanges(t *testing.T) {
 		})
 		p := sql.For(lib.books)
 
-		explain, err := p.Explain(`Author IN ('Herbert', 'Austen', 'herbert') AND Year = 1965`)
-		require.NoError(t, err)
-		require.Equal(t, `IndexLookup by_year: 1 range, then check [Author in ("Herbert", "Austen", "herbert")]`, explain)
+		// With no room for the keys of an intersection, one index is read.
+		single := func(where string) string {
+			q, err := p.Where(where)
+			require.NoError(t, err)
+			explain, err := q.MaxKeys(0).Explain()
+			require.NoError(t, err)
+			return explain
+		}
+		require.Equal(t, `IndexLookup by_year: 1 range, then check [Author in ("Herbert", "Austen", "herbert")]`,
+			single(`Author IN ('Herbert', 'Austen', 'herbert') AND Year = 1965`))
 
 		// With as many ranges, the first index of the store.
-		explain, err = p.Explain(`Author = 'Herbert' AND Year = 1965`)
+		require.Equal(t, `IndexLookup by_author: 1 range, then check [Year = 1965]`,
+			single(`Author = 'Herbert' AND Year = 1965`))
+
+		// Both are read where there is room, the cheaper streamed.
+		explain, err := p.Explain(`Author IN ('Herbert', 'Austen', 'herbert') AND Year = 1965`)
 		require.NoError(t, err)
-		require.Equal(t, `IndexLookup by_author: 1 range, then check [Year = 1965]`, explain)
+		require.Equal(t, "Intersect\n├─ IndexLookup by_author: 3 ranges, then check [Year = 1965]\n└─ IndexKeys by_year: 1 range", explain)
 
 		for _, where := range []string{
 			`Author IN ('Herbert', 'Austen', 'herbert') AND Year = 1965`,

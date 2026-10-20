@@ -58,6 +58,27 @@
 // results do not depend on the index. Hinting an index (Using) whose condition is not implied
 // is an error.
 //
+// # Several indexes
+//
+// A plan can read several indexes for one query, and combine what they find by the primary keys
+// of the records. A disjunction that is one of the conditions of the query is read as a union if
+// each of its branches is served by an index: a branch is read with its conditions and the other
+// conditions of the query, so it is exact, and a record that several branches find is returned
+// once. The records of a union come in no order. A disjunction of values of one field (Rank = 1
+// OR Rank = 2) is one condition of the values (Rank IN (1, 2)) before anything is planned.
+//
+// A conjunction is read as an intersection if the indexes serve different conditions of it: one
+// of them is streamed, the primary keys of the others are remembered, and a record of the
+// streamed index is fetched only if all the others have it. The records come in the order of the
+// streamed index. The conditions that the streamed index does not serve are checked on the
+// records that are fetched, so the result is exact whatever the other indexes find.
+//
+// The planner takes such a plan if it costs less than the plans of one index, and if the keys it
+// holds in memory are not more than MaxKeys allows, by its estimate. UsingAll forces one. The
+// keys are held exactly if they are numbers of the same size, of 8 bytes at most (a bitmap), and
+// otherwise as hashes, of which two keys may have the same, so a record whose hash is known is
+// checked against the index that has it; Explain shows "(hashed)".
+//
 // # Projections
 //
 // A query gives records. Select makes of it a projection, which gives rows with the values of the
@@ -73,6 +94,7 @@ import (
 	"fmt"
 	"math"
 	"slices"
+	"strings"
 	"sync"
 
 	"github.com/ehsanranjbar/kvutil"
@@ -90,9 +112,13 @@ var (
 	// ErrOrder is returned for a field that the records cannot be ordered by: one that may have
 	// several values for a record.
 	ErrOrder = errors.New("query: cannot order by the field")
-	// ErrNegative is returned for an offset or a limit that is less than zero.
-	ErrNegative = errors.New("query: negative offset or limit")
+	// ErrNegative is returned for an offset, a limit or a number of keys (MaxKeys) that is less
+	// than zero.
+	ErrNegative = errors.New("query: negative offset, limit or number of keys")
 )
+
+// defaultMaxKeys is the number of keys that a plan may hold in memory unless the query says otherwise.
+const defaultMaxKeys = 100_000
 
 // Store is a store whose records can be queried: one that indexes can be defined on. It is
 // implemented by the stores of the packages ext and record.
@@ -108,11 +134,14 @@ const (
 	hintNone hintKind = iota
 	hintIndex
 	hintScan
+	hintAll
 )
 
 type hint struct {
 	kind  hintKind
 	index string
+	// indexes are the indexes of a hintAll.
+	indexes []string
 }
 
 // Query is a query on the records of a store. It is a definition, which every method leaves as
@@ -124,6 +153,7 @@ type Query[K, V any] struct {
 	offset  int
 	limit   int
 	limited bool
+	maxKeys int
 	hint    hint
 
 	// planned is the plan of this query, which is made once.
@@ -145,7 +175,7 @@ type counting[K, V any] struct {
 
 // From returns the query of all the records of a store.
 func From[K, V any](store Store[K, V]) *Query[K, V] {
-	return &Query[K, V]{store: store, planned: &planned[K, V]{}, counting: &counting[K, V]{}}
+	return &Query[K, V]{store: store, maxKeys: defaultMaxKeys, planned: &planned[K, V]{}, counting: &counting[K, V]{}}
 }
 
 // derive returns a copy of the query, to change.
@@ -201,14 +231,38 @@ func (q *Query[K, V]) Limit(n int) *Query[K, V] {
 // query is run or explained, if the store has no such index or if the index cannot serve the
 // query: it has some of the records only and the conditions of the query do not imply that
 // they are among them, or it may not have an entry for a record that the query asks for (see the
-// package documentation). It replaces FullScan.
+// package documentation). It replaces the hint that the query had: FullScan or UsingAll.
 func (q *Query[K, V]) Using(index string) *Query[K, V] {
 	c := q.derive()
 	c.hint = hint{kind: hintIndex, index: index}
 	return c
 }
 
-// FullScan returns the query with a hint to scan the store. It replaces Using.
+// UsingAll returns the query with a hint to read all of these indexes, each for a part of the
+// query: an intersection of them if they serve different conditions of the query, or a union of
+// them if a disjunction of the query has branches that each is served by one of them, and all of
+// them are used. It is an error, when the query is run or explained, if the store lacks one of
+// the indexes or if neither can be done with exactly these indexes, or if the plan would hold
+// more keys than MaxKeys allows. The last of Using, UsingAll and FullScan is the hint.
+func (q *Query[K, V]) UsingAll(indexes ...string) *Query[K, V] {
+	c := q.derive()
+	c.hint = hint{kind: hintAll, indexes: slices.Clone(indexes)}
+	return c
+}
+
+// MaxKeys returns the query with a limit on the keys of records that a plan may hold in memory,
+// which it does to intersect the results of several indexes (the keys of all but one) and to
+// join them (the keys that were seen). A plan that is estimated to hold more is not chosen, nor
+// followed if it is hinted (UsingAll). The estimate is the one of the planner, without statistics
+// of the data. The default is 100,000 keys, and 0 allows no plan that holds keys.
+func (q *Query[K, V]) MaxKeys(n int) *Query[K, V] {
+	c := q.derive()
+	c.maxKeys = n
+	return c
+}
+
+// FullScan returns the query with a hint to scan the store. It replaces the hint that the query
+// had: Using or UsingAll.
 func (q *Query[K, V]) FullScan() *Query[K, V] {
 	c := q.derive()
 	c.hint = hint{kind: hintScan}
@@ -254,6 +308,13 @@ func (q *Query[K, V]) Run(tx kv.Tx) iterutil.AdvancedIterator[K, *V] {
 //   - IndexOnlyScan name: like IndexLookup, for a projection (Select) that the index answers from
 //     its entries, without getting the records. It is shown instead of IndexLookup when the
 //     index holds what is selected, what is checked, and what the rows are sorted by.
+//   - Union: the records that one of its IndexLookup branches finds, each once, in no order. Each
+//     branch is read with the conditions of its branch of the disjunction and the other conditions
+//     of the query. "(hashed)" says that the keys it remembers are hashes.
+//   - Intersect: the records that all of its children find, in the order of the first. The first
+//     is an IndexLookup, which is streamed, and the conditions that are checked on the records
+//     are shown there; the others are IndexKeys name, the primary keys of the entries of ranges
+//     of an index that are remembered, shown "(hashed)" if they are kept as hashes.
 //   - StoreScan: all the records of the store, with the conditions that they are checked against.
 //   - Empty: nothing is read, as no record can satisfy the conditions or none is asked for.
 //
@@ -273,7 +334,13 @@ func (pl *plan[K, V]) open(tx kv.Tx, store Store[K, V]) node[K, *V] {
 	}
 
 	var n node[K, *V]
-	if pl.index != nil {
+	if pl.combo != nil {
+		combined, err := pl.combo.open(tx, pl.reversed)
+		if err != nil {
+			return &failed[K, *V]{err: err}
+		}
+		n = &source[K, *V]{Iterator: combined}
+	} else if pl.index != nil {
 		it, err := pl.index.Instantiate(tx).ScanAll(pl.ranges, pl.reversed)
 		if err != nil {
 			return &failed[K, *V]{err: fmt.Errorf("index %q: %w", pl.index.Name(), err)}
@@ -334,42 +401,88 @@ func (pl *plan[K, V]) String() string {
 		lines = append(lines, fmt.Sprintf("%s by %s", name, orderText(pl.order)))
 	}
 
-	var access string
-	if pl.index != nil {
-		access = "IndexLookup " + pl.index.Name()
+	leaf := &treeNode{}
+	switch {
+	case pl.combo != nil:
+		leaf = pl.combo.tree(pl)
+	case pl.index != nil:
+		leaf.text = "IndexLookup " + pl.index.Name()
 		if pl.indexOnly {
-			access = "IndexOnlyScan " + pl.index.Name()
+			leaf.text = "IndexOnlyScan " + pl.index.Name()
 		}
-		switch {
-		case pl.inOrder && pl.reversed:
-			access += fmt.Sprintf(" (reversed, in order of %s)", orderText(pl.wanted))
-		case pl.inOrder:
-			access += fmt.Sprintf(" (in order of %s)", orderText(pl.wanted))
-		}
-		noun := "ranges"
-		if len(pl.ranges) == 1 {
-			noun = "range"
-		}
-		access += fmt.Sprintf(": %d %s", len(pl.ranges), noun)
-	} else {
-		access = "StoreScan"
+		leaf.text += pl.orderText() + rangesText(len(pl.ranges))
+	default:
+		leaf.text = "StoreScan"
 	}
-	if len(pl.check) > 0 {
-		access += fmt.Sprintf(", then check [%s]", conditionsText(pl.check))
+	if pl.combo == nil && len(pl.check) > 0 {
+		leaf.text += checkText(pl.check)
 	}
-	lines = append(lines, access)
 
-	var text string
-	for i, line := range lines {
-		if i == 0 {
-			text = line
-			continue
-		}
-		text += "\n"
-		for range i - 1 {
-			text += "   "
-		}
-		text += "└─ " + line
+	// The operators on top of each other, and the access under them.
+	root := leaf
+	for i := len(lines) - 1; i >= 0; i-- {
+		root = &treeNode{text: lines[i], children: []*treeNode{root}}
 	}
-	return text
+	return root.render()
+}
+
+// orderText returns the order that the plan relies on, as shown after the name of an index.
+func (pl *plan[K, V]) orderText() string {
+	switch {
+	case pl.inOrder && pl.reversed:
+		return fmt.Sprintf(" (reversed, in order of %s)", orderText(pl.wanted))
+	case pl.inOrder:
+		return fmt.Sprintf(" (in order of %s)", orderText(pl.wanted))
+	}
+	return ""
+}
+
+// rangesText returns the number of the ranges that an index reads, as shown after its name.
+func rangesText(n int) string {
+	if n == 1 {
+		return ": 1 range"
+	}
+	return fmt.Sprintf(": %d ranges", n)
+}
+
+// checkText returns the conditions that the records are checked against, as shown after the access.
+func checkText[V any](check []cond.Cond[V]) string {
+	return fmt.Sprintf(", then check [%s]", conditionsText(check))
+}
+
+// treeNode is an operator of the text of a plan.
+type treeNode struct {
+	text     string
+	children []*treeNode
+}
+
+// render returns the tree as text, a node on a line and its children under it, as in
+//
+//	Limit 10
+//	└─ Intersect
+//	   ├─ IndexLookup by_author: 1 range
+//	   └─ IndexKeys by_tag: 1 range
+func (n *treeNode) render() string {
+	var b strings.Builder
+	b.WriteString(n.text)
+	n.renderChildren(&b, "")
+	return b.String()
+}
+
+func (n *treeNode) renderChildren(b *strings.Builder, prefix string) {
+	for i, child := range n.children {
+		last := i == len(n.children)-1
+		b.WriteString("\n" + prefix)
+		if last {
+			b.WriteString("└─ ")
+		} else {
+			b.WriteString("├─ ")
+		}
+		b.WriteString(child.text)
+		if last {
+			child.renderChildren(b, prefix+"   ")
+		} else {
+			child.renderChildren(b, prefix+"│  ")
+		}
+	}
 }

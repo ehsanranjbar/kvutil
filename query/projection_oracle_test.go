@@ -10,11 +10,15 @@ import (
 
 	"github.com/ehsanranjbar/kvutil/field"
 	"github.com/ehsanranjbar/kvutil/internal/testkv"
+	"github.com/ehsanranjbar/kvutil/iterutil"
 	"github.com/ehsanranjbar/kvutil/kv"
 	"github.com/ehsanranjbar/kvutil/query"
 )
 
 type itemRow = query.Row[int64, Item]
+
+// projectionCount is the number of random projections.
+const projectionCount = 2 * queryCount
 
 // selected is an item that a projection selects, with what checks a row against an item.
 type selected struct {
@@ -150,11 +154,25 @@ func (f *fixture) requireRows(t *testing.T, db kv.DB, s spec, sel []selected, q 
 	p := q.Select(itemsOf(sel)...)
 	explain, err := p.Explain()
 	require.NoError(t, err, msg)
-	msg += "\n" + explain
+	f.requireRowsOf(t, db, s, sel, p.Run, q.Count, msg+"\n"+explain)
+	return explain
+}
+
+// requireRowsOf checks the rows that run gives against the spec, and the count that count gives.
+func (f *fixture) requireRowsOf(
+	t *testing.T,
+	db kv.DB,
+	s spec,
+	sel []selected,
+	run func(tx kv.Tx) iterutil.AdvancedIterator[int64, *itemRow],
+	count func(tx kv.Tx) (int, error),
+	msg string,
+) {
+	t.Helper()
 
 	keys := []int64{}
 	require.NoError(t, db.View(func(tx kv.Tx) error {
-		it := p.Run(tx)
+		it := run(tx)
 		defer it.Close()
 
 		n := 0
@@ -203,12 +221,11 @@ func (f *fixture) requireRows(t *testing.T, db kv.DB, s spec, sel []selected, q 
 	f.requireResult(t, s, keys, msg)
 
 	require.NoError(t, db.View(func(tx kv.Tx) error {
-		count, err := q.Count(tx)
+		n, err := count(tx)
 		require.NoError(t, err, msg)
-		require.Equal(t, f.expectCount(t, s), count, "count of the query: %s", msg)
+		require.Equal(t, f.expectCount(t, s), n, "count of the query: %s", msg)
 		return nil
 	}))
-	return explain
 }
 
 func contains(sel []selected, name string) bool {
@@ -239,7 +256,7 @@ func TestProjectionAgreesWithBruteForce(t *testing.T) {
 			lookups = map[string]int{}
 		)
 		tally := func(into map[string]int, explain string) {
-			for _, shape := range []string{"IndexOnlyScan", "IndexLookup", "StoreScan", "Sort by", "TopN by", "then check", "reversed", "in order of"} {
+			for _, shape := range []string{"IndexOnlyScan", "IndexLookup", "StoreScan", "Sort by", "TopN by", "then check", "reversed", "in order of", "Union", "Intersect"} {
 				if strings.Contains(explain, shape) {
 					into[shape]++
 				}
@@ -253,8 +270,14 @@ func TestProjectionAgreesWithBruteForce(t *testing.T) {
 			}
 		}
 
-		for n := range 2 * queryCount {
-			s := randomSpec(rng)
+		crng := rand.New(rand.NewPCG(7, 8))
+		for n := range projectionCount + combinedCount {
+			var s spec
+			if n < projectionCount {
+				s = randomSpec(rng)
+			} else {
+				s = randomCombinedFullSpec(crng)
+			}
 			sel := randomSelection(rng)
 			base := query.From(f.store)
 			desc := fmt.Sprintf("query %d: %v order %v offset %d limit %d/%v select %v",
@@ -298,12 +321,39 @@ func TestProjectionAgreesWithBruteForce(t *testing.T) {
 					lookups[name]++
 				}
 			}
+
+			// Every plan that reads several indexes: rows made from the records, and the count of
+			// them, which needs a record only where a condition is left to check.
+			combos, err := s.query(base).CombinedPlans()
+			require.NoError(t, err, desc)
+			for _, c := range sampleCombos(crng, combos, 2) {
+				chosenSel := sel
+				if crng.IntN(3) == 0 {
+					chosenSel = nil
+				}
+				f.requireRowsOf(t, db, s, chosenSel,
+					func(tx kv.Tx) iterutil.AdvancedIterator[int64, *itemRow] { return c.RunRows(tx, itemsOf(chosenSel)...) },
+					func(tx kv.Tx) (int, error) {
+						it := c.RunRows(tx)
+						defer it.Close()
+						n := 0
+						for ; it.Valid(); it.Next() {
+							n++
+						}
+						return n, it.Err()
+					},
+					fmt.Sprintf("%s (select %v)\n%s", desc, names(chosenSel), c.Explain()))
+				forced[comboKind(c)]++
+			}
 		}
 
 		t.Logf("chosen plans %v, by index %v, forced %v, lookups %v", shapes, chosen, forced, lookups)
 
-		for _, shape := range []string{"IndexOnlyScan", "IndexLookup", "StoreScan", "Sort by", "TopN by", "then check"} {
+		for _, shape := range []string{"IndexOnlyScan", "IndexLookup", "StoreScan", "Sort by", "TopN by", "then check", "Union", "Intersect"} {
 			require.Greater(t, shapes[shape], 3, "%s in %v", shape, shapes)
+		}
+		for _, kind := range []string{"union", "intersection of 2", "intersection of 3"} {
+			require.Greater(t, forced[kind], 10, "%s in %v", kind, forced)
 		}
 		require.Greater(t, shapes["IndexOnlyScan with then check"], 3, "%v", shapes)
 		// Forced, every kind of the plans that make rows from an index is there.

@@ -263,6 +263,80 @@ func randomIndexSpec(rng *rand.Rand) spec {
 	return s
 }
 
+// indexedLeaf returns a random comparison of a field that an index starts with, so that an index
+// can serve it by itself. Equalities are most of them, and some are ranges.
+func indexedLeaf(rng *rand.Rand) cond.Cond[Item] {
+	g := func(rng *rand.Rand) string { return []string{"a", "b", "c", "d"}[rng.IntN(4)] }
+	switch rng.IntN(8) {
+	case 0:
+		return compare(rng, group, g)
+	case 1:
+		return group.Eq(g(rng))
+	case 2:
+		return compare(rng, code, func(rng *rand.Rand) string { return fmt.Sprintf("i%04d", 1+rng.IntN(itemCount+10)) })
+	case 3:
+		return tags.Eq(fmt.Sprintf("t%d", rng.IntN(4)))
+	case 4:
+		return compare(rng, note, pickText("n", 3))
+	case 5:
+		return compare(rng, total, pickInt(14))
+	case 6:
+		return compare(rng, upperTag, pickText("T", 4))
+	}
+	return compare(rng, score, pickInt(4))
+}
+
+// randomBranch returns a random branch of a disjunction: a comparison that an index serves, or
+// two of them, or a condition that none does.
+func randomBranch(rng *rand.Rand) cond.Cond[Item] {
+	switch rng.IntN(8) {
+	case 0:
+		return cond.And(indexedLeaf(rng), indexedLeaf(rng))
+	case 1:
+		return cond.And(indexedLeaf(rng), randomLeaf(rng))
+	case 2:
+		return cond.And(ready.Eq(true), rank.Eq(rng.IntN(10)))
+	case 3:
+		return compare(rng, extra, pickInt(5))
+	}
+	return indexedLeaf(rng)
+}
+
+// randomCombinedSpec returns a query that reads several indexes: a disjunction whose branches
+// are served by different indexes (or one of them by none), or a conjunction of conditions that
+// different indexes serve, or both.
+func randomCombinedSpec(rng *rand.Rand) spec {
+	var s spec
+	disjunction := func() cond.Cond[Item] {
+		branches := make([]cond.Cond[Item], 2+rng.IntN(2))
+		for i := range branches {
+			branches[i] = randomBranch(rng)
+		}
+		return cond.Or(branches...)
+	}
+	switch rng.IntN(5) {
+	case 0:
+		s.conds = []cond.Cond[Item]{disjunction()}
+	case 1:
+		s.conds = []cond.Cond[Item]{disjunction(), indexedLeaf(rng)}
+	case 2:
+		s.conds = []cond.Cond[Item]{disjunction(), disjunction()}
+	default:
+		for range 2 + rng.IntN(3) {
+			s.conds = append(s.conds, indexedLeaf(rng))
+		}
+	}
+	if rng.IntN(4) == 0 {
+		s.conds = append(s.conds, randomLeaf(rng))
+	}
+	return s
+}
+
+// randomCombinedFullSpec returns a random query that reads several indexes, with an order and a page.
+func randomCombinedFullSpec(rng *rand.Rand) spec {
+	return finishSpec(rng, randomCombinedSpec(rng))
+}
+
 func randomSpec(rng *rand.Rand) spec {
 	var s spec
 	switch {
@@ -278,6 +352,11 @@ func randomSpec(rng *rand.Rand) spec {
 			s.conds = append(s.conds, randomCond(rng, 2))
 		}
 	}
+	return finishSpec(rng, s)
+}
+
+// finishSpec gives a spec an order, if it has none, and a page.
+func finishSpec(rng *rand.Rand, s spec) spec {
 	if s.order == nil {
 		if rng.IntN(3) == 0 {
 			// An order that an index may have.
@@ -445,6 +524,9 @@ func (f *fixture) keys(t *testing.T, db kv.DB, q *query.Query[int64, Item]) []in
 // queryCount is the number of random queries.
 const queryCount = 300
 
+// combinedCount is the number of random queries that read several indexes, after those.
+const combinedCount = 80
+
 // conditionalIndexes are the indexes of some of the items, with what it takes for an item to be
 // in them.
 var conditionalIndexes = map[string]func(it *Item) bool{
@@ -458,7 +540,9 @@ func (f *fixture) requireImplied(t *testing.T, s spec, index, msg string) {
 	t.Helper()
 
 	in, ok := conditionalIndexes[index]
-	if !ok {
+	// The branches of a union are read with the conditions of the branch, which imply the
+	// condition of an index when the conditions of the query do not.
+	if !ok || strings.Contains(msg, "Union") {
 		return
 	}
 	for _, id := range f.expect(t, spec{conds: s.conds}) {
@@ -483,8 +567,16 @@ func TestAgreesWithBruteForce(t *testing.T) {
 			chosen   = map[string]int{}
 			nonEmpty int
 		)
-		for n := range queryCount {
-			s := randomSpec(rng)
+		// The random queries, and then the ones that read several indexes, which have a random
+		// number generator of their own so that the first ones do not depend on them.
+		crng := rand.New(rand.NewPCG(5, 6))
+		for n := range queryCount + combinedCount {
+			var s spec
+			if n < queryCount {
+				s = randomSpec(rng)
+			} else {
+				s = randomCombinedFullSpec(crng)
+			}
 			want := f.expect(t, s)
 			if len(want) > 0 {
 				nonEmpty++
@@ -510,6 +602,12 @@ func TestAgreesWithBruteForce(t *testing.T) {
 				if strings.Contains(explain, shape) {
 					shapes[shape]++
 				}
+			}
+			if strings.Contains(explain, "Union") {
+				chosen["union"]++
+			}
+			if strings.Contains(explain, "Intersect") {
+				chosen[fmt.Sprintf("intersection of %d", 1+strings.Count(explain, "IndexKeys"))]++
 			}
 			f.requireResult(t, s, f.keys(t, db, q), desc+"\n"+explain)
 			// A query is planned once, and gives the same again.
@@ -545,6 +643,21 @@ func TestAgreesWithBruteForce(t *testing.T) {
 				}
 				f.requireResult(t, s, f.keys(t, db, forcedQuery), desc+"\n"+explain)
 			}
+
+			// Without room for keys the planner reads one index.
+			explain, err = s.query(base).MaxKeys(0).Explain()
+			require.NoError(t, err, desc)
+			require.NotContains(t, explain, "Union", desc)
+			require.NotContains(t, explain, "Intersect", desc)
+
+			// Every plan that reads several indexes, which the planner considered.
+			combos, err := s.query(base).CombinedPlans()
+			require.NoError(t, err, desc)
+			for _, c := range sampleCombos(crng, combos, 6) {
+				explain := c.Explain()
+				f.requireResult(t, s, f.comboKeys(t, db, c), desc+"\n"+explain)
+				forced[comboKind(c)]++
+			}
 		}
 
 		t.Logf("plans %v, chosen %v, forced %v", shapes, chosen, forced)
@@ -573,7 +686,69 @@ func TestAgreesWithBruteForce(t *testing.T) {
 			require.Greater(t, forced[name+" refused"], 10, "%s in %v", name, forced)
 			require.Greater(t, chosen[name], 5, "%s in %v", name, chosen)
 		}
+
+		// Plans that read several indexes are chosen, and the ones that were not are run as well.
+		require.Greater(t, chosen["union"], 5, "%v", chosen)
+		require.Greater(t, chosen["intersection of 2"], 5, "%v", chosen)
+		// With the costs of plan.go three indexes are not worth reading together, so intersections
+		// of three and of four are run forced only (see TestIntersectionsOfManyIndexes).
+		for _, kind := range []string{"union", "intersection of 2", "intersection of 3"} {
+			require.Greater(t, forced[kind], 10, "%s in %v", kind, forced)
+		}
+		require.Greater(t, forced["intersection of 4"], 2, "%v", forced)
 	})
+}
+
+// comboKind says what kind of plan that reads several indexes a plan is.
+func comboKind(c *query.Combined[int64, Item]) string {
+	if c.Union {
+		return "union"
+	}
+	return fmt.Sprintf("intersection of %d", len(c.Indexes))
+}
+
+// sampleCombos picks up to n of the plans at random, taking the kinds that are not yet among the
+// ones picked first, so that unions and the intersections of every size are all run.
+func sampleCombos(rng *rand.Rand, combos []*query.Combined[int64, Item], n int) []*query.Combined[int64, Item] {
+	rng.Shuffle(len(combos), func(i, j int) { combos[i], combos[j] = combos[j], combos[i] })
+
+	var picked []*query.Combined[int64, Item]
+	taken := map[string]int{}
+	for len(picked) < n && len(combos) > 0 {
+		best := 0
+		for i, c := range combos {
+			if taken[comboKind(c)] < taken[comboKind(combos[best])] {
+				best = i
+			}
+		}
+		picked = append(picked, combos[best])
+		taken[comboKind(combos[best])]++
+		combos = slices.Delete(slices.Clone(combos), best, best+1)
+	}
+	return picked
+}
+
+// comboKeys runs a plan that reads several indexes and returns the keys that it finds, and checks
+// that the records it gives are theirs.
+func (f *fixture) comboKeys(t *testing.T, db kv.DB, c *query.Combined[int64, Item]) []int64 {
+	t.Helper()
+
+	keys := []int64{}
+	require.NoError(t, db.View(func(tx kv.Tx) error {
+		it := c.Run(tx)
+		defer it.Close()
+
+		for ; it.Valid(); it.Next() {
+			key, err := it.Key()
+			require.NoError(t, err)
+			record, err := it.Value()
+			require.NoError(t, err)
+			require.Equal(t, f.items[key].Code, record.Code)
+			keys = append(keys, key)
+		}
+		return it.Err()
+	}))
+	return keys
 }
 
 func orderTexts(order []field.Component[Item]) []string {

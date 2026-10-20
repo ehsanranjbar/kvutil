@@ -316,10 +316,46 @@ index whose condition is not implied is an error.
 that it gives, and `reversed` if it is read from its end), `IndexOnlyScan` (the same, for a
 projection that the index answers alone), `Sort` and `TopN` (when the order is
 not given), `Limit` and `Empty` (when the conditions contradict each other, or the limit is 0).
-The planner merges the comparisons of a field, keeps `NOT` and `OR` to be checked on the
-records, estimates the cost of each index without any statistics (the numbers are in
-`query/plan.go`), and takes the cheapest. `Using("by_customer")` and `FullScan()` are hints,
-and an index that cannot serve the query is an error.
+The planner merges the comparisons of a field, turns an `OR` of values of one field into one
+`IN`, keeps the other `NOT` and `OR` to be checked on the records, estimates the cost of each
+index without any statistics (the numbers are in `query/plan.go`), and takes the cheapest.
+`Using("by_customer")` and `FullScan()` are hints, and an index that cannot serve the query is
+an error.
+
+### Several indexes for one query
+
+A query can read more than one index. A disjunction among the conditions whose branches are each
+served by an index is a union of them, and a conjunction whose conditions are served by
+different indexes can be an intersection of them, when that costs less than reading one index
+and checking the rest on its records:
+
+```go
+q := query.From(orders).Where(cond.Or(customer.Eq("ann"), status.Eq("late")))
+fmt.Println(q.Explain())
+// Union
+// ├─ IndexLookup by_customer: 1 range
+// └─ IndexLookup by_status: 1 range
+
+q = query.From(orders).Where(customer.Eq("ann"), status.Eq("late"), total.Gte(50))
+fmt.Println(q.Explain())
+// Intersect
+// ├─ IndexLookup by_customer: 1 range, then check [Status = "late"; Total >= 50]  <- streamed
+// └─ IndexKeys by_status: 1 range                         <- its primary keys are remembered
+```
+
+Each branch of a union is read with its own conditions and the other conditions of the query,
+and the records are returned once each, in no order, so a requested order is a `Sort` or a
+`TopN` on top of it, and a `Limit` without an order stops it early. An intersection streams one
+index, remembers the primary keys of the others, and fetches only the records that all of them
+have; the streamed index gives its order, if it is the one asked for. The results are the same
+as with any other plan. The keys that are remembered are held in memory, so a plan that would
+hold more than `MaxKeys(n)` of them (100,000 by default; 0 allows none) is not made. Keys that
+are numbers of the same size, of 8 bytes at most, are kept exactly in a bitmap; other keys
+(strings, arrays) are kept as hashes, which `Explain` marks `(hashed)`, and a record whose hash
+is known is checked against the index. `UsingAll("by_customer", "by_status")` forces the
+combination of exactly those indexes, and is an error (`ErrHint`) if they cannot serve the query
+as an intersection or as a union, or hold more keys than `MaxKeys` allows. The last of `Using`,
+`UsingAll` and `FullScan` is the hint.
 
 ## Selecting values
 

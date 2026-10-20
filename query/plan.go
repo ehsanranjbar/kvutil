@@ -65,6 +65,9 @@ type plan[K, V any] struct {
 	reversed bool
 	// check are the conditions that the records that are found are checked against.
 	check []cond.Cond[V]
+	// combo is set instead of index and ranges if the records are those of several indexes
+	// together: their intersection or their union.
+	combo *combo[K, V]
 
 	// indexOnly is set if the rows are made from the entries of the index, without getting the
 	// records: the index holds what is selected, what the check needs, and what the order needs
@@ -97,7 +100,8 @@ type plan[K, V any] struct {
 
 // candidate is a way to read the records that satisfy the conditions.
 type candidate[K, V any] struct {
-	// position is the position of the index among the extensions, and -1 for a scan.
+	// position is the position of the index among the extensions, and -1 for a scan. A candidate
+	// that combines indexes comes after all of the others.
 	position int
 	index    *index.Index[K, V]
 	ranges   []index.Bounds
@@ -106,6 +110,19 @@ type candidate[K, V any] struct {
 	// indexOnly is set if the rows can be made from the index alone; see plan.
 	indexOnly bool
 	cost      float64
+
+	// combo is set for a candidate that reads several indexes.
+	combo *combo[K, V]
+	// rows is the number of the records that the candidate is estimated to find, before its
+	// conditions are checked.
+	rows float64
+	// residual are the conditions that the ranges of the index leave to be checked on the records,
+	// which check is when the rows are made from the records.
+	residual []cond.Cond[V]
+	// served are the comparisons that the ranges of the index serve.
+	served []*cond.Comparison[V]
+	// plainCost is the cost of reading the records instead of making the rows from the index.
+	plainCost float64
 }
 
 // selection is what a projection selects, which decides if an index can do without the records.
@@ -118,6 +135,10 @@ type selection[V any] struct {
 func (c *candidate[K, V]) less(o *candidate[K, V]) bool {
 	if c.cost != o.cost {
 		return c.cost < o.cost
+	}
+	// A plan of one index or of the store is simpler than one of several.
+	if (c.combo == nil) != (o.combo == nil) {
+		return c.combo == nil
 	}
 	if len(c.check) != len(o.check) {
 		return len(c.check) < len(o.check)
@@ -138,6 +159,30 @@ func (q *Query[K, V]) plan(sel *selection[V]) (*plan[K, V], error) {
 		return nil, fmt.Errorf("%w: the limit is %d", ErrNegative, q.limit)
 	}
 
+	if q.maxKeys < 0 {
+		return nil, fmt.Errorf("%w: the number of keys is %d", ErrNegative, q.maxKeys)
+	}
+	order, err := q.orderFields()
+	if err != nil {
+		return nil, err
+	}
+
+	e, pl, err := q.prepare(sel, order)
+	if err != nil || pl.empty {
+		return pl, err
+	}
+
+	best, err := e.choose()
+	if err != nil {
+		return nil, err
+	}
+	e.fill(pl, best)
+	return pl, nil
+}
+
+// orderFields returns the fields that the records are ordered by, each path once, or says why
+// they cannot be.
+func (q *Query[K, V]) orderFields() ([]field.Component[V], error) {
 	var order []field.Component[V]
 	for _, f := range q.order {
 		if f == nil {
@@ -151,17 +196,32 @@ func (q *Query[K, V]) plan(sel *selection[V]) (*plan[K, V], error) {
 			order = append(order, f)
 		}
 	}
+	return order, nil
+}
 
+// prepare checks the hints and normalises the conditions, and returns the estimator of the query
+// and the plan to fill, which is empty if nothing is read.
+func (q *Query[K, V]) prepare(sel *selection[V], order []field.Component[V]) (*estimator[K, V], *plan[K, V], error) {
 	indexes := q.indexes()
 	var hinted *index.Index[K, V]
-	if q.hint.kind == hintIndex {
+	switch q.hint.kind {
+	case hintIndex:
 		for _, ix := range indexes {
 			if ix.Name() == q.hint.index {
 				hinted = ix
 			}
 		}
 		if hinted == nil {
-			return nil, fmt.Errorf("%w: the store has no index %q", ErrHint, q.hint.index)
+			return nil, nil, fmt.Errorf("%w: the store has no index %q", ErrHint, q.hint.index)
+		}
+	case hintAll:
+		for _, name := range q.hint.indexes {
+			if !slices.ContainsFunc(indexes, func(ix *index.Index[K, V]) bool { return ix.Name() == name }) {
+				return nil, nil, fmt.Errorf("%w: the store has no index %q", ErrHint, name)
+			}
+		}
+		if len(q.hint.indexes) == 0 {
+			return nil, nil, fmt.Errorf("%w: no indexes are given to read", ErrHint)
 		}
 	}
 
@@ -169,7 +229,7 @@ func (q *Query[K, V]) plan(sel *selection[V]) (*plan[K, V], error) {
 	conj, empty := normalise(q.conds)
 	if empty || (q.limited && q.limit == 0) {
 		pl.empty = true
-		return pl, nil
+		return nil, pl, nil
 	}
 
 	// The fields that have one value in all the records that are found: their order is no order.
@@ -188,38 +248,66 @@ func (q *Query[K, V]) plan(sel *selection[V]) (*plan[K, V], error) {
 	}
 
 	pl.wanted = wanted
-	e := estimator[K, V]{q: q, sel: sel, order: order, conj: conj, constant: constant, wanted: wanted, unordered: len(order) == 0}
-
-	var best *candidate[K, V]
-	if q.hint.kind != hintIndex {
-		best = e.scan()
+	e := &estimator[K, V]{
+		q: q, sel: sel, order: order, conj: conj, constant: constant, wanted: wanted,
+		unordered: len(order) == 0, indexes: indexes, hinted: hinted, maxKeys: q.maxKeys,
+		hashed: !exactKeys(q.store),
 	}
-	if q.hint.kind != hintScan {
-		for position, ix := range indexes {
-			if hinted != nil && ix != hinted {
+	return e, pl, nil
+}
+
+// choose returns the candidate that the query is run with: the cheapest, or the one that a hint says.
+func (e *estimator[K, V]) choose() (*candidate[K, V], error) {
+	q := e.q
+	switch q.hint.kind {
+	case hintScan:
+		return e.scan(), nil
+
+	case hintIndex:
+		for position, ix := range e.indexes {
+			if ix != e.hinted {
 				continue
 			}
 			c, err := e.index(position, ix)
 			if err != nil {
-				if hinted != nil {
-					return nil, fmt.Errorf("%w: the index %q cannot serve the query: %v", ErrHint, ix.Name(), err)
-				}
-				continue
+				return nil, fmt.Errorf("%w: the index %q cannot serve the query: %v", ErrHint, ix.Name(), err)
 			}
-			if best == nil || c.less(best) {
-				best = c
-			}
+			return c, nil
 		}
+
+	case hintAll:
+		return e.chooseAll()
 	}
 
+	best := e.scan()
+	singles := e.singles()
+	for _, c := range singles {
+		if c.less(best) {
+			best = c
+		}
+	}
+	for _, c := range e.combined(singles) {
+		if c.less(best) {
+			best = c
+		}
+	}
+	return best, nil
+}
+
+// fill sets the plan to read the records the way a candidate says.
+func (e *estimator[K, V]) fill(pl *plan[K, V], best *candidate[K, V]) {
+	sel, order := e.sel, e.order
 	pl.index, pl.ranges, pl.check, pl.cost = best.index, best.ranges, best.check, best.cost
 	pl.ordered = best.delivery != notDelivered
-	pl.inOrder = (best.delivery == forward || best.delivery == reverse) && len(wanted) > 0
+	pl.inOrder = (best.delivery == forward || best.delivery == reverse) && len(e.wanted) > 0
 	pl.reversed = best.delivery == reverse
-	pl.topN = !pl.ordered && q.limited
+	pl.topN = !pl.ordered && e.q.limited
 	if pl.reversed {
 		pl.ranges = slices.Clone(pl.ranges)
 		slices.Reverse(pl.ranges)
+	}
+	if best.combo != nil {
+		pl.combo = best.combo.reading(pl.reversed)
 	}
 	if best.indexOnly {
 		pl.indexOnly = true
@@ -237,7 +325,6 @@ func (q *Query[K, V]) plan(sel *selection[V]) (*plan[K, V], error) {
 			pl.entryChecks = append(pl.entryChecks, compileCheck(best.index, c))
 		}
 	}
-	return pl, nil
 }
 
 // entryCheck checks a condition on the entry that an iterator of an index is at.
@@ -380,6 +467,18 @@ type estimator[K, V any] struct {
 	wanted []field.Component[V]
 	// unordered is set if the query has no order, so any order of the records will do.
 	unordered bool
+
+	// indexes are the indexes of the store, and hinted the one that Using says.
+	indexes []*index.Index[K, V]
+	hinted  *index.Index[K, V]
+	// maxKeys is the number of keys that a plan may be estimated to hold.
+	maxKeys int
+	// hashed is set if the keys of a plan that holds keys are hashes, as the primary keys are not
+	// numbers.
+	hashed bool
+	// noLimit is set for the estimate of a part of a plan, which is read in full whatever the
+	// limit of the query is, as the limit is for what the parts make together.
+	noLimit bool
 }
 
 // scan returns the candidate of scanning the store.
@@ -436,6 +535,7 @@ func (e *estimator[K, V]) index(position int, ix *index.Index[K, V]) (*candidate
 		}
 	}
 	served := map[string]*cond.Comparison[V]{}
+	var servedList []*cond.Comparison[V]
 	fraction := 1.0
 	for _, c := range e.conj {
 		cmp, ok := c.(*cond.Comparison[V])
@@ -446,6 +546,7 @@ func (e *estimator[K, V]) index(position int, ix *index.Index[K, V]) (*candidate
 			continue
 		}
 		served[cmp.Path] = cmp
+		servedList = append(servedList, cmp)
 		fraction *= fractionOf(cmp)
 	}
 
@@ -457,12 +558,13 @@ func (e *estimator[K, V]) index(position int, ix *index.Index[K, V]) (*candidate
 		}
 	}
 
-	c := &candidate[K, V]{position: position, index: ix, ranges: ranges, check: residual}
+	c := &candidate[K, V]{position: position, index: ix, ranges: ranges, check: residual, residual: residual, served: servedList}
 	rows := math.Max(fraction*kept, 1.0/storeSize) * storeSize
 	if desc.Unique && exact {
 		// Every field has a value or several, so a record is found by each of the ranges at most.
 		rows = float64(len(ranges))
 	}
+	c.rows = rows
 	c.delivery = e.deliver(ix, fields, ranges, exact)
 	if e.sel != nil {
 		// Every entry of an index of some of the records satisfies its condition, so the
@@ -478,6 +580,12 @@ func (e *estimator[K, V]) index(position int, ix *index.Index[K, V]) (*candidate
 		}
 	}
 	c.cost = e.cost(c, rows, true)
+	c.plainCost = c.cost
+	if c.indexOnly {
+		plain := *c
+		plain.indexOnly, plain.check = false, residual
+		c.plainCost = e.cost(&plain, rows, true)
+	}
 	return c, nil
 }
 
@@ -525,8 +633,9 @@ func (e *estimator[K, V]) cost(c *candidate[K, V], rows float64, indexed bool) f
 		pass = residualPass
 	}
 
+	limited := e.q.limited && !e.noLimit
 	read := rows
-	if c.delivery != notDelivered && e.q.limited {
+	if c.delivery != notDelivered && limited {
 		// The records come in order, so no more are read than the page needs.
 		need := float64(e.q.offset) + float64(e.q.limit)
 		read = math.Min(rows, math.Ceil(need/pass))
@@ -543,7 +652,7 @@ func (e *estimator[K, V]) cost(c *candidate[K, V], rows float64, indexed bool) f
 	if c.delivery == notDelivered {
 		sorted := rows * pass
 		kept := sorted
-		if e.q.limited {
+		if limited {
 			kept = math.Min(kept, float64(e.q.offset)+float64(e.q.limit))
 		}
 		cost += sorted * math.Log2(math.Max(kept, 2)) * sortCost
