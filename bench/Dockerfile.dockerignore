@@ -1,0 +1,6 @@
+.git
+.github
+bench/results
+examples
+**/*.test
+**/*.out

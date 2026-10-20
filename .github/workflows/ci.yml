@@ -20,3 +20,6 @@ jobs:
       - name: Test the example
         working-directory: examples/petstore
         run: go vet ./... && go test -race ./...
+      - name: Test the benchmarks (no Docker needed)
+        working-directory: bench
+        run: go vet ./... && go build ./... && go test ./...

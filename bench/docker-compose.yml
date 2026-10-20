@@ -1,0 +1,131 @@
+# The services of the benchmarks. run.sh sets the variables below from its options; the defaults are
+# those of a run with 4 CPUs and 4 GB for the database and for the harness each.
+#
+#   docker compose up -d --wait postgres
+#   docker compose run --rm --no-deps bench run -system postgres -workload kv-basic -scale 10000
+#   docker compose down -v
+name: kvbench
+
+x-limits: &limits
+  # The same limits for the database and for the harness (which has kvutil in its process).
+  cpus: ${BENCH_CPUS:-4}
+  mem_limit: ${BENCH_MEM:-4g}
+  memswap_limit: ${BENCH_MEM:-4g}
+
+# The settings of PostgreSQL: see README.md for the reason of each. Memory ones scale with
+# BENCH_MEM (run.sh computes them); fsync and synchronous_commit follow the durability.
+x-postgres-command: &postgres-command
+  - postgres
+  - -c
+  - shared_buffers=${PG_SHARED_BUFFERS:-1GB}
+  - -c
+  - effective_cache_size=${PG_EFFECTIVE_CACHE_SIZE:-3GB}
+  - -c
+  - work_mem=${PG_WORK_MEM:-32MB}
+  - -c
+  - maintenance_work_mem=${PG_MAINTENANCE_WORK_MEM:-512MB}
+  - -c
+  - max_connections=200
+  - -c
+  - wal_level=replica
+  - -c
+  - wal_buffers=64MB
+  - -c
+  - max_wal_size=4GB
+  - -c
+  - min_wal_size=1GB
+  - -c
+  - checkpoint_timeout=15min
+  - -c
+  - checkpoint_completion_target=0.9
+  - -c
+  - wal_compression=off
+  - -c
+  - full_page_writes=on
+  - -c
+  - fsync=${PG_FSYNC:-on}
+  - -c
+  - synchronous_commit=${PG_SYNCHRONOUS_COMMIT:-on}
+  - -c
+  - autovacuum=on
+  - -c
+  - autovacuum_naptime=15s
+  - -c
+  - random_page_cost=1.1
+  - -c
+  - effective_io_concurrency=64
+  - -c
+  - track_io_timing=on
+  - -c
+  - log_checkpoints=on
+
+x-postgres-healthcheck: &postgres-healthcheck
+  test: ["CMD-SHELL", "pg_isready -U postgres -d bench"]
+  interval: 2s
+  timeout: 3s
+  retries: 60
+
+services:
+  postgres:
+    image: postgres:18
+    container_name: kvbench-postgres
+    command: *postgres-command
+    <<: *limits
+    shm_size: 1g
+    environment:
+      POSTGRES_PASSWORD: bench
+      POSTGRES_DB: bench
+    volumes:
+      - pgdata:/var/lib/postgresql
+    healthcheck: *postgres-healthcheck
+
+  # TimescaleDB, for the stored aggregations only (stage B3): the same Postgres major, the same
+  # settings and the same limits. It is started with the profile "timescale".
+  timescaledb:
+    image: timescale/timescaledb:2.31.0-pg18
+    container_name: kvbench-timescaledb
+    profiles: ["timescale"]
+    command: *postgres-command
+    <<: *limits
+    shm_size: 1g
+    environment:
+      POSTGRES_PASSWORD: bench
+      POSTGRES_DB: bench
+      # The settings are those above, not the ones that timescaledb-tune would choose.
+      NO_TS_TUNE: "true"
+      TIMESCALEDB_TELEMETRY: "off"
+    volumes:
+      - tsdata:/var/lib/postgresql
+    healthcheck: *postgres-healthcheck
+
+  # The harness. kvutil runs in its process, on Badger in the volume /data. It is not started by
+  # "up": run it with "docker compose run --rm --no-deps bench <arguments>".
+  bench:
+    image: kvbench:local
+    profiles: ["bench"]
+    build:
+      context: ..
+      dockerfile: bench/Dockerfile
+      args:
+        KVUTIL_COMMIT: ${KVUTIL_COMMIT:-unknown}
+    <<: *limits
+    environment:
+      KVB_PG_DSN: postgres://postgres:bench@${PG_SERVICE:-postgres}:5432/bench?sslmode=disable
+      KVB_DATA_DIR: /data
+      GOMEMLIMIT: ${BENCH_GOMEMLIMIT:-3GiB}
+      BENCH_HOST:
+      BENCH_CPUS:
+      BENCH_MEM:
+      BENCH_DOCKER_SERVER_VERSION:
+      BENCH_DOCKER_OS:
+      BENCH_DOCKER_NCPU:
+      BENCH_DOCKER_MEM_TOTAL:
+      BENCH_DOCKER_KERNEL:
+    volumes:
+      - benchdata:/data
+      - ./results:/results
+
+volumes:
+  pgdata:
+  tsdata:
+  benchdata:

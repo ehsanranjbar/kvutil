@@ -1,0 +1,3 @@
+# The results of the runs are not committed; see results/README.md.
+results/*
+!results/README.md
