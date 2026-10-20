@@ -20,7 +20,12 @@ func migratePets(pets *record.Store[int64, types.PetRecord]) {
 	//
 	// The type of the pets is the same on both sides here. When it is not, the type of the
 	// version before stays in the program, next to its migration, and is what the function
-	// is given.
+	// is given. A store that is two versions on has a step for each, through the type of the
+	// version in between, and the last step gives the type of the store:
+	//
+	//	pets.WithVersion(3).
+	//		MigrateFrom(1, func(_ int64, old *PetV1) (*PetV2, error) { ... }).
+	//		MigrateFrom(2, func(_ int64, old *PetV2) (*types.PetRecord, error) { ... })
 	upgraded := time.Now().Unix()
 	pets.MigrateFrom(1, func(_ int64, p *types.PetRecord) (*types.PetRecord, error) {
 		if p.CreatedAt == 0 {

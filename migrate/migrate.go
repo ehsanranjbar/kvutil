@@ -21,6 +21,22 @@
 //
 //	report, err := pets.Migrate(ctx, db)
 //
+// A store that went through more than one version has a migration for each of them, and the
+// types of the versions in between stay next to the migrations. Every step is given the type
+// that the version before wrote and returns the type of the next one, and the last step
+// returns the type of the store:
+//
+//	pets := record.New[int64, Pet]("pets").WithVersion(3).
+//		MigrateFrom(1, func(id int64, old *PetV1) (*PetV2, error) { ... }).
+//		MigrateFrom(2, func(id int64, old *PetV2) (*Pet, error) { ... })
+//
+// A database of version 1 goes through both steps, and one of version 2 through the second.
+// The records of a version that is not the last one are read and written with the default
+// codec of their type, which is how a program of that version wrote them unless it gave the
+// store another codec. For a program that did, the codec is given to the step that reads the
+// type, with WithOldCodec, and to the step that writes it, with WithNewCodec. The type of the
+// store is always read and written with the codec of the store.
+//
 // A value that only gets fields that it did not have needs no migration in the formats that
 // leave out what they do not know, like the default one.
 package migrate
@@ -29,6 +45,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"reflect"
 
 	"github.com/ehsanranjbar/kvutil/codec"
 	"github.com/ehsanranjbar/kvutil/kv"
@@ -52,6 +69,7 @@ type options struct {
 	batch    int
 	bytes    int
 	oldCodec any
+	newCodec any
 }
 
 // Option is an option of a migration of records.
@@ -68,11 +86,24 @@ func WithBatchSize(n int) Option {
 }
 
 // WithOldCodec sets the codec that the records were written with, for a store whose codec
-// has changed too. By default it is the codec that the type of the old records has in a
-// store that is not given one.
+// has changed too, or for a type of an earlier version that its program wrote with another
+// codec than the default one. Without it the records are read with the codec of the store if
+// their type is the type of the store, and with the default codec of their type otherwise;
+// see codec.ValueFor.
 func WithOldCodec[Old any](c codec.ValueCodec[Old]) Option {
 	return func(o *options) {
 		o.oldCodec = c
+	}
+}
+
+// WithNewCodec sets the codec that the converted records are written with, for a type of a
+// version in between, which is not the type of the store. Without it they are written with the
+// default codec of their type; see codec.ValueFor. The step that reads them later is given the
+// same codec, with WithOldCodec. It has no effect on a migration to the type of the store,
+// which is always written with the codec of the store.
+func WithNewCodec[New any](c codec.ValueCodec[New]) Option {
+	return func(o *options) {
+		o.newCodec = c
 	}
 }
 
@@ -80,21 +111,30 @@ func WithOldCodec[Old any](c codec.ValueCodec[Old]) Option {
 // function that is given every record as it was written, in the type that it had, and returns
 // it as it is to be. A record that the function returns nil for is deleted.
 //
+// The types of the old and the new records are independent of the type of the store, so a store
+// that went through several versions is migrated through the types of the versions in between,
+// one step for each. The new type of the last step, the one that leads to the version of the
+// store, must be the type of the store; it is an error when the migration runs otherwise, before
+// any record is converted. The records of a type other than the one of the store are read and
+// written with the default codec of the type unless WithOldCodec and WithNewCodec say
+// otherwise.
+//
 // The records are converted in place, under the keys that they have, a batch at a time. The
 // migration goes on from where it stopped when it is interrupted, and no record is converted
 // twice. The indexes and the aggregations of the store are built again from the new records
 // once it is done, so the function has nothing to do for them.
 //
-// It panics if the options are not for the type of the old records.
-func Records[K, Old, New any](
-	store Store[K, New],
+// It panics if the options are not for the types of the old and the new records.
+func Records[K, V, Old, New any](
+	store Store[K, V],
 	from uint64,
 	convert func(key K, old *Old) (*New, error),
 	opts ...Option,
 ) {
 	// The options are checked when the migration is defined, as a mistake in them is one of
 	// the program.
-	oldCodec[K, Old](store, opts, new(options))
+	var o options
+	resolve[K, V, Old, New](store, opts, &o)
 
 	store.Unit().AddMigration(from, func(ctx context.Context, m *Migrator) error {
 		return Convert(ctx, m, store, convert, opts...)
@@ -109,37 +149,79 @@ func Custom(of Migratable, from uint64, m Migration) {
 	of.Unit().AddMigration(from, m)
 }
 
-func oldCodec[K, Old, New any](store Store[K, New], opts []Option, o *options) codec.ValueCodec[Old] {
+// resolve applies the options and returns the codecs that the old records are read with and the
+// new ones are written with. It panics if a codec of the options is not for its type.
+func resolve[K, V, Old, New any](
+	store Store[K, V],
+	opts []Option,
+	o *options,
+) (old codec.ValueCodec[Old], is codec.ValueCodec[New]) {
 	*o = options{batch: 256, bytes: 4 << 20}
 	for _, opt := range opts {
 		opt(o)
 	}
-	if o.oldCodec == nil {
-		return codec.ValueFor[Old](nil)
+	name := store.Unit().Name()
+
+	// Reading: the option, the codec of the store for the type of the store, or the default.
+	switch c := o.oldCodec.(type) {
+	case nil:
+		if reflect.TypeFor[Old]() == reflect.TypeFor[V]() {
+			old = any(store.ValueCodec()).(codec.ValueCodec[Old])
+		} else {
+			old = codec.ValueFor[Old](nil)
+		}
+	case codec.ValueCodec[Old]:
+		old = c
+	default:
+		panic(fmt.Sprintf("migrate: the old codec of %q is a %T, not a codec of %v",
+			name, o.oldCodec, reflect.TypeFor[Old]()))
 	}
 
-	c, ok := o.oldCodec.(codec.ValueCodec[Old])
-	if !ok {
-		panic(fmt.Sprintf("migrate: the old codec of %q is a %T, not a codec of %T",
-			store.Unit().Name(), o.oldCodec, *new(Old)))
+	// Writing: the codec of the store for the type of the store, otherwise the option or
+	// the default. The option is checked even where it has no effect.
+	var given codec.ValueCodec[New]
+	if o.newCodec != nil {
+		var ok bool
+		if given, ok = o.newCodec.(codec.ValueCodec[New]); !ok {
+			panic(fmt.Sprintf("migrate: the new codec of %q is a %T, not a codec of %v",
+				name, o.newCodec, reflect.TypeFor[New]()))
+		}
 	}
-	return c
+	switch {
+	case reflect.TypeFor[New]() == reflect.TypeFor[V]():
+		is = any(store.ValueCodec()).(codec.ValueCodec[New])
+	case given != nil:
+		is = given
+	default:
+		is = codec.ValueFor[New](nil)
+	}
+	return old, is
 }
 
-// Convert converts the records of a store inside a migration, as Records does. It is for a
-// custom migration that has more to do than that. It uses the cursor of the Migrator, so a
-// migration converts one store with it, as the last thing that it does.
-func Convert[K, Old, New any](
+// Convert converts the records of a store inside a migration, as Records does, with the same
+// types and codecs. It is for a custom migration that has more to do than that. It uses the
+// cursor of the Migrator, so a migration converts one store with it, as the last thing that it
+// does.
+//
+// It fails before it converts anything if the migration is the last one of the unit, the one
+// from the version before its version, and the new type is not the type of the store.
+func Convert[K, V, Old, New any](
 	ctx context.Context,
 	m *Migrator,
-	store Store[K, New],
+	store Store[K, V],
 	convert func(key K, old *Old) (*New, error),
 	opts ...Option,
 ) error {
 	var o options
-	old := oldCodec[K, Old](store, opts, &o)
+	old, is := resolve[K, V, Old, New](store, opts, &o)
 	dataPrefix := store.DataPrefix()
 	name := store.Unit().Name()
+
+	// The records of the version of the store are of the type of the store.
+	if m.From()+1 == store.Unit().Version() && reflect.TypeFor[New]() != reflect.TypeFor[V]() {
+		return fmt.Errorf("the last migration of %q, from version %d to %d, gives %v, not %v, which is the type of the store",
+			name, m.From(), m.From()+1, reflect.TypeFor[New](), reflect.TypeFor[V]())
+	}
 
 	type change struct {
 		key   []byte
@@ -169,7 +251,7 @@ func Convert[K, Old, New any](
 			size := 0
 			for ; it.Valid() && len(batch) < o.batch && size < o.bytes; it.Next() {
 				rawKey := bytes.Clone(it.Key())
-				c, err := convertOne(store, old, convert, rawKey, it)
+				c, err := convertOne(store.KeyCodec(), old, is, convert, rawKey, it)
 				if err != nil {
 					return fmt.Errorf("record %x of %q: %w", rawKey, name, err)
 				}
@@ -209,13 +291,14 @@ func Convert[K, Old, New any](
 // convertOne returns the new encoded value of the record that an iterator is at, or nil if
 // the record is to be deleted.
 func convertOne[K, Old, New any](
-	store Store[K, New],
+	keys codec.KeyCodec[K],
 	old codec.ValueCodec[Old],
+	is codec.ValueCodec[New],
 	convert func(key K, old *Old) (*New, error),
 	rawKey []byte,
 	it kv.Iterator,
 ) ([]byte, error) {
-	key, err := store.KeyCodec().Decode(rawKey)
+	key, err := keys.Decode(rawKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode the key: %w", err)
 	}
@@ -228,11 +311,11 @@ func convertOne[K, Old, New any](
 		return nil, fmt.Errorf("failed to decode the record as it was: %w", err)
 	}
 
-	is, err := convert(key, &was)
-	if err != nil || is == nil {
+	converted, err := convert(key, &was)
+	if err != nil || converted == nil {
 		return nil, err
 	}
-	bz, err := store.ValueCodec().Encode(*is)
+	bz, err := is.Encode(*converted)
 	if err != nil {
 		return nil, fmt.Errorf("failed to encode the record: %w", err)
 	}

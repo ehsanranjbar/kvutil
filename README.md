@@ -202,6 +202,23 @@ report, err := users.Migrate(ctx, db) // when the program starts, before it uses
 fmt.Println(report)                    // migrated typed "users" from version 1 to 2
 ```
 
+A store that went through several versions has a migration for each of them, and the types of
+the versions in between stay in the code next to them. Every step is given the type that the
+version before wrote, and the last one gives the type of the store. A database of any version
+before the last one goes through the steps from its own:
+
+```go
+users := typed.New[int64, User]("users").WithVersion(3).
+    MigrateFrom(1, func(id int64, old *UserV1) (*UserV2, error) { ... }).
+    MigrateFrom(2, func(id int64, old *UserV2) (*User, error) { ... })
+```
+
+The records of a type in between are read and written with the default codec of the type. A
+program of that version that gave the store another codec for it passes the codec to the step
+that writes the type, with `migrate.WithNewCodec(c)`, and to the step that reads it, with
+`migrate.WithOldCodec(c)`. A last step that does not give the type of the store fails when the
+migration runs, before it converts a record.
+
 A program with several stores migrates them together, in one call, which compares all of them
 with the database before it changes anything:
 

@@ -144,10 +144,12 @@ func (s *Store[I, T]) WithVersion(v uint64) *Store[I, T] {
 }
 
 // MigrateFrom adds the migration of the records from a version to the next one: the function
-// is given every record in the type it had and returns it as it is to be; see migrate.Records.
-func (s *Store[I, T]) MigrateFrom[Old any](
+// is given every record in the type it had and returns it as it is to be; see migrate.Records
+// and typed.Store.MigrateFrom. The new type is the type of the store in the last migration, and
+// the type of the version after it in the ones before.
+func (s *Store[I, T]) MigrateFrom[Old, New any](
 	from uint64,
-	convert func(id I, old *Old) (*T, error),
+	convert func(id I, old *Old) (*New, error),
 	opts ...migrate.Option,
 ) *Store[I, T] {
 	migrate.Records(s, from, convert, opts...)
