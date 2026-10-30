@@ -28,10 +28,14 @@ import (
 	_ "github.com/ehsanranjbar/kvutil/bench/internal/workloads/aggs"
 	_ "github.com/ehsanranjbar/kvutil/bench/internal/workloads/bulkload"
 	_ "github.com/ehsanranjbar/kvutil/bench/internal/workloads/codecs"
+	_ "github.com/ehsanranjbar/kvutil/bench/internal/workloads/concurrency"
 	_ "github.com/ehsanranjbar/kvutil/bench/internal/workloads/indexmaint"
 	_ "github.com/ehsanranjbar/kvutil/bench/internal/workloads/keyfetch"
 	_ "github.com/ehsanranjbar/kvutil/bench/internal/workloads/kvbasic"
+	_ "github.com/ehsanranjbar/kvutil/bench/internal/workloads/lifecycle"
 	_ "github.com/ehsanranjbar/kvutil/bench/internal/workloads/queries"
+	_ "github.com/ehsanranjbar/kvutil/bench/internal/workloads/relations"
+	_ "github.com/ehsanranjbar/kvutil/bench/internal/workloads/storage"
 	_ "github.com/ehsanranjbar/kvutil/bench/internal/workloads/sweep"
 )
 
@@ -76,7 +80,9 @@ func usage() {
 
 The environment: KVB_PG_DSN (the DSN of PostgreSQL), KVB_TS_DSN (the DSN of TimescaleDB),
 KVB_DATA_DIR (where Badger keeps its databases), KVB_BADGER_CACHE_MB, KVB_PREFETCH; KVB_AGG_END,
-KVB_AGG_SPAN_DAYS and KVB_AGG_INTERVAL for the aggregations. "kvbench run -h" has the flags.
+KVB_AGG_SPAN_DAYS and KVB_AGG_INTERVAL for the aggregations; KVB_PG_CONTAINER, KVB_SELF_CONTAINER
+and KVB_DOCKER_SOCKET for the bytes written by a container and the restart of the database (storage,
+lifecycle). "kvbench run -h" has the flags.
 `)
 }
 
@@ -203,13 +209,13 @@ func runCmd(ctx context.Context, args []string) error {
 		defer cleanup()
 		sys = s
 	case "postgres":
-		s, err := c.postgres(ctx, p.Durability, p.Concurrency+4)
+		s, err := c.postgres(ctx, p.Durability, poolSize(p.Concurrency))
 		if err != nil {
 			return err
 		}
 		sys = s
 	case "timescale":
-		s, err := c.timescale(ctx, p.Durability, p.Concurrency+4)
+		s, err := c.timescale(ctx, p.Durability, poolSize(p.Concurrency))
 		if err != nil {
 			return err
 		}
@@ -245,6 +251,13 @@ func runCmd(ctx context.Context, args []string) error {
 	return errors.Join(errs...)
 }
 
+// poolSize is the number of connections of the pool: the workers of a case, a few more for what
+// runs beside them, and room for the concurrency workload, which runs 16 workers whatever the
+// run's concurrency is, with a long read transaction beside them.
+func poolSize(concurrency int) int {
+	return max(concurrency, 16) + 6
+}
+
 func verifyCmd(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("verify", flag.ExitOnError)
 	var c common
@@ -267,14 +280,14 @@ func verifyCmd(ctx context.Context, args []string) error {
 		return err
 	}
 	defer cleanup()
-	pgs, err := c.postgres(ctx, p.Durability, 8)
+	pgs, err := c.postgres(ctx, p.Durability, 12)
 	if err != nil {
 		return err
 	}
 	defer pgs.Close()
 	systems := []harness.System{kvs, pgs}
 	if needsTimescale(workloads) {
-		tss, err := c.timescale(ctx, p.Durability, 8)
+		tss, err := c.timescale(ctx, p.Durability, 12)
 		if err != nil {
 			return err
 		}

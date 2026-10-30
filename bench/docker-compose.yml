@@ -166,6 +166,10 @@ services:
       KVB_PG_DSN: postgres://postgres:bench@${PG_SERVICE:-postgres}:5432/bench?sslmode=disable
       KVB_TS_DSN: postgres://postgres:bench@timescaledb:5432/bench?sslmode=disable
       KVB_DATA_DIR: /data
+      # The storage and lifecycle workloads read the bytes that the containers wrote and restart
+      # the database through the Docker API (the socket below): the names of the containers.
+      KVB_PG_CONTAINER: kvbench-${PG_SERVICE:-postgres}
+      KVB_SELF_CONTAINER: kvbench-bench
       # The aggregations (see README.md): the end of the span of the events, their span in days,
       # and the interval of the collector and of the refresh policies. run.sh sets them.
       KVB_AGG_END:
@@ -183,6 +187,11 @@ services:
     volumes:
       - benchdata:/data
       - ./results:/results
+      # The Docker API: the workloads of storage and lifecycle read the bytes written by a
+      # container and restart the database with it. The harness is the one thing that runs in
+      # this container, and it uses the socket for those two things only; without the socket
+      # (a harness that runs outside compose) the workloads say that the figures are unavailable.
+      - /var/run/docker.sock:/var/run/docker.sock
 
 volumes:
   pgdata:

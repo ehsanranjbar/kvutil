@@ -132,6 +132,28 @@ func (s *System) Close() error {
 // Pool is the pool of connections.
 func (s *System) Pool() *pgxpool.Pool { return s.pool }
 
+// Connect opens a connection of its own, outside of the pool, with the settings of the pool's.
+func (s *System) Connect(ctx context.Context) (*pgx.Conn, error) {
+	return pgx.ConnectConfig(ctx, s.pool.Config().ConnConfig.Copy())
+}
+
+// Reset closes the connections of the pool and waits for the server to answer again, for after
+// the server was restarted. The pool opens new connections when it is asked for them.
+func (s *System) Reset(ctx context.Context, wait time.Duration) error {
+	s.pool.Reset()
+	deadline := time.Now().Add(wait)
+	for {
+		err := s.pool.Ping(ctx)
+		if err == nil {
+			return nil
+		}
+		if time.Now().After(deadline) || ctx.Err() != nil {
+			return fmt.Errorf("pg: the server does not answer: %w", err)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
 // Durability is the durability that the system was opened with.
 func (s *System) Durability() harness.Durability { return s.cfg.Durability }
 

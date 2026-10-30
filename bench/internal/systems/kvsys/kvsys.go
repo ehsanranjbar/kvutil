@@ -118,6 +118,7 @@ type DB struct {
 	sys  *System
 	dir  string
 	opts []badgerkv.Option
+	tune func(badger.Options) badger.Options
 }
 
 // Open creates a new, empty database. The name only helps whoever looks at the directory.
@@ -128,6 +129,19 @@ func (s *System) Open(name string) (*DB, error) {
 // OpenPrefetch is Open with the iterators reading the given number of values ahead instead of the
 // number of the system: a workload that skips over keys wants none.
 func (s *System) OpenPrefetch(name string, prefetch int) (*DB, error) {
+	return s.OpenWith(name, prefetch, nil)
+}
+
+// Tuning changes the options of Badger that the system opens a database with, and the options of
+// kvutil's adapter of it, for a workload that measures something the defaults hide (the garbage
+// collection of the value log, the number of retries of a conflict). Either may be nil.
+type Tuning struct {
+	Badger func(badger.Options) badger.Options
+	KV     []badgerkv.Option
+}
+
+// OpenWith is OpenPrefetch with the options tuned. The tuning is kept for Reopen.
+func (s *System) OpenWith(name string, prefetch int, t *Tuning) (*DB, error) {
 	dir := filepath.Join(s.cfg.DataDir, fmt.Sprintf("kvb-%s-%d", name, s.seq.Add(1)))
 	if err := os.RemoveAll(dir); err != nil {
 		return nil, err
@@ -136,25 +150,50 @@ func (s *System) OpenPrefetch(name string, prefetch int) (*DB, error) {
 	if prefetch > 0 {
 		opts = append(opts, badgerkv.WithPrefetch(prefetch))
 	}
-	db, err := badgerkv.Open(s.options(dir), opts...)
-	if err != nil {
+	d := &DB{sys: s, dir: dir, opts: opts}
+	if t != nil {
+		d.tune = t.Badger
+		d.opts = append(d.opts, t.KV...)
+	}
+	if err := d.open(); err != nil {
 		return nil, err
 	}
-	return &DB{DB: db, sys: s, dir: dir, opts: opts}, nil
+	return d, nil
 }
 
-// Reopen closes the database and opens it again from its files, which empties the block cache of
-// Badger (the pages that the operating system caches stay).
-func (d *DB) Reopen() error {
-	if err := d.DB.Close(); err != nil {
-		return err
+func (d *DB) open() error {
+	o := d.sys.options(d.dir)
+	if d.tune != nil {
+		o = d.tune(o)
 	}
-	db, err := badgerkv.Open(d.sys.options(d.dir), d.opts...)
+	db, err := badgerkv.Open(o, d.opts...)
 	if err != nil {
 		return err
 	}
 	d.DB = db
 	return nil
+}
+
+// Reopen closes the database and opens it again from its files, which empties the block cache of
+// Badger (the pages that the operating system caches stay).
+func (d *DB) Reopen() error {
+	if err := d.Shutdown(); err != nil {
+		return err
+	}
+	return d.Start()
+}
+
+// Shutdown closes the database, which flushes what its memtable holds; Start opens it again from
+// its files. Reopen is the two together, for a workload that times them apart.
+func (d *DB) Shutdown() error { return d.DB.Close() }
+
+// Start opens the database again after Shutdown.
+func (d *DB) Start() error { return d.open() }
+
+// Flatten compacts the levels of the tree into the last one, which drops the versions and the
+// keys that were deleted or have expired.
+func (d *DB) Flatten(workers int) error {
+	return d.Badger().Flatten(workers)
 }
 
 // Update implements kv.DB, and counts the times that the function is run again.

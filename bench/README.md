@@ -6,16 +6,16 @@ aggregations only. It is a Go module of its own (`github.com/ehsanranjbar/kvutil
 the module of the library, and `go test ./...` at the root does not go into it. The databases run
 in Docker, under the same limits as the harness, on macOS and on Linux.
 
-This is stage B2: the harness, the first workloads (B1) and the workloads of queries. The workloads
-of later stages (aggregations, relations, lifecycle, concurrency, storage) are packages that
-register themselves with the harness; see [Adding a workload](#adding-a-workload).
+This is stage B4: the harness, the first workloads (B1), the workloads of queries (B2), the stored
+aggregations (B3) and the workloads of relations, lifecycle, concurrency and storage. The workloads
+are packages that register themselves with the harness; see [Adding a workload](#adding-a-workload).
 
 | Stage | Workloads |
 | --- | --- |
 | B1 | `kv-basic`, `bulk-load`, `record-codecs`, `index-maintenance` |
-| B2 (here) | `queries`, `selectivity-sweep`, `key-order-fetch` (group `query`) |
-| B3 | stored aggregations (against TimescaleDB too) |
-| B4 | relations, lifecycle, concurrency, storage |
+| B2 | `queries`, `selectivity-sweep`, `key-order-fetch` (group `query`) |
+| B3 | stored aggregations (group `agg`; against TimescaleDB too) |
+| B4 (here) | `relations`, `lifecycle`, `concurrency`, `storage` (a group each) |
 | B5 | the report |
 
 ## Running it
@@ -26,12 +26,15 @@ Needs Docker with compose v2 and bash; nothing else (Go is in the image).
 cd bench
 
 # A smoke run: every workload on both systems, 10,000 small records, 1 second per case, and
-# `kvbench verify` first. It takes about 20 minutes (the three workloads of the queries take 7 of them).
+# `kvbench verify` first. It takes about 45 minutes (the three workloads of the queries take 7 of
+# them, the four of B4 about 20).
 ./run.sh --smoke
 
-# The same for one workload (or a group: kv, load, records, index, query), which is quicker:
+# The same for one workload (or a group: kv, load, records, index, query, agg, relations,
+# lifecycle, concurrency, storage), which is quicker:
 ./run.sh --smoke -w kv-basic
 ./run.sh --smoke -w queries,selectivity-sweep,key-order-fetch   # the same as -w query
+./run.sh --smoke -w relations,lifecycle,concurrency,storage     # the workloads of B4
 
 # A run: a million small records, both durability modes, 4 CPUs and 4 GB for each container.
 ./run.sh -s 1000000 -d both
@@ -88,6 +91,10 @@ kvbench list
 | `-seed` | 1 | the seed of the dataset and of the choices of the workers |
 | `-out` | | the file that results are appended to, as JSON lines |
 | `-pg-dsn`, `-data-dir`, `-cache-mb`, `-prefetch` | `$KVB_PG_DSN`, `$KVB_DATA_DIR` (`/data`), a quarter of the memory limit, 64 | |
+
+The workloads of storage and lifecycle also read `KVB_PG_CONTAINER` (the container of the database
+to read the written bytes of and to restart; compose sets it), `KVB_SELF_CONTAINER` (the harness'
+own, `kvbench-bench`; the host name if not set) and `KVB_DOCKER_SOCKET` (`/var/run/docker.sock`).
 
 A workload that fails does not stop the others: the command exits with 1 at the end.
 
@@ -760,6 +767,165 @@ exact answer of the events; `agg-rebuild` builds the aggregates over events with
 compares their reads. The cases of the timed workloads check their first query against the exact
 answer too.
 
+### The relations (group `relations`, stage B4)
+
+Parents and children, and a many-to-many relation with data on its pairs. One variant,
+`relations`, with the cases of both; the data is a function of the seed and the scale
+(`relations/model.go`). N is `-scale`:
+
+| | Count | |
+| --- | --- | --- |
+| Children | N | each belongs to one parent; `title`, `qty`, `status`, a payload of 4 KB with `-values large` |
+| Parents | max(20, N/10) | the parent of a child follows a Zipf law of exponent 1: the first has ln 2 / ln(P+1) of the children (13% of 10,000, 7% of a million), the one of rank k about 1/(k+1) of the first's. Most have a few |
+| Left and right records | max(20, N/20) and max(20, N/10) | accounts and teams |
+| Pairs | about N | the left record of rank k has 1/(k+1) of the pairs of the first (at most as many as there are right records), the right records of a left record are spread evenly; each pair has a role and a date |
+
+**kvutil** (`relations/kvutil.go`), the stores are `record.New` with msgpack:
+
+```go
+owned   := relation.Associate("owned", parents, children)         // a child belongs to a parent
+members := relation.New[pairData]("members", lefts, rights)       // pairs with data
+// a child, with the check of the parent and the references of both directions:
+children.Instantiate(tx).Set(&c, owned.Under(parentID))
+owned.Instantiate(tx).Children(parentID)   // iterator of keys; Value() reads the record of each
+owned.Instantiate(tx).Parent(childID)
+parents.Instantiate(tx).Delete(parentID)    // deletes the children, through the child store
+members.Instantiate(tx).Set(left, right, &data); .Get(left, right); .Rights(left); .Lefts(right)
+lefts.Instantiate(tx).Delete(id)            // deletes the pairs
+```
+
+**PostgreSQL** (`relations/postgres.go`): `children.parent_id REFERENCES parents (id) ON DELETE
+CASCADE`, an index on `children (parent_id, id)` (the order of kvutil's references, so that
+`ORDER BY id` needs no sort), and a join table `memberships (left_id → lefts, right_id → rights,
+role, since)` with both foreign keys `ON DELETE CASCADE`, the primary key `(left_id, right_id)`
+and an index `(right_id, left_id)`. Loads are `COPY` (with the checks and the indexes in place).
+
+| Case | kvutil | PostgreSQL |
+| --- | --- | --- |
+| `load-parents`, `load-children`, `load-entities`, `load-pairs` | transactions of 500 (`Set` with the parent checked, `Set` of the pair), on up to 4 workers | `COPY` of the same on up to 4 connections |
+| `children-T`, `children-keys-T` (T is the tier: `few` 1 to 5 children, `typical` 10 to 100, `many` 200 to 5,000; at 1 and `-concurrency` workers) | `Children(parent)` with the record of each / the key of each | `SELECT id, title, qty, status, payload FROM children WHERE parent_id = $1 ORDER BY id` / `SELECT id …` |
+| `parent-of` | `Parent(child)` | `SELECT p.* FROM children c JOIN parents p ON p.id = c.parent_id WHERE c.id = $1` |
+| `insert-child` (a parent drawn from the law of the data) | `Set(child, Under(parent))` in `Update`: checks the parent, looks for the current parent of the child, writes the record and both references | `INSERT INTO children …`: the foreign key is checked |
+| `rights-M-T` (M is `keys`, `data` or `records`; T is `typical` or `many` pairs of the left record) | `Rights(left)`: keys; with `Value()` (the pair data); with a `Get` of each right record | `SELECT right_id …`; `SELECT right_id, role, since …`; a join with `rights` (all `WHERE left_id = $1 ORDER BY right_id`) |
+| `lefts-M` (a right record at random) | `Lefts(right)` the same way | the same with `WHERE right_id = $1`, joined with `lefts` |
+| `pair-get`, `pair-set` | `Get(left, right)`; `Set` (both records are checked: an upsert) | `SELECT role, since …`; `INSERT … ON CONFLICT (left_id, right_id) DO UPDATE` |
+| `delete-parent-T`, `delete-left-T` (T is `few` or `many`) | `Delete` of a parent or a left record in `Update`: its children or pairs go with it, in the same transaction | `DELETE FROM parents WHERE id = $1` (cascade) |
+| `cascade-limit` (kvutil only) | parents of 1,024, 2,048… children are deleted until one fails; `largest_cascade_that_fit_children`, `first_cascade_that_failed_children` and `delete_ms_<size>` | |
+
+The cases that delete use up their records: a pool of the tier is split between the two levels of
+workers, each record once (cases of operations; a tenth is the warm-up). The pools are 4,096
+records at most, taken evenly from the tier. `units` of the cases are children or pairs.
+`params.case` has `tier_mean_children` / `tier_mean_pairs`, the mean size of the tier. The tiers
+that have no record at a small scale have no case (10,000 children have all of them).
+
+kvutil deletes the children of a parent in the transaction of the delete, one by one, and a
+transaction holds a limited number of writes (`kv.ErrTxnTooBig`): `cascade-limit` finds how large a
+parent can be, and the time of a cascade grows with the square of the number of children there
+(see the findings in the report). A run walks up to 32,768 children (a smoke run to 8,192, a tiny
+one to 2,048); the `many` tier stays below the limit. PostgreSQL has no such limit.
+
+### The lifecycle (group `lifecycle`)
+
+Changing a database that has records in it. N records are loaded, then each variant changes
+them, as phases (the time, `records_per_sec`, and the sizes after):
+
+| Variant | Cases | kvutil | PostgreSQL |
+| --- | --- | --- | --- |
+| `index-single`, `index-unique`, `index-composite`, `index-multi` | `add-index`, `drop-index`, `add-index-concurrently` (PostgreSQL only) | the store is defined again with the index and `Migrate` builds it (checked: one `Built` action); defined without it, `Migrate` deletes its entries (one `Dropped`) | `CREATE INDEX` on `customer` / `CREATE UNIQUE INDEX` on `code` / `(customer, created_at)` / `USING gin (tags)`; `DROP INDEX`; `CREATE INDEX CONCURRENTLY` |
+| `migrate` | `convert` (the sum), `convert-add-column` and `convert-update` (PostgreSQL), `add-field` | `record.New[int64, orderV2]("rec").WithVersion(2).MigrateFrom(1, func(id, old *Order) (*orderV2, error) {…})`: `Migrate` converts every record in batches of 256 records (a priority from the total); the second case is a store whose record has one more field and the same version: `Migrate` finds nothing to do | `ALTER TABLE ADD COLUMN priority integer` and `UPDATE … SET priority = total / 10000`; `ALTER TABLE ADD COLUMN extra text NOT NULL DEFAULT 'x'`, which PostgreSQL does in the catalog and not in the rows |
+| `migrate-indexed` | `build-indexes` (customer, status, total), then the same as `migrate` | `Migrate` converts the records and builds the three indexes again from the new ones (three `Built`) | the `UPDATE` writes a new version of every row, and of every index entry (the update is not HOT: it writes the page full) |
+| `open` | `open-new`, `open-loaded`, `restart-loaded` | a database with nothing in it: `Open`, define the stores, `Migrate` (records them), a first `Get`; reopened with records and three indexes: `Open`, `Migrate` (nothing to do: an empty report is checked), a first `Get`; restarted: the close and the open of the database in the process | a new connection and a first query (`SELECT count(*)` of an empty table; a primary key lookup); a restart: `docker restart` of the container through the Docker API, then a new connection until the first answer |
+
+The cases of `open` have 7 trials (3 for the restart) and say, in `extra`, the minimum, the median
+(`ready_ms_median`, which is also the `elapsed_sec`), the mean and the maximum in milliseconds,
+and for `open-loaded` the parts (`close_ms_*`, `open_ms_*`, `first_ms_*`, the first answer). On
+kvutil `open-loaded` leaves out the close, and `restart-loaded` has it. `restart-loaded` has
+`info.method`: without the Docker socket PostgreSQL is not restarted, and the case says that it is
+only a new connection to the running server.
+
+A database is alone while it is changed, as `Migrate` needs: nothing writes during the cases. The
+data of the `index-*` cases is `dataset.Order`, the one of `index-maintenance`, in the same
+table.
+
+### The concurrency (group `concurrency`)
+
+Contention. Every case runs at 1, 2, 4, 8 and 16 workers (whatever `-concurrency` is) as a closed
+loop, which does not correct for coordinated omission (see [Limits](#limits-of-what-is-measured)).
+The pool of the connections has room for them. A variant is a scenario on a database of its own:
+
+| Variant | System | Cases | What a worker does |
+| --- | --- | --- | --- |
+| `rmw-update` | kvutil | `rmw-k1`, `rmw-k10`, `rmw-k100`, `rmw-k10000` | a counter of a set of that many keys, chosen at random, is incremented in `db.Update` (`Get`, add one, `Set`), run again on a conflict up to 10 times (`badgerkv.DefaultMaxRetries`): `retries` of the result are the times it was run again, `errors` the commits that still conflicted after the limit |
+| `rmw-update-r100` | kvutil | the same for 1, 10 and 100 keys | the same with `badgerkv.WithMaxRetries(100)` |
+| `rmw-for-update` | PostgreSQL | the same | in a transaction: `SELECT n FROM counters WHERE k = $1 FOR UPDATE`, `UPDATE counters SET n = $2 WHERE k = $1`, commit |
+| `rmw-atomic` | PostgreSQL | the same | `UPDATE counters SET n = n + 1 WHERE k = $1` |
+| `blind-write` | both | `blind-write` | a write of a new key (a record of 200 bytes) in a transaction of its own: no conflicts, so what is shown is what the commits cost when many ask for the disk at once (group commit). Both durability modes are the modes of the run (`-d both`) |
+| `mixed` | both | `mixed-uniform`, `mixed-zipf` (`load` is the phase before) | 90% reads of a record (`Get` of the record store; `SELECT` of the columns) and 10% writes that add one to its `Qty` (kvutil: `Get` and `Set` in `Update`; PostgreSQL `UPDATE orders SET qty = qty + 1`); the key is drawn uniformly or by a Zipf law of exponent 1 (`harness.NewKeys`: rank k has 1/(k+1) of the draws of the first, and the ranks are scrambled over the ids so that the hot records are not next to one another) |
+| `long-read` | both | `writers-alone`, `writers-with-reader`, `reader` | writers increment random counters of 10,000 (PostgreSQL atomically). In `writers-with-reader` a transaction that took its snapshot before them reads all the counters, again and again, until the writers finish (kvutil `db.View`; PostgreSQL `REPEATABLE READ READ ONLY`, `SELECT sum(n), count(*)`). `reader` has the reader's side as `extra`: `scans`, `unstable_scans` (a scan that saw another sum than the first: the run fails if there is one), `scan_first_ms`, `scan_last_ms`, `scan_p50_ms`, `scan_p99_ms`, `scan_max_ms`, `snapshot_seconds`, `disk_growth_bytes`, and for PostgreSQL `dead_tuples_before/after` and `table_bytes_before/after` (what the open snapshot keeps the vacuum from cleaning) |
+
+Each case checks its result, and fails the variant if it is wrong: the counters add up to the
+increments that succeeded (counted in the warm-up too), the rows of `blind-write` to the writes,
+and the quantities of `mixed` to the writes that succeeded. A set of one key is the worst case
+for every system; of 10,000 keys, nobody conflicts.
+
+### The storage (group `storage`)
+
+What the data takes on disk. N records with the indexes `customer`, `code` (unique), `composite`
+(customer, time) and `tags` (an entry per tag), the same as `index-maintenance`. Every step ends
+with the writes made durable (kvutil closes the database and opens it, which flushes the memtable;
+PostgreSQL `CHECKPOINT`), and its result has `extra`:
+
+| Key | |
+| --- | --- |
+| `disk_bytes_before`, `disk_bytes_after`, `disk_growth_bytes` | the size of the database (the files of Badger by the blocks they occupy, `pg_total_relation_size` of the tables) |
+| `user_bytes` | the bytes that the user wrote in the step: the records, encoded (msgpack), by the mean of 200 of them; 0 for a delete |
+| `container_write_bytes`, `write_amp`, `write_bytes_per_dataset_byte` | the bytes that the container wrote to block devices during the step (from the cgroup `io.stat` of the harness' container for kvutil, from the Docker API for PostgreSQL's container); `write_amp` is those over `user_bytes`. Absent when the figure is unavailable, and then `info.io_source` is `unavailable`; it is `cgroup` or `docker-api` otherwise |
+| `wal_bytes`, `pg_stat_io_write_bytes`, `wal_per_user_byte` | PostgreSQL only: the WAL the server made (`pg_stat_wal`), and the bytes it wrote to relations and the WAL according to `pg_stat_io` |
+
+| Variant | Cases |
+| --- | --- |
+| `footprint` (both) | `load` (no index), `add-index-customer`, `-code`, `-composite`, `-tags` (one at a time), `footprint` (the sizes: `table_bytes`, `index_<kind>_bytes`, `total_bytes`, `bytes_per_record`, the same per record), `overwrite-1`, `-2`, `-3` (every record written again with new values for every indexed field: transactions of 500 on kvutil, batches of 500 statements on PostgreSQL), `delete-half` (the odd ids), and what gives the space back: kvutil `value-log-gc` (`RunValueLogGC`), `flatten` (`Badger.Flatten(4)`), `value-log-gc-after-flatten`; PostgreSQL `vacuum`, `vacuum-full` |
+| `footprint-vlog` (kvutil) | the same on a database whose values are kept in the value log (threshold 64 bytes, files of 16 MiB): Badger keeps a value under 1 MiB in the tree, so in the default database the collection of the value log has nothing to do |
+| `expiry` (both) | `insert-plain`, `insert-ttl` (and `…-io`: the bytes written for them), `after-expiry`, then the same reclaiming |
+
+* In `footprint` the vacuum of PostgreSQL is off for the table (`autovacuum_enabled = false`), so that
+  the size between the steps is what the writes left, and the vacuums are run by the workload.
+  In `expiry` it is on, as in production.
+* kvutil's sizes of the table and of each index are the disk after the load, and what each
+  `Migrate` that built an index added to it: approximate, as Badger compacts in the background.
+  `table_logical_bytes` and `index_<kind>_logical_bytes` are the keys and values under the prefix of
+  each, before Badger compresses them (the sum of the lengths). PostgreSQL's are `pg_table_size`
+  (with TOAST) and `pg_relation_size` of each index.
+* The disk that Badger keeps for the records that were written again is not given back until the
+  tables that hold them are compacted: the results show `flatten` as the step that does it.
+* `expiry`: the records of kvutil are `SetWithTTL` of a typed store, `store.Instantiate(tx).SetWithTTL`;
+  a record store with indexes cannot set a TTL (`ErrTTLWithExtensions`), so there is no index.
+  PostgreSQL's table has `expires_at` with a partial index on it, and a job deletes `WHERE
+  expires_at < now()` every second while the writers run (`job_runs`, `job_rows_deleted`,
+  `job_busy_ms_total`, `job_longest_run_ms` of `after-expiry`). The life of a record is 4 s.
+  Badger does not delete an expired key until it compacts the tables that hold it, but a read does
+  not see it from the moment it expired. `after-expiry` has `records_not_expired_after` (0), the
+  disk at the end of the writes and after the expiry. A run fails if a record that has expired is
+  still visible.
+
+**What is unavailable.** The container figures need the Docker API or a cgroup that counts block
+I/O. On Linux with cgroup v2 the `io.stat` of the harness' container is read, and the daemon's
+statistics give PostgreSQL's. On Docker Desktop for macOS (29.9, when this was written) both
+worked: the containers are Linux ones in a VM, and the figures are the bytes that reach the
+virtual disk of the VM, not the SSD of the Mac. A daemon or a cgroup that has no block I/O
+figures (the I/O controller is off) makes `info.io_source` `unavailable` and leaves the keys
+out; `docker-stats-<durability>.csv` (block I/O, sampled by `run.sh`) and, for PostgreSQL,
+`pg_stat_io` and `pg_stat_wal` (always in the result) are what is left. When the harness is run
+outside compose (see above), there is no socket and no cgroup either. A restart of PostgreSQL
+needs the socket as well; without it `restart-loaded` is a new connection and says so.
+
+The bytes written include everything that the container does, not only the step: the first steps
+on a fresh PostgreSQL server write the 16 MB WAL segments that it creates (zero-filled) as the
+log grows, which `min_wal_size` then keeps, so the early cases show more `container_write_bytes`
+than the later ones for the same work; `pg_stat_io_write_bytes` counts the same. The statistics
+of the processes that write in the background reach `pg_stat_io` up to a second late, which is
+why a PostgreSQL step waits 1.2 s after its checkpoint (`duration_incl_flush_sec` has it).
+
 ### Reading the plans
 
 The result of a case of the query workloads has `metrics.info`:
@@ -800,6 +966,23 @@ produce, and compares them:
   records, with the database opened again in between) and say the number of values, their bytes and a
   checksum; the ways of a size of the values must say the same.
 
+* `relations`: the children of 6 parents, the parent of 4 children, the lists of a few left and right
+  records (keys only, with the data of the pairs, with the records), a pair or the lack of it, after
+  a child and some pairs were set (and a child under a parent that does not exist was refused), and
+  again after the deletion of two parents and of a left and a right record with their children and
+  pairs: the number of records of each kind and a digest of every list must be the same.
+* `lifecycle`: the ids that each new index finds (again after it is dropped and built again), the
+  ids of each priority after the value change of every record, the ids that the three indexes find
+  after it (kvutil has built them again; PostgreSQL has updated them), that the record is still
+  there after a field is added, and the ids that an index finds after the database was opened again.
+* `concurrency`: after 4 workers did 150 operations of each scenario, the counters add up to the
+  increments that succeeded, the rows to the writes, the quantities to the writes, the snapshot of
+  the long reader did not change; the numbers themselves depend on the conflicts, so the lines say
+  yes or no and every variant of a scenario must say yes.
+* `storage`: the number of records after the load, two rewrites, the deletion of half and the
+  reclaiming, and the records of a table with an expiry that are there just after they are written
+  and after they have expired. There is no comparison of the sizes.
+
 At the scale of a verification (2,000 books) the answers are not empty, and the deep paging offset is
 smaller (850): see the cases.
 
@@ -834,7 +1017,10 @@ creates what it needs (a fresh Badger database with `*kvsys.System.Open`, a sche
 * `rc.SizeFn` says how to measure the size of the database after each of them.
 
 Shared pieces: `internal/dataset` (records), `internal/wl` (the columns of a record in PostgreSQL,
-loaders, the cursor over a pool of ids), `internal/testutil` (a kvutil system and a run for tests).
+loaders, the cursor over a pool of ids), `internal/testutil` (a kvutil system and a run for tests),
+`harness.NewKeys` (keys drawn uniformly or by a Zipf law), `kvsys.System.OpenWith` (Badger with
+options changed: the retries of a conflict, the value log), `internal/dockerapi` (the bytes a
+container wrote, and the restart of one).
 Scans for B2 or the aggregations for B3 add variants, and the harness, the CLI, the scripts and
 the results format do not change.
 
@@ -844,8 +1030,17 @@ the results format do not change.
   the response time of an open system.
 * PostgreSQL is reached by pgx over the compose network, with a pool, and kvutil is a library call:
   the network and the protocol are a part of what a client of PostgreSQL pays.
-* The ids of reads and writes are uniform. There is no skew (B4), but for the authors of the books
-  of the query workloads, which follow a Zipf law.
+* The ids of reads and writes are uniform, but for the authors of the books of the query
+  workloads, the customers of the aggregations, the children of the relations, and the Zipf cases of
+  `concurrency` (`harness.NewKeys`).
+* The workloads of `concurrency` are a closed loop, like the rest: a worker does not start an
+  operation before the last one returned, so a system that stalls makes the workers wait with it,
+  and the latencies do not show the time that the operations that were not started would have
+  waited (coordinated omission). The model that corrects it (a schedule of arrivals) was not used.
+* `storage` reads the bytes written by a container from its cgroup or from the Docker API, and
+  `lifecycle` restarts the database through the Docker API; both need the socket of the daemon
+  in the harness' container, which compose mounts. They say when they could not (see
+  [The storage](#the-storage-group-storage)).
 * The query workloads draw the arguments of a case from a pool of 1,024 sets (256 ranges in the
   sweep), because a prepared query of kvutil has its values in it; a case does not touch more
   distinct records than the pool does, which is the same for both systems.
@@ -876,5 +1071,9 @@ the authors, the years, the tags, the titles), the histogram and the results for
 `verify`), the readers of plans, the loaders, the binary codec, and every workload on kvutil (its
 variants against one another, the indexes and the queries against the records computed in Go, the
 statements of PostgreSQL that the cases make and their parameters, a run of every case with the plans
-that kvutil is expected to choose). The comparison with PostgreSQL is `kvbench verify`.
+that kvutil is expected to choose), and for B4 the data of the relations against the model, the
+answers of the lifecycle against the records computed in Go, the consistency checks of the
+concurrency scenarios, the counts of the storage steps, the Zipf keys, the parsers of the cgroup and
+of the Docker API (with a fake daemon on a unix socket) and the SQL of every case. The comparison
+with PostgreSQL is `kvbench verify`.
 CI vets and builds the module without running Docker.
