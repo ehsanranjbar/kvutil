@@ -12,3 +12,5 @@ but this file is committed.
 | `meta.json` | The arguments, the limits, the commit of kvutil and the Docker the run was made on |
 | `compose.resolved.yml` | The compose file as it was run, with the variables filled in |
 | `images.txt` | The digests of the database images |
+| `report.html`, `report.md`, `charts/` | The report `run.sh` writes at the end (`kvbench report`): one self-contained page, the same as Markdown with its charts as SVG files |
+| `*.csv` (but `docker-stats-*`) | The data behind the tables of the report: `runs.csv`, `<run>-<durability>-<workload>.csv` with a line for each result, and the tables of the special sections and of the comparison |

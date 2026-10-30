@@ -1,0 +1,3 @@
+DIFFER kv-basic         kvutil/typed, postgres/bytea
+         line 3 differs
+verification failed

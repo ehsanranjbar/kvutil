@@ -8,6 +8,9 @@
 #   ./run.sh -w kv-basic,bulk-load -s 1000000
 #   ./run.sh -s 1000000 -V large -d both     # the full run, for both durability modes
 #
+# At the end it writes the report (report.html, report.md, charts/ and CSV files) into the run's
+# directory; a report that fails does not fail the run.
+#
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -260,6 +263,16 @@ done
 for image in postgres:18 timescale/timescaledb:2.31.0-pg18; do
   docker image inspect "$image" --format "$image {{index .RepoDigests 0}}" 2>/dev/null || true
 done > "$OUT/images.txt"
+
+# The report: report.md, report.html, charts/ and the CSV files, in the directory of the run. A
+# report that fails does not fail the run, whose results are all there; "kvbench report" makes it again.
+log "report"
+if harness report -out "/results/$OUT_NAME" "/results/$OUT_NAME"; then
+  echo "report: bench/$OUT/report.html"
+else
+  echo "warning: the report could not be made; the results are in bench/$OUT. Try again with:" >&2
+  echo "  docker compose run --rm --no-deps bench report -out /results/$OUT_NAME /results/$OUT_NAME" >&2
+fi
 
 log "results in bench/$OUT"
 ls -l "$OUT"

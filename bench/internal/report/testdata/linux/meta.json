@@ -1,0 +1,8 @@
+{
+  "host": "srv",
+  "started": "20261021T100000Z",
+  "kvutil_commit": "abc123",
+  "args": {"workload": "kv-basic", "scale": 100000, "values": "small", "durability": "durable", "concurrency": 4, "duration": "10s", "warmup": "2s", "systems": "kvutil,postgres", "seed": 1, "pg_service": "postgres"},
+  "limits": {"cpus": "4", "mem": "4g", "shared_buffers": "1024MB", "effective_cache_size": "3072MB"},
+  "docker": {"server": "29.9.2", "os": "Ubuntu 24.04", "ncpu": 32, "mem_total": 67108864000, "kernel": "6.8.0"}
+}

@@ -6,17 +6,192 @@ aggregations only. It is a Go module of its own (`github.com/ehsanranjbar/kvutil
 the module of the library, and `go test ./...` at the root does not go into it. The databases run
 in Docker, under the same limits as the harness, on macOS and on Linux.
 
-This is stage B4: the harness, the first workloads (B1), the workloads of queries (B2), the stored
-aggregations (B3) and the workloads of relations, lifecycle, concurrency and storage. The workloads
-are packages that register themselves with the harness; see [Adding a workload](#adding-a-workload).
+This is stage B5, the last: the harness, the first workloads (B1), the workloads of queries (B2),
+the stored aggregations (B3), the workloads of relations, lifecycle, concurrency and storage (B4)
+and the report (B5). The workloads are packages that register themselves with the harness; see
+[Adding a workload](#adding-a-workload).
 
 | Stage | Workloads |
 | --- | --- |
 | B1 | `kv-basic`, `bulk-load`, `record-codecs`, `index-maintenance` |
 | B2 | `queries`, `selectivity-sweep`, `key-order-fetch` (group `query`) |
 | B3 | stored aggregations (group `agg`; against TimescaleDB too) |
-| B4 (here) | `relations`, `lifecycle`, `concurrency`, `storage` (a group each) |
-| B5 | the report |
+| B4 | `relations`, `lifecycle`, `concurrency`, `storage` (a group each) |
+| B5 (here) | `kvbench report`: the results as tables, charts and CSV files |
+
+## Running and reading
+
+The short way, for someone who has the repository and Docker and wants numbers to read.
+
+### What a machine needs
+
+* Docker with compose v2, and bash. Nothing else: Go is in the image of the harness, and the
+  databases are images. The first run builds the harness and pulls `postgres:18` (about 0.7 GB)
+  and, for the stored aggregations, `timescale/timescaledb` (about 1.5 GB).
+* CPUs and memory for two containers at once, the database and the harness, each with the limits
+  of `--cpus` and `--mem` (4 CPUs and 4 GB by default). The machine, or the VM of Docker Desktop,
+  needs the sum of the two and room for the system: 8 CPUs and 10 GB for the defaults.
+* Disk, in the Docker volumes (the data of both systems, which is removed at the end of the run):
+  see [How long and how much disk](#how-long-and-how-much-disk).
+
+### On a Mac
+
+```sh
+# Docker Desktop: Settings > Resources, at least 8 CPUs and 10 GB of memory, and 80 GB of disk
+# for the runs below. Then:
+open -a Docker
+cd bench
+
+./run.sh --smoke -w kv-basic            # a few minutes (the first run builds the image): does it all work?
+./run.sh -s 1000000 -d both             # the run: about 7 hours with both durability modes
+./run.sh -s 100000                      # or a third of that: 3 hours, durable only
+open results/<host>-<timestamp>/report.html
+```
+
+The numbers of a Mac are for comparing the two systems on that Mac: its CPUs are shared with the VM
+and an `fsync` stops at the virtual disk of the VM (see [Caveats](#caveats-to-keep-in-mind)). The
+report says so at its top.
+
+### On a Linux server
+
+```sh
+# Docker Engine with the compose plugin, and a user that can run docker. Then:
+git clone <the repository> && cd kvutil/bench
+./run.sh --smoke -w kv-basic
+./run.sh -s 1000000 -d both --cpus 8 --mem 16g   # whatever the machine can give each container
+# a larger run, with the large values, in the background:
+nohup ./run.sh -s 500000 -V large -d both > run.log 2>&1 &
+```
+
+Give the containers fewer CPUs and less memory than the machine has, so that the harness and the
+database do not take from each other and from the system: a server of 16 cores and 64 GB can give
+8 and 16g each. Keep the other work on the machine quiet during a run; a run does not try to
+isolate itself from it.
+
+### How long and how much disk
+
+**Time.** What was measured: a smoke run of every workload (10,000 records, a second and a half per
+timed case) on a MacBook, in Docker Desktop with 4 CPUs and 4 GB for each container, in three pieces
+that took 7.5, 8.7 and 8 minutes (24 in all, the build of the image included). It had 841 timed
+results (one case, at one level of concurrency, of one variant of one system) and 20 seconds of
+loading and building; everything else was starting containers, preparing data and the fixed waits
+of a few workloads, about 4 minutes. A timed result takes the warm-up and the duration, so:
+
+```text
+time = 841 x (warm-up + duration)  x  (2 for -d both)  +  20 s x (scale / 10,000)  +  about 5 min
+```
+
+| Run | Estimate |
+| --- | --- |
+| `./run.sh --smoke` (all workloads, with `verify`) | 25 minutes |
+| `./run.sh -s 100000` (10 s and 2 s per case, durable) | 3 hours |
+| `./run.sh -s 1000000` | 3.5 hours |
+| `./run.sh -s 1000000 -d both` | 7 hours |
+| `./run.sh -s 1000000 -d both --duration 5s --warmup 1s` | 3.5 hours |
+
+The loading and building (indexes, aggregations, the storage steps) were measured at 10,000
+records only and extended linearly; at a million, an index build is slower than linear, and the
+cold reads and the rebuilds scale with the data, so take the estimates for the large runs as a
+floor, and look at the log of the first hour. The timed results of each workload at the defaults
+(12 s each; the other cases of the workloads add to this) are: `kv-basic` 48 (10 minutes), `queries`
+170 (34), `index-maintenance` 120 (24), `concurrency` 125 (25), `selectivity-sweep` 96 (19),
+`relations` 92 (18), `agg-read` 72 (14), `record-codecs` 36 (7), `agg-write` 30 (6),
+`agg-freshness` 24 (5), `agg-hot-group` 20 (4), `storage` 8 (2); `bulk-load`, `key-order-fetch`,
+`agg-rebuild` and `lifecycle` have none (their cases are single measurements). A part of the suite
+is a run of its own: `./run.sh -s 1000000 -w kv,query`.
+
+**Disk.** The data of both systems is in Docker volumes, removed at the end of a run (`--keep` does
+not). At 10,000 small records the largest database of a workload was 44 MiB (PostgreSQL's
+`concurrency`, with 96 MiB of WAL, which grows to `max_wal_size` of 4 GB in a long run) and kvutil's
+largest 42 MiB (`index-maintenance` and `key-order-fetch`, which keep several copies of the data and
+the large values), so a million small records need about 5 GB for each system at the most, and at
+most one database of each is alive at a time. With the 2.4 GB of images (`postgres:18` 0.7 GB,
+TimescaleDB 1.5 GB, the harness 0.2 GB), the cache of the build and the report, plan on **20 GB free
+for `-s 1000000`** (small values), and **60 GB for `-s 500000 -V large`**, where a record is 20
+times larger. On Docker Desktop the limit is the size of its disk image (Settings > Resources).
+The results of a run are 3 to 10 MB, the report about 1 MB.
+
+### The Docker socket
+
+The harness container has `/var/run/docker.sock` mounted. That gives the process in it control of
+the Docker daemon of the machine (it could start containers, read their files, and so on), and
+on a Linux server it is a control of the host: run the suite only on a machine where that is
+acceptable. The harness uses the socket for two things only: the workloads of `storage` read the
+bytes that a container wrote, and the workloads of `lifecycle` restart the database. To run
+without it, remove the line `- /var/run/docker.sock:/var/run/docker.sock` from the service `bench`
+in [docker-compose.yml](docker-compose.yml). Without it `storage` has no written-bytes figures
+(its write amplification is not in the results, and the report shows n/a, not zero) and the
+restart of `lifecycle` is only a new connection to the running server, which its results say.
+The other workloads are not affected. Or leave the two out:
+`-w kv,load,records,index,query,agg,relations,concurrency`.
+
+### The report
+
+`run.sh` ends by writing the report into the directory of the run, `results/<host>-<timestamp>/`
+(a report that fails does not fail the run; the results are all there). To make it again, or of
+other directories, with Docker or without it:
+
+```sh
+docker compose run --rm --no-deps bench report -out /results/NAME /results/NAME       # in the image
+go run ./cmd/kvbench report -out DIR results/NAME [results/OTHER ...]                  # with Go
+```
+
+It writes `report.html` (one file: inline CSS and SVG, no scripts, light and dark), `report.md` (the
+same, with the charts in `charts/*.svg`) and CSV files with the data of the tables: `runs.csv`, one
+`<run>-<durability>-<workload>.csv` for each workload (a line for each result, with the parameters,
+the extras and the info of the case as columns; a figure that was not recorded is an empty cell,
+never zero) and one for each table of a special section or comparison.
+
+What it has, in the order of this README: a header for each run (host, versions, limits, scale,
+durations, whether `verify` passed) with the warnings that matter (a failed verification, cases
+with errors, Docker Desktop, a smoke scale, uncommitted changes in kvutil); for each workload the
+tables of every case (a column for each system and variant, the ratio against the fastest, the
+percentiles, errors and retries, plans, extras) with bars of throughput and p99; charts of its
+own for `selectivity-sweep` (throughput against selectivity and the plan at each step),
+`key-order-fetch` (ns per record against K), `agg-freshness` (the lag, and the cost of pending
+events), `concurrency` (throughput and retries against workers) and `storage` (bytes after each
+step, write amplification, the size before and after the steps that give space back); and the
+resources of each case: the harness's own (CPU and peak memory, from `getrusage`) and the
+database's (docker stats, joined to the case by its start and end). It draws no conclusions.
+
+### Comparing two runs
+
+Give the report both directories (the first is the base of the ratios):
+
+```sh
+cd bench
+go run ./cmd/kvbench report -out results/compare-mac-linux results/mac-20261030T100000Z results/srv-20261031T090000Z
+open results/compare-mac-linux/report.html
+```
+
+The section "Comparison of runs" puts the same case of each run side by side with throughput and
+p99 and the ratio against the first run. Only cases whose parameters match are compared (scale,
+values, durability, workers, durations, seed and the parameters of the case); the others are listed
+with the parameters that differ, so a Mac run at 100,000 records is not compared with a server run
+at a million. Run both at the same flags to get the comparison. The tables of each run follow.
+
+### Caveats to keep in mind
+
+* **Embedded against client/server.** kvutil is a library in the process of the harness; PostgreSQL
+  is a server that the harness reaches over a network connection with a pool. The round trip, the
+  protocol, parsing and planning of a statement are in PostgreSQL's numbers, and its CPU is in its
+  container, not the harness's. The report keeps harness and server figures apart for that reason.
+* **Closed loop.** A worker starts its next operation when the last one returned, at a fixed number of
+  workers. The latency is the latency at that load, and nothing corrects coordinated omission, so a
+  stall shows less in the percentiles than it would to a client that arrives at a fixed rate.
+* **kvutil's default configuration.** Badger with `DefaultOptions` (the block cache of a quarter of
+  the memory, Snappy, the default memtable and compactors), no tuning for any workload.
+* **PostgreSQL's fixed tuning.** The settings of [Settings of PostgreSQL](#settings-of-postgresql),
+  chosen once and scaled with the memory limit; another tuning, or another version, would move the
+  numbers, and the settings are in every result.
+* **macOS.** The containers run in a VM and `fsync` reaches the disk of the VM, not the SSD: durable
+  numbers from a Mac are not those of a server, and are comparable only between the two systems on
+  that Mac. A smoke run (the scale of 10,000 and a second per case) shows that the suite works.
+* **Sizes.** Badger's size is of its blocks on disk after a sync, with data that is not compacted
+  yet; PostgreSQL's is of the relations without the dead tuples that a vacuum has not reclaimed,
+  and the WAL apart. See [Limits of what is measured](#limits-of-what-is-measured).
+* **Resources.** The CPU and memory of the server are samples of `docker stats` every two or three
+  seconds, so a case shorter than that has few or none (n/a), and the memory counts the page cache.
 
 ## Running it
 
@@ -26,8 +201,8 @@ Needs Docker with compose v2 and bash; nothing else (Go is in the image).
 cd bench
 
 # A smoke run: every workload on both systems, 10,000 small records, 1 second per case, and
-# `kvbench verify` first. It takes about 45 minutes (the three workloads of the queries take 7 of
-# them, the four of B4 about 20).
+# `kvbench verify` first, and the report at the end. It takes about 25 minutes (measured in three
+# pieces of 7.5, 8.7 and 8 minutes; see "How long and how much disk" above).
 ./run.sh --smoke
 
 # The same for one workload (or a group: kv, load, records, index, query, agg, relations,
@@ -76,8 +251,12 @@ KVB_PG_DSN='postgres://postgres:bench@127.0.0.1:5432/bench?sslmode=disable' /tmp
 kvbench run    -system kvutil|postgres -workload NAME|GROUP|all[,...] -scale N -values small|large
                -durability durable|relaxed -concurrency C -duration D -warmup W -out file.jsonl
 kvbench verify -workload NAME|GROUP|all -scale N [-values ...] [-show N]
+kvbench report -out DIR RESULTDIR...
 kvbench list
 ```
+
+`report` reads result directories (`results-*.jsonl`, `docker-stats-*.csv`, `meta.json`,
+`verify.txt`, `images.txt`) and writes the report; see [The report](#the-report).
 
 | Flag | Default | |
 | --- | --- | --- |
@@ -1074,6 +1253,10 @@ statements of PostgreSQL that the cases make and their parameters, a run of ever
 that kvutil is expected to choose), and for B4 the data of the relations against the model, the
 answers of the lifecycle against the records computed in Go, the consistency checks of the
 concurrency scenarios, the counts of the storage steps, the Zipf keys, the parsers of the cgroup and
-of the Docker API (with a fake daemon on a unix socket) and the SQL of every case. The comparison
-with PostgreSQL is `kvbench verify`.
+of the Docker API (with a fake daemon on a unix socket) and the SQL of every case. For the report
+(`internal/report`, with two small result directories in `testdata`): the parsing, the join of the
+samples of docker stats to the cases, the ratios, the figures that are not available (n/a and
+empty in the CSV, never zero), the parameters that do not match, the special sections, a workload
+that the report has never heard of, the charts and the files. The comparison with PostgreSQL is
+`kvbench verify`.
 CI vets and builds the module without running Docker.

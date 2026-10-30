@@ -2,6 +2,7 @@
 //
 //	kvbench run    -system kvutil|postgres|timescale -workload NAME|GROUP|all -scale N ...
 //	kvbench verify -workload NAME|GROUP|all -scale N
+//	kvbench report -out DIR RESULTDIR...
 //	kvbench list
 //	kvbench needs  -workload NAME|GROUP|all
 package main
@@ -21,6 +22,7 @@ import (
 	"github.com/ehsanranjbar/kvutil/bench/internal/dataset"
 	"github.com/ehsanranjbar/kvutil/bench/internal/harness"
 	"github.com/ehsanranjbar/kvutil/bench/internal/metrics"
+	"github.com/ehsanranjbar/kvutil/bench/internal/report"
 	"github.com/ehsanranjbar/kvutil/bench/internal/systems/kvsys"
 	"github.com/ehsanranjbar/kvutil/bench/internal/systems/pgsys"
 	"github.com/ehsanranjbar/kvutil/bench/internal/systems/tssys"
@@ -53,6 +55,8 @@ func main() {
 		err = runCmd(ctx, os.Args[2:])
 	case "verify":
 		err = verifyCmd(ctx, os.Args[2:])
+	case "report":
+		err = reportCmd(os.Args[2:])
 	case "list":
 		err = listCmd()
 	case "needs":
@@ -75,6 +79,7 @@ func usage() {
   kvbench run    -system kvutil|postgres|timescale -workload <name|group|all> [-scale N] [-values small|large]
                  [-durability durable|relaxed] [-concurrency C] [-duration D] [-warmup W] [-out file.jsonl]
   kvbench verify -workload <name|group|all> [-scale N] [-values small|large]
+  kvbench report -out DIR RESULTDIR...       writes DIR/report.md, report.html, charts/ and the CSV files
   kvbench list
   kvbench needs  -workload <name|group|all>   prints the systems besides kvutil and postgres that the workloads run on
 
@@ -329,6 +334,17 @@ func verifyCmd(ctx context.Context, args []string) error {
 		return errors.New("verification failed")
 	}
 	return nil
+}
+
+// reportCmd writes the report of one or more result directories.
+func reportCmd(args []string) error {
+	fs := flag.NewFlagSet("report", flag.ExitOnError)
+	out := fs.String("out", "", "directory that the report is written to (report.md, report.html, charts/, *.csv)")
+	fs.Parse(args)
+	if *out == "" || fs.NArg() == 0 {
+		return errors.New("usage: kvbench report -out DIR RESULTDIR...")
+	}
+	return report.Generate(*out, fs.Args())
 }
 
 func listCmd() error {

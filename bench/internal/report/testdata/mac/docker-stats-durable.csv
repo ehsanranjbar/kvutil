@@ -1,0 +1,8 @@
+ts,name,cpu_perc,mem_usage,mem_perc,net_io,block_io,pids
+2026-10-20T10:00:09Z,kvbench-bench,150.00%,100MiB / 4GiB,2.44%,1kB / 1kB,0B / 0B,10
+2026-10-20T10:00:28Z,kvbench-postgres,5.00%,500MiB / 4GiB,12.2%,1kB / 1kB,0B / 0B,20
+2026-10-20T10:00:30Z,kvbench-postgres,100.00%,1GiB / 4GiB,25.0%,1kB / 1kB,0B / 0B,20
+2026-10-20T10:00:32Z,kvbench-postgres,--,--,--,--,--,--
+2026-10-20T10:00:34Z,kvbench-postgres,200.00%,2GiB / 4GiB,50.0%,1kB / 1kB,1.93MB / 0B,20
+2026-10-20T10:00:38Z,kvbench-postgres,300.00%,1.5GiB / 4GiB,37.5%,1kB / 1kB,0B / 0B,20
+2026-10-20T10:00:45Z,kvbench-postgres,10.00%,600MiB / 4GiB,14.6%,1kB / 1kB,0B / 0B,20

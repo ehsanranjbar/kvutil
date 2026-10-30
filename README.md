@@ -520,6 +520,13 @@ The examples of the packages, which are run as tests, show each of them in more 
 [store/record](store/record/example_test.go), [migrate](migrate/example_test.go),
 [query](query/example_test.go), [query/sql](query/sql/example_test.go).
 
+## Benchmarks
+
+[bench](bench) is a separate module that measures kvutil against PostgreSQL (and TimescaleDB for the
+stored aggregations) in Docker, and turns the results into a report with tables, charts and CSV
+files. [bench/README.md](bench/README.md) says how to run it on a Mac or a Linux server, how to
+read and compare the results, and what the numbers do not show.
+
 ## Tests
 
 ```sh
