@@ -25,6 +25,7 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"fmt"
+	"slices"
 	"strings"
 	"sync/atomic"
 
@@ -100,7 +101,7 @@ type variant struct{}
 
 func (*variant) Name() string { return "relations" }
 
-func open(ctx context.Context, sys harness.System, p harness.Params) (target, error) {
+func open(ctx context.Context, sys harness.System) (target, error) {
 	switch s := sys.(type) {
 	case *kvsys.System:
 		return openKV(ctx, s)
@@ -115,7 +116,7 @@ func loadWorkers(p harness.Params) int { return min(max(p.Concurrency, 1), 4) }
 func (v *variant) Run(ctx context.Context, rc *harness.RunContext) error {
 	p := rc.Params
 	m := newModel(p.Seed, p.Scale, p.Values)
-	t, err := open(ctx, rc.Sys, p)
+	t, err := open(ctx, rc.Sys)
 	if err != nil {
 		return err
 	}
@@ -287,13 +288,16 @@ func (v *variant) Run(ctx context.Context, rc *harness.RunContext) error {
 	}
 
 	// The cascades use up what they delete: each level deletes its own part of the pool. Parents
-	// with many children are the costly ones; the pool of a tier is split between the levels.
+	// with many children are the costly ones; the pool of a tier is in the order of the ids, which
+	// is the order of the counts, so it is shuffled (the same way for the same seed) before it is
+	// split between the levels, which then get the same mix of sizes.
 	for _, tr := range ptiers {
 		if tr.Name == "typical" {
 			continue
 		}
+		shuf := shuffled(tr.pool, p.Seed)
 		for i, c := range levels {
-			pool := slice(tr.pool, i, len(levels))
+			pool := slice(shuf, i, len(levels))
 			if len(pool) == 0 {
 				continue
 			}
@@ -319,8 +323,9 @@ func (v *variant) Run(ctx context.Context, rc *harness.RunContext) error {
 		if tr.Name == "typical" {
 			continue
 		}
+		shuf := shuffled(tr.pool, p.Seed)
 		for i, c := range levels {
-			pool := slice(tr.pool, i, len(levels))
+			pool := slice(shuf, i, len(levels))
 			if len(pool) == 0 {
 				continue
 			}
@@ -347,6 +352,14 @@ func (v *variant) Run(ctx context.Context, rc *harness.RunContext) error {
 		return kt.cascadeLimit(ctx, rc)
 	}
 	return nil
+}
+
+// shuffled is a copy of a pool in an order that depends on the seed and on nothing else.
+func shuffled(pool []int64, seed uint64) []int64 {
+	out := slices.Clone(pool)
+	rng := harness.NewRand(seed, 0x5eed)
+	rng.Shuffle(len(out), func(i, j int) { out[i], out[j] = out[j], out[i] })
+	return out
 }
 
 // cursor hands out the records of a pool one by one, each once.
@@ -388,7 +401,7 @@ func (workload) Verify(ctx context.Context, sys harness.System, p harness.Params
 
 func (v *variant) verify(ctx context.Context, sys harness.System, p harness.Params) ([]string, error) {
 	m := newModel(p.Seed, p.Scale, p.Values)
-	t, err := open(ctx, sys, p)
+	t, err := open(ctx, sys)
 	if err != nil {
 		return nil, err
 	}

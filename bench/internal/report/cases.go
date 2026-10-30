@@ -151,7 +151,7 @@ func caseTable(c *caseGroup, conc int, rows []*row) *Table {
 	for _, x := range rows {
 		t.Header = append(t.Header, x.series)
 	}
-	t.Caption = caseCaption(c, rows)
+	t.Caption = caseCaption(rows)
 
 	add := func(label string, get func(*row) (float64, bool), f func(float64) string) (vals []float64, any bool) {
 		cells := []Cell{T(label)}
@@ -241,7 +241,7 @@ func countOK(vs []float64) int {
 	return n
 }
 
-func caseCaption(c *caseGroup, rows []*row) string {
+func caseCaption(rows []*row) string {
 	if len(rows) == 0 {
 		return ""
 	}

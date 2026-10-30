@@ -114,7 +114,7 @@ func (d *pgDriver) Probe(ctx context.Context, kind string, p probe) ([]int64, er
 	case "code":
 		where, args = "code = $1", []any{p.S}
 	case "composite":
-		where, args = "customer = $1 AND created_at BETWEEN $2 AND $3", []any{p.S, seconds(p.Lo), seconds(p.Hi)}
+		where, args = "customer = $1 AND created_at BETWEEN $2 AND $3", []any{p.S, wl.Seconds(p.Lo), wl.Seconds(p.Hi)}
 	case "tags":
 		where, args = "tags @> ARRAY[$1]::text[]", []any{p.S}
 	default:

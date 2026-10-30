@@ -188,7 +188,7 @@ func (e *kvEnv) exec(k kvq) (outcome, error) {
 
 // answer runs the query and returns what it gave in a form that is the same for any system: see
 // answerOf.
-func (e *kvEnv) answer(c *qcase, k kvq) (answer, error) {
+func (e *kvEnv) answer(k kvq) (answer, error) {
 	var ans answer
 	err := e.kv.DB.View(func(tx kv.Tx) error {
 		ans = answer{}

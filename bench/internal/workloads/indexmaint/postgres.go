@@ -133,13 +133,13 @@ func (t *pgTarget) Probe(ctx context.Context, p probe) ([]int64, error) {
 	case "total":
 		where, args = "total BETWEEN $1 AND $2", []any{p.Lo, p.Hi}
 	case "created":
-		where, args = "created_at BETWEEN $1 AND $2", []any{seconds(p.Lo), seconds(p.Hi)}
+		where, args = "created_at BETWEEN $1 AND $2", []any{wl.Seconds(p.Lo), wl.Seconds(p.Hi)}
 	case "name":
 		where, args = "name = $1", []any{p.S}
 	case "code":
 		where, args = "code = $1", []any{p.S}
 	case "composite":
-		where, args = "customer = $1 AND created_at BETWEEN $2 AND $3", []any{p.S, seconds(p.Lo), seconds(p.Hi)}
+		where, args = "customer = $1 AND created_at BETWEEN $2 AND $3", []any{p.S, wl.Seconds(p.Lo), wl.Seconds(p.Hi)}
 	case "tag":
 		where, args = "tags @> ARRAY[$1]::text[]", []any{p.S}
 	case "lower":

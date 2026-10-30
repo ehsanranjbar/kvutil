@@ -43,33 +43,6 @@ type kvIndexes struct {
 	lookups map[string]func(tx kv.Tx, p probe) ([]int64, error)
 }
 
-type idIterator interface {
-	Valid() bool
-	Next()
-	Key() (int64, error)
-	Err() error
-	Close() error
-}
-
-// collect reads the ids of an iterator and closes it.
-func collect(it idIterator, err error) ([]int64, error) {
-	if err != nil {
-		return nil, err
-	}
-	defer it.Close()
-	var ids []int64
-	for ; it.Valid(); it.Next() {
-		id, err := it.Key()
-		if err != nil {
-			return nil, err
-		}
-		ids = append(ids, id)
-	}
-	return ids, it.Err()
-}
-
-func seconds(s int64) time.Time { return time.Unix(s, 0).UTC() }
-
 // addIndexes defines the indexes of the configuration on the store.
 func addIndexes(st *recordStore, config string) *kvIndexes {
 	x := &kvIndexes{lookups: map[string]func(kv.Tx, probe) ([]int64, error){}}
@@ -101,63 +74,63 @@ func addIndexes(st *recordStore, config string) *kvIndexes {
 		n := map[string]int{"n1": 1, "n3": 3, "n5": 5}[config]
 		byCustomer := index.On(st, add("by_customer"), fCustomer)
 		x.lookups["customer"] = func(tx kv.Tx, p probe) ([]int64, error) {
-			return collect(byCustomer.Instantiate(tx).Match(p.S))
+			return wl.CollectIDs(byCustomer.Instantiate(tx).Match(p.S))
 		}
 		if n >= 3 {
 			byStatus := index.On(st, add("by_status"), fStatus)
 			byTotal := index.On(st, add("by_total"), fTotal)
 			x.lookups["status"] = func(tx kv.Tx, p probe) ([]int64, error) {
-				return collect(byStatus.Instantiate(tx).Match(p.S))
+				return wl.CollectIDs(byStatus.Instantiate(tx).Match(p.S))
 			}
 			x.lookups["total"] = func(tx kv.Tx, p probe) ([]int64, error) {
-				return collect(byTotal.Instantiate(tx).Range(kvutil.Between(p.Lo, p.Hi)))
+				return wl.CollectIDs(byTotal.Instantiate(tx).Range(kvutil.Between(p.Lo, p.Hi)))
 			}
 		}
 		if n >= 5 {
 			byCreated := index.On(st, add("by_created"), fAt)
 			byName := index.On(st, add("by_name"), fName)
 			x.lookups["created"] = func(tx kv.Tx, p probe) ([]int64, error) {
-				return collect(byCreated.Instantiate(tx).Range(kvutil.Between(seconds(p.Lo), seconds(p.Hi))))
+				return wl.CollectIDs(byCreated.Instantiate(tx).Range(kvutil.Between(wl.Seconds(p.Lo), wl.Seconds(p.Hi))))
 			}
 			x.lookups["name"] = func(tx kv.Tx, p probe) ([]int64, error) {
-				return collect(byName.Instantiate(tx).Match(p.S))
+				return wl.CollectIDs(byName.Instantiate(tx).Match(p.S))
 			}
 		}
 
 	case "unique":
 		byCode := index.Unique(st, add("by_code"), fCode)
 		x.lookups["code"] = func(tx kv.Tx, p probe) ([]int64, error) {
-			return collect(byCode.Instantiate(tx).Match(p.S))
+			return wl.CollectIDs(byCode.Instantiate(tx).Match(p.S))
 		}
 
 	case "composite":
 		byCustomerAt := index.Composite(st, add("by_customer_at"), field.List[order](fCustomer, fAt))
 		x.lookups["composite"] = func(tx kv.Tx, p probe) ([]int64, error) {
-			return collect(byCustomerAt.Instantiate(tx).Lookup(fCustomer.Eq(p.S), fAt.Between(seconds(p.Lo), seconds(p.Hi))))
+			return wl.CollectIDs(byCustomerAt.Instantiate(tx).Lookup(fCustomer.Eq(p.S), fAt.Between(wl.Seconds(p.Lo), wl.Seconds(p.Hi))))
 		}
 
 	case "multi":
 		byTag := index.On(st, add("by_tag"), fTags)
 		x.lookups["tag"] = func(tx kv.Tx, p probe) ([]int64, error) {
-			return collect(byTag.Instantiate(tx).Match(p.S))
+			return wl.CollectIDs(byTag.Instantiate(tx).Match(p.S))
 		}
 
 	case "expr":
 		byLower := index.On(st, add("by_name_lower"), fLower)
 		x.lookups["lower"] = func(tx kv.Tx, p probe) ([]int64, error) {
-			return collect(byLower.Instantiate(tx).Match(p.S))
+			return wl.CollectIDs(byLower.Instantiate(tx).Match(p.S))
 		}
 
 	case "conditional":
 		big := index.On(st, add("big_by_customer"), fCustomer, index.Where[order](fTotal.Gte(dataset.BigTotal)))
 		x.lookups["conditional"] = func(tx kv.Tx, p probe) ([]int64, error) {
-			return collect(big.Instantiate(tx).Lookup(fCustomer.Eq(p.S), fTotal.Gte(dataset.BigTotal)))
+			return wl.CollectIDs(big.Instantiate(tx).Lookup(fCustomer.Eq(p.S), fTotal.Gte(dataset.BigTotal)))
 		}
 
 	case "covering":
 		covering := index.On(st, add("by_customer_total"), fCustomer, index.Including[order](fTotal))
 		x.lookups["customer"] = func(tx kv.Tx, p probe) ([]int64, error) {
-			return collect(covering.Instantiate(tx).Match(p.S))
+			return wl.CollectIDs(covering.Instantiate(tx).Match(p.S))
 		}
 
 	default:

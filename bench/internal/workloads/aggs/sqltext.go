@@ -6,7 +6,7 @@ import (
 )
 
 // The SQL of the workloads of aggregations. Everything that can be written without a database is
-// here, so that the tests can look at it and README.md quotes it.
+// here, so that the tests can look at it and docs/workloads.md quotes it.
 
 // names are the relations a schema has, as they are written in a statement.
 type names struct {

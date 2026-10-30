@@ -172,3 +172,51 @@ func TestStatementsAreComplete(t *testing.T) {
 		}
 	}
 }
+
+// The levels of a cascade case delete a part of the pool each. The pool is in the order of the
+// ids, so the first part has the largest records; shuffled, every part has about the same.
+func TestShuffledPoolsSplitEvenly(t *testing.T) {
+	m := newModel(1, 200_000, dataset.Small)
+	sum := func(pool []int64, counts []int32, i int) (n int64) {
+		for _, id := range slice(pool, i, 4) {
+			n += int64(counts[id])
+		}
+		return n
+	}
+	checked := 0
+	defer func() {
+		if checked == 0 {
+			t.Error("no tier was big enough to check")
+		}
+	}()
+	for _, kind := range []struct {
+		tiers  []tier
+		counts []int32
+	}{{m.parentTiers(), m.childCount}, {m.leftTiers(), m.leftCount}} {
+		for _, tr := range kind.tiers {
+			if len(tr.pool) < 100 {
+				continue
+			}
+			checked++
+			shuf := shuffled(tr.pool, 1)
+			if len(shuf) != len(tr.pool) || fmt.Sprint(shuf) != fmt.Sprint(shuffled(tr.pool, 1)) || fmt.Sprint(shuf) == fmt.Sprint(shuffled(tr.pool, 2)) {
+				t.Fatalf("tier %s: the shuffle must keep the records, and depend on the seed and on nothing else", tr.Name)
+			}
+			seen := map[int64]bool{}
+			for _, id := range shuf {
+				seen[id] = true
+			}
+			if len(seen) != len(tr.pool) {
+				t.Errorf("tier %s: the shuffle lost records", tr.Name)
+			}
+			lo, hi := int64(1<<62), int64(0)
+			for i := 0; i < 4; i++ {
+				n := sum(shuf, kind.counts, i)
+				lo, hi = min(lo, n), max(hi, n)
+			}
+			if float64(hi) > 1.25*float64(lo) {
+				t.Errorf("tier %s: the parts of the shuffled pool delete %d to %d, not about the same", tr.Name, lo, hi)
+			}
+		}
+	}
+}

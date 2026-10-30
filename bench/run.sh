@@ -4,12 +4,20 @@
 # results/<host>-<timestamp>/ and tears everything down. It needs bash and docker compose v2, and
 # works unchanged on macOS and Linux.
 #
-#   ./run.sh --smoke                         # a few minutes: every workload, both systems, small
+#   ./run.sh --smoke                         # about 25 minutes: every workload, all systems, small
 #   ./run.sh -w kv-basic,bulk-load -s 1000000
 #   ./run.sh -s 1000000 -V large -d both     # the full run, for both durability modes
 #
 # At the end it writes the report (report.html, report.md, charts/ and CSV files) into the run's
 # directory; a report that fails does not fail the run.
+#
+# A run can be made in pieces, or a part of it made again: running with the same --out adds to
+# that directory. The results, the docker stats and the logs of the databases are appended to
+# their files; meta.json (the arguments of the first piece) is written only if it is not there
+# yet; verify.txt is written only by --verify; and the report is made again from everything.
+# Where a case is in the results more than once, the report shows the last:
+#
+#   ./run.sh -s 1000000 -w relations --systems kvutil --out results/x
 #
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -38,6 +46,7 @@ usage: ./run.sh [options]
       --verify            run "kvbench verify" first, and stop if it fails
       --smoke             -s 10000 --duration 1s --warmup 500ms --verify
       --out DIR           results directory   (results/<host>-<timestamp>)
+                          an existing one is added to, not overwritten
       --keep              do not remove the containers and volumes at the end
       --no-build          do not build the image of the harness
   -h, --help
@@ -115,17 +124,21 @@ else
 fi
 export KVUTIL_COMMIT
 
-# The day after the last day of the events of the aggregations, fixed for the whole run so that
-# every system gets the same events even if the run goes past midnight (UTC).
-KVB_AGG_END=${KVB_AGG_END:-$(date -u +%Y-%m-%d)}
-export KVB_AGG_END KVB_AGG_SPAN_DAYS=$AGG_SPAN_DAYS KVB_AGG_INTERVAL=$AGG_INTERVAL
-
 BENCH_HOST=$(hostname -s 2>/dev/null || hostname)
 export BENCH_HOST
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
 [ -n "$OUT" ] || OUT="results/${BENCH_HOST}-${STAMP}"
 mkdir -p "$OUT"
 OUT_NAME=$(basename "$OUT")
+
+# The day after the last day of the events of the aggregations, fixed for the whole run so that
+# every system gets the same events even if the run goes past midnight (UTC). A run that is added
+# to keeps the day of its first piece.
+if [ -z "${KVB_AGG_END:-}" ] && [ -f "$OUT/meta.json" ]; then
+  KVB_AGG_END=$(sed -n 's/.*"aggregations": {"end": "\([0-9-]*\)".*/\1/p' "$OUT/meta.json")
+fi
+KVB_AGG_END=${KVB_AGG_END:-$(date -u +%Y-%m-%d)}
+export KVB_AGG_END KVB_AGG_SPAN_DAYS=$AGG_SPAN_DAYS KVB_AGG_INTERVAL=$AGG_INTERVAL
 
 BENCH_DOCKER_SERVER_VERSION=$(docker info --format '{{.ServerVersion}}')
 BENCH_DOCKER_OS=$(docker info --format '{{.OperatingSystem}}')
@@ -143,7 +156,9 @@ start_stats() {
   # docker stats of the containers, once in a while: the CPU and memory of the database, which
   # the harness cannot see from its own container. Each line has the time it was taken at.
   local file=$1
-  echo "ts,name,cpu_perc,mem_usage,mem_perc,net_io,block_io,pids" > "$file"
+  if [ ! -e "$file" ]; then
+    echo "ts,name,cpu_perc,mem_usage,mem_perc,net_io,block_io,pids" > "$file"
+  fi
   (
     while true; do
       ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -181,21 +196,24 @@ has_system() { case ",$SYSTEMS," in *",$1,"*) return 0 ;; *) return 1 ;; esac; }
 # --- the record of the run
 
 "${COMPOSE[@]}" config > "$OUT/compose.resolved.yml"
-{
-  printf '{\n'
-  printf '  "host": "%s",\n' "$BENCH_HOST"
-  printf '  "started": "%s",\n' "$STAMP"
-  printf '  "kvutil_commit": "%s",\n' "$KVUTIL_COMMIT"
-  printf '  "args": {"workload": "%s", "scale": %s, "values": "%s", "durability": "%s", "concurrency": %s, "duration": "%s", "warmup": "%s", "systems": "%s", "seed": %s, "pg_service": "%s"},\n' \
-    "$WORKLOAD" "$SCALE" "$VALUES" "$DURABILITY" "$CONCURRENCY" "$DURATION" "$WARMUP" "$SYSTEMS" "$SEED" "$PG_SERVICE"
-  printf '  "aggregations": {"end": "%s", "span_days": %s, "interval": "%s"},\n' \
-    "$KVB_AGG_END" "$AGG_SPAN_DAYS" "$AGG_INTERVAL"
-  printf '  "limits": {"cpus": "%s", "mem": "%s", "shared_buffers": "%s", "effective_cache_size": "%s"},\n' \
-    "$BENCH_CPUS" "$BENCH_MEM" "$PG_SHARED_BUFFERS" "$PG_EFFECTIVE_CACHE_SIZE"
-  printf '  "docker": {"server": "%s", "os": "%s", "ncpu": %s, "mem_total": %s, "kernel": "%s"}\n' \
-    "$BENCH_DOCKER_SERVER_VERSION" "$BENCH_DOCKER_OS" "$BENCH_DOCKER_NCPU" "$BENCH_DOCKER_MEM_TOTAL" "$BENCH_DOCKER_KERNEL"
-  printf '}\n'
-} > "$OUT/meta.json"
+# The record of the run is the one of its first piece: a run that is added to keeps its meta.json.
+if [ ! -e "$OUT/meta.json" ]; then
+  {
+    printf '{\n'
+    printf '  "host": "%s",\n' "$BENCH_HOST"
+    printf '  "started": "%s",\n' "$STAMP"
+    printf '  "kvutil_commit": "%s",\n' "$KVUTIL_COMMIT"
+    printf '  "args": {"workload": "%s", "scale": %s, "values": "%s", "durability": "%s", "concurrency": %s, "duration": "%s", "warmup": "%s", "systems": "%s", "seed": %s, "pg_service": "%s"},\n' \
+      "$WORKLOAD" "$SCALE" "$VALUES" "$DURABILITY" "$CONCURRENCY" "$DURATION" "$WARMUP" "$SYSTEMS" "$SEED" "$PG_SERVICE"
+    printf '  "aggregations": {"end": "%s", "span_days": %s, "interval": "%s"},\n' \
+      "$KVB_AGG_END" "$AGG_SPAN_DAYS" "$AGG_INTERVAL"
+    printf '  "limits": {"cpus": "%s", "mem": "%s", "shared_buffers": "%s", "effective_cache_size": "%s"},\n' \
+      "$BENCH_CPUS" "$BENCH_MEM" "$PG_SHARED_BUFFERS" "$PG_EFFECTIVE_CACHE_SIZE"
+    printf '  "docker": {"server": "%s", "os": "%s", "ncpu": %s, "mem_total": %s, "kernel": "%s"}\n' \
+      "$BENCH_DOCKER_SERVER_VERSION" "$BENCH_DOCKER_OS" "$BENCH_DOCKER_NCPU" "$BENCH_DOCKER_MEM_TOTAL" "$BENCH_DOCKER_KERNEL"
+    printf '}\n'
+  } > "$OUT/meta.json"
+fi
 
 # --- build
 
@@ -256,14 +274,14 @@ for d in $DURABILITIES; do
     log "$PG_SERVICE, $d (fsync=$PG_FSYNC synchronous_commit=$PG_SYNCHRONOUS_COMMIT)"
     start_pg
     run_system postgres "$d"
-    docker logs "kvbench-$PG_SERVICE" > "$OUT/$PG_SERVICE-$d.log" 2>&1 || true
+    docker logs "kvbench-$PG_SERVICE" >> "$OUT/$PG_SERVICE-$d.log" 2>&1 || true
     stop_service "$PG_SERVICE"
   fi
   if has_system timescale && [ "$NEED_TS" = 1 ]; then
     log "timescaledb, $d (fsync=$PG_FSYNC synchronous_commit=$PG_SYNCHRONOUS_COMMIT)"
     start_service timescaledb
     run_system timescale "$d"
-    docker logs kvbench-timescaledb > "$OUT/timescaledb-$d.log" 2>&1 || true
+    docker logs kvbench-timescaledb >> "$OUT/timescaledb-$d.log" 2>&1 || true
     stop_service timescaledb
   fi
   stop_stats

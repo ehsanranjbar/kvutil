@@ -2,6 +2,7 @@ package report
 
 import (
 	"encoding/csv"
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
@@ -291,5 +292,108 @@ func TestParamDiff(t *testing.T) {
 	mustContain(t, d, "scale 10 / 20", "case.only_a only in the first run")
 	if len(paramDiff(a, a)) != 0 {
 		t.Error("the same parameters must not differ")
+	}
+}
+
+// A case that was run again, in the same file or in a later one, is there once: the last result.
+func TestRerunReplaces(t *testing.T) {
+	line := func(system, cs string, conc int, ops float64) string {
+		return fmt.Sprintf(`{"workload":"w","system":%q,"variant":"v","case":%q,"params":{"scale":1000,"values":"small","durability":"durable","concurrency":%d},"metrics":{"ops_per_sec":%v,"latency":{"p99_us":1}}}`+"\n", system, cs, conc, ops)
+	}
+	dir := t.TempDir()
+	// kvutil get at 4 workers is run twice; at 1 worker, and the other case, and the other system, once.
+	text := line("kvutil", "get", 4, 100) + line("kvutil", "get", 1, 10) + line("postgres", "get", 4, 50) + line("kvutil", "get", 4, 300) + line("kvutil", "scan", 4, 7)
+	if err := os.WriteFile(filepath.Join(dir, "results-durable.jsonl"), []byte(text), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run, err := LoadRun(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(run.Results) != 4 || run.Replaced != 1 {
+		t.Fatalf("results=%d replaced=%d", len(run.Results), run.Replaced)
+	}
+	for _, r := range run.Results {
+		if r.System == "kvutil" && r.Case == "get" && r.Params.Concurrency == 4 && r.Metrics.OpsPerSec != 300 {
+			t.Errorf("the first run of the case was kept: %v ops/s", r.Metrics.OpsPerSec)
+		}
+	}
+	// The order of the others is kept, and the report says that results were left out.
+	if run.Results[0].Params.Concurrency != 1 || run.Results[3].Case != "scan" {
+		t.Errorf("order: %s %d ... %s", run.Results[0].Case, run.Results[0].Params.Concurrency, run.Results[3].Case)
+	}
+	mustContain(t, Build([]*Run{run}).Markdown(), "| results | 4 (1 earlier results of cases that were run again are left out) |")
+}
+
+// summaryRun is a run whose results are made for the summary: three systems with variants, a case
+// that is a time, a case that is a size, a case of one system, and the levels of workers.
+func summaryRun() *Run {
+	mk := func(system, variant, cs string, conc int, m metrics.Metrics) *metrics.Result {
+		return &metrics.Result{
+			Start: time.Unix(1000, 0), End: time.Unix(1010, 0), System: system, Workload: "relations", Variant: variant, Case: cs,
+			Params:  metrics.Params{Scale: 1000000, Values: "small", Durability: "durable", Concurrency: conc, DurationSec: 10},
+			Metrics: m,
+		}
+	}
+	timed := func(ops float64) metrics.Metrics {
+		return metrics.Metrics{Ops: int64(ops), OpsPerSec: ops, ElapsedSec: 10, Latency: &metrics.Latency{P99Us: 5}}
+	}
+	phase := func(rps float64) metrics.Metrics {
+		return metrics.Metrics{Records: 1000, RecordsPerSec: rps, ElapsedSec: 1000 / rps}
+	}
+	took := func(sec float64) metrics.Metrics { return metrics.Metrics{ElapsedSec: sec} }
+	size := func(b int64) metrics.Metrics { return metrics.Metrics{DiskBytes: b, Extra: map[string]float64{"x": 1}} }
+	return &Run{Name: "s", Results: []*metrics.Result{
+		// 4 workers is there: the level of 8 is not shown. The best variant of each system counts.
+		mk("kvutil", "a", "read", 4, timed(1000)), mk("kvutil", "b", "read", 4, timed(3000)), mk("kvutil", "a", "read", 8, timed(9000)),
+		mk("postgres", "a", "read", 4, timed(1000)), mk("postgres", "b", "read", 4, timed(1500)),
+		mk("timescale", "t", "read", 4, timed(2000)),
+		// No such level: the largest one, 8.
+		mk("kvutil", "a", "wide", 1, timed(10)), mk("kvutil", "a", "wide", 8, timed(80)),
+		mk("postgres", "a", "wide", 1, timed(40)), mk("postgres", "a", "wide", 8, timed(40)),
+		// A phase has records/s; a time is inverted, so that more than 1x is kvutil faster.
+		mk("kvutil", "a", "load", 1, phase(5000)), mk("postgres", "a", "load", 1, phase(2500)),
+		mk("kvutil", "a", "convert", 1, took(2)), mk("postgres", "a", "convert", 1, took(8)), mk("timescale", "t", "convert", 1, took(4)),
+		// Left out: a size, a case of one system, a case without kvutil, and a time that is no result.
+		mk("kvutil", "a", "size", 1, size(10)), mk("postgres", "a", "size", 1, size(20)),
+		mk("kvutil", "a", "only-kvutil", 4, timed(5)),
+		mk("postgres", "a", "no-kvutil", 4, timed(5)), mk("timescale", "t", "no-kvutil", 4, timed(6)),
+		mk("kvutil", "a", "cascade-limit", 1, took(300)), mk("postgres", "a", "cascade-limit", 1, took(100)),
+	}}
+}
+
+func TestSummary(t *testing.T) {
+	md := Build([]*Run{summaryRun()}).Markdown()
+	i := strings.Index(md, "## Summary")
+	j := strings.Index(md, "## Results")
+	if i < 0 || j < i || i < strings.Index(md, "## Runs") {
+		t.Fatalf("the summary is after the runs and before the results: %d %d", i, j)
+	}
+	sum := md[i:j]
+	mustContain(t, sum,
+		"### relations",
+		"| case | workers | unit | kvutil | variant | PostgreSQL | variant | TimescaleDB | variant | kvutil / best other |",
+		// kvutil b against the best of the others, TimescaleDB's 2,000.
+		"| read | 4 | ops/s | 3,000 | b | 1,500 | b | 2,000 | t | 1.50x |",
+		"| wide | 8 | ops/s | 80 | a | 40 | a |  |  | 2.00x |",
+		"| load | 1 | records/s | 5,000 | a | 2,500 | a |  |  | 2.00x |",
+		// Time: 4 s of TimescaleDB against 2 s of kvutil.
+		"| convert | 1 | seconds | 2.00 s | a | 8.00 s | a | 4.00 s | t | 2.00x |",
+	)
+	for _, left := range []string{"size", "only-kvutil", "no-kvutil", "cascade-limit"} {
+		if strings.Contains(sum, "| "+left+" |") {
+			t.Errorf("the case %s is in the summary", left)
+		}
+	}
+	if strings.Contains(sum, "9,000") {
+		t.Error("a level other than 4 was shown for a case that has 4")
+	}
+	mustContain(t, Build([]*Run{summaryRun()}).HTML(), `<h2 id="summary">Summary</h2>`)
+
+	// Several runs: a summary of each, after the runs and before their comparison.
+	md = Build([]*Run{load(t, "mac"), load(t, "linux")}).Markdown()
+	a, b, c := strings.Index(md, "## Summary: mac"), strings.Index(md, "## Summary: linux"), strings.Index(md, "## Comparison of runs")
+	if a < 0 || b < a || c < b {
+		t.Errorf("summaries: %d %d, comparison %d", a, b, c)
 	}
 }

@@ -60,6 +60,3 @@ func (s *System) Version() string {
 
 // Settings implements harness.System.
 func (s *System) Settings() map[string]string { return s.settings }
-
-// ExtensionVersion is the version of the timescaledb extension, like 2.31.0.
-func (s *System) ExtensionVersion() string { return s.extVersion }

@@ -286,11 +286,11 @@ func (r *runner) runFootprint(ctx context.Context) error {
 		return fmt.Errorf("after deleting half there are %d records, not %d (%v)", live, want, err)
 	}
 
-	return r.reclaimSteps(ctx, n)
+	return r.reclaimSteps(ctx)
 }
 
 // reclaimSteps runs what gives space back, one after the other, each as a case.
-func (r *runner) reclaimSteps(ctx context.Context, n int64) error {
+func (r *runner) reclaimSteps(ctx context.Context) error {
 	for _, rec := range r.d.Reclaims() {
 		extra, err := r.step(ctx, rec.Name, 0, 0, nil, rec.Run)
 		if err != nil {
@@ -400,7 +400,7 @@ func (r *runner) runExpiry(ctx context.Context) error {
 	if expiring != 0 {
 		return fmt.Errorf("%d records that had expired are still there", expiring)
 	}
-	return r.reclaimSteps(ctx, 0)
+	return r.reclaimSteps(ctx)
 }
 
 // jobStats counts what a job that deletes does, from several calls.

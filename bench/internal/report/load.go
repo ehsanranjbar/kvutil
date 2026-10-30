@@ -72,6 +72,9 @@ type Run struct {
 	Verify  Verify
 	// Skipped counts the lines of the results files that could not be read.
 	Skipped int
+	// Replaced counts the results that a later result of the same case replaced: the results
+	// files are appended to, so a case that was run again is there twice.
+	Replaced int
 }
 
 // LoadRun reads a result directory. A directory without results is an error.
@@ -91,6 +94,7 @@ func LoadRun(dir string) (*Run, error) {
 	if len(run.Results) == 0 {
 		return nil, fmt.Errorf("%s: no results (results-*.jsonl)", dir)
 	}
+	run.Results, run.Replaced = keepLast(run.Results)
 
 	if bz, err := os.ReadFile(filepath.Join(dir, "meta.json")); err == nil {
 		run.HasMeta = json.Unmarshal(bz, &run.Meta) == nil
@@ -117,6 +121,29 @@ func LoadRun(dir string) (*Run, error) {
 		run.Verify = parseVerify(string(bz))
 	}
 	return run, nil
+}
+
+// keepLast drops each result that a later one of the same durability, system, workload, variant,
+// case and workers replaces, and says how many it dropped. The parameters of the case are no part
+// of the identity: in the results of a full run, those six make a result unique.
+func keepLast(rs []*metrics.Result) ([]*metrics.Result, int) {
+	key := func(r *metrics.Result) compKey {
+		return compKey{r.Workload, r.System, r.Variant, r.Case, r.Params.Durability, r.Params.Concurrency}
+	}
+	last := map[compKey]int{}
+	for i, r := range rs {
+		last[key(r)] = i
+	}
+	if len(last) == len(rs) {
+		return rs, 0
+	}
+	out := make([]*metrics.Result, 0, len(last))
+	for i, r := range rs {
+		if last[key(r)] == i {
+			out = append(out, r)
+		}
+	}
+	return out, len(rs) - len(out)
 }
 
 func readResults(path string) ([]*metrics.Result, int, error) {

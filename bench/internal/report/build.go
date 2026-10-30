@@ -11,7 +11,7 @@ import (
 	"github.com/ehsanranjbar/kvutil/bench/internal/metrics"
 )
 
-// workloadOrder is the order of the workloads in bench/README.md. A workload that is not here
+// workloadOrder is the order of the workloads in bench/docs/workloads.md. A workload that is not here
 // comes after them, in the order that it appears in the results.
 var workloadOrder = []string{
 	"kv-basic", "bulk-load", "record-codecs", "index-maintenance",
@@ -144,6 +144,9 @@ func Build(runs []*Run) *Doc {
 	doc := &Doc{Title: "kvutil benchmark report"}
 	b.doc = doc
 	b.header()
+	for _, rv := range b.runs {
+		b.summary(rv)
+	}
 	if len(b.runs) > 1 {
 		b.compare()
 	}
@@ -333,7 +336,12 @@ var runFields = []field{
 	}},
 	{"systems", func(rv *runView) string { return distinct(rv, func(r *metrics.Result) string { return r.System }) }},
 	{"workloads", func(rv *runView) string { return strings.Join(workloadsOf(rv), ", ") }},
-	{"results", func(rv *runView) string { return strconv.Itoa(len(rv.run.Results)) }},
+	{"results", func(rv *runView) string {
+		if n := rv.run.Replaced; n > 0 {
+			return fmt.Sprintf("%d (%d earlier results of cases that were run again are left out)", len(rv.run.Results), n)
+		}
+		return strconv.Itoa(len(rv.run.Results))
+	}},
 	{"verify", func(rv *runView) string {
 		switch v := rv.run.Verify; {
 		case !v.Present:
@@ -392,7 +400,7 @@ func runWarnings(rv *runView) []string {
 	return ws
 }
 
-// workloadsOf lists the workloads of a run in the order of the README.
+// workloadsOf lists the workloads of a run in the order of docs/workloads.md.
 func workloadsOf(rv *runView) []string {
 	seen := map[string]bool{}
 	var names []string
@@ -426,18 +434,24 @@ func durabilitiesOf(rv *runView) []string {
 	return ds
 }
 
+// rowsOf are the rows of a workload of a run in one durability mode.
+func rowsOf(rv *runView, workload, dur string) []*row {
+	var rows []*row
+	for _, x := range rv.rows {
+		if x.r.Workload == workload && x.dur == dur {
+			rows = append(rows, x)
+		}
+	}
+	return rows
+}
+
 // results adds the sections of the workloads of a run.
 func (b *builder) results(rv *runView) {
 	durs := durabilitiesOf(rv)
 	for _, name := range workloadsOf(rv) {
 		b.doc.Add(&Heading{3, name})
 		for _, d := range durs {
-			var rows []*row
-			for _, x := range rv.rows {
-				if x.r.Workload == name && x.dur == d {
-					rows = append(rows, x)
-				}
-			}
+			rows := rowsOf(rv, name, d)
 			if len(rows) == 0 {
 				continue
 			}

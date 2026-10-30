@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/ehsanranjbar/kvutil/bench/internal/dataset"
 	"github.com/ehsanranjbar/kvutil/kv"
@@ -37,6 +38,37 @@ func DecodeMsgpack(bz []byte, id int64) (*dataset.Order, error) {
 // Key8 is the key of a record in a raw store: its id in 8 bytes that sort as the ids do.
 func Key8(id int64) []byte {
 	return binary.BigEndian.AppendUint64(make([]byte, 0, 8), uint64(id))
+}
+
+// Seconds is the time that many seconds after the epoch, in UTC: the instants that the probes of
+// the index workloads are given in.
+func Seconds(s int64) time.Time { return time.Unix(s, 0).UTC() }
+
+// IDIterator is what an index of kvutil gives back for a match, a range or a lookup.
+type IDIterator interface {
+	Valid() bool
+	Next()
+	Key() (int64, error)
+	Err() error
+	Close() error
+}
+
+// CollectIDs reads the ids of an iterator and closes it. It takes the results of the call that
+// made the iterator, so that the call can be its argument.
+func CollectIDs(it IDIterator, err error) ([]int64, error) {
+	if err != nil {
+		return nil, err
+	}
+	defer it.Close()
+	var ids []int64
+	for ; it.Valid(); it.Next() {
+		id, err := it.Key()
+		if err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, it.Err()
 }
 
 // OrderColumns are the columns of the table of the records, in the order of OrderArgs.

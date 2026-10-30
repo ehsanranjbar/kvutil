@@ -90,7 +90,7 @@ func (b *builder) compare() {
 		}
 	}
 
-	// The workloads of all the runs, in the order of the README.
+	// The workloads of all the runs, in the order of docs/workloads.md.
 	merged := &runView{}
 	for _, rv := range b.runs {
 		merged.rows = append(merged.rows, rv.rows...)

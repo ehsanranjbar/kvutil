@@ -79,7 +79,7 @@ services:
       - pgdata:/var/lib/postgresql
     healthcheck: *postgres-healthcheck
 
-  # TimescaleDB, for the stored aggregations only (stage B3): the same Postgres major, the same
+  # TimescaleDB, for the stored aggregations only: the same Postgres major, the same
   # settings and the same limits. It is started with the profile "timescale".
   #
   # The command is that of postgres (a YAML list cannot be extended, so the settings are repeated:
@@ -170,7 +170,7 @@ services:
       # the database through the Docker API (the socket below): the names of the containers.
       KVB_PG_CONTAINER: kvbench-${PG_SERVICE:-postgres}
       KVB_SELF_CONTAINER: kvbench-bench
-      # The aggregations (see README.md): the end of the span of the events, their span in days,
+      # The aggregations (see docs/workloads.md): the end of the span of the events, their span in days,
       # and the interval of the collector and of the refresh policies. run.sh sets them.
       KVB_AGG_END:
       KVB_AGG_SPAN_DAYS:

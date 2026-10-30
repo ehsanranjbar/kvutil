@@ -28,7 +28,7 @@ import (
 //	pending-old  the same, without TimescaleDB real-time: S3 after updates, moves and deletes of old
 //	             events. A real-time aggregate is exact for what is newer than its watermark and
 //	             not for a change to what it has materialized, until the next refresh: its
-//	             answer here is the old one (see the README)
+//	             answer here is the old one (see docs/workloads.md)
 var verifyEnd = time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
 
 // verifySetup is the setup of a verification of the scale in the parameters.

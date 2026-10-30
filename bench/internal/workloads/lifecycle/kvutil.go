@@ -67,32 +67,6 @@ func priorityOf(total int64) int32 { return int32(total / 10000) }
 // lookup answers a probe through an index.
 type lookup func(tx kv.Tx, p probe) ([]int64, error)
 
-type idIterator interface {
-	Valid() bool
-	Next()
-	Key() (int64, error)
-	Err() error
-	Close() error
-}
-
-func collect(it idIterator, err error) ([]int64, error) {
-	if err != nil {
-		return nil, err
-	}
-	defer it.Close()
-	var ids []int64
-	for ; it.Valid(); it.Next() {
-		id, err := it.Key()
-		if err != nil {
-			return nil, err
-		}
-		ids = append(ids, id)
-	}
-	return ids, it.Err()
-}
-
-func seconds(s int64) time.Time { return time.Unix(s, 0).UTC() }
-
 // defineIndexes adds the indexes of the kinds to a store of any version of the record (the fields
 // are found by name) and returns how each answers a probe.
 func defineIndexes[V any](st *record.Store[int64, V], kinds []string) map[string]lookup {
@@ -109,26 +83,26 @@ func defineIndexes[V any](st *record.Store[int64, V], kinds []string) map[string
 		switch kind {
 		case "customer":
 			x := index.On(st, name, fCustomer)
-			look[kind] = func(tx kv.Tx, p probe) ([]int64, error) { return collect(x.Instantiate(tx).Match(p.S)) }
+			look[kind] = func(tx kv.Tx, p probe) ([]int64, error) { return wl.CollectIDs(x.Instantiate(tx).Match(p.S)) }
 		case "status":
 			x := index.On(st, name, fStatus)
-			look[kind] = func(tx kv.Tx, p probe) ([]int64, error) { return collect(x.Instantiate(tx).Match(p.S)) }
+			look[kind] = func(tx kv.Tx, p probe) ([]int64, error) { return wl.CollectIDs(x.Instantiate(tx).Match(p.S)) }
 		case "total":
 			x := index.On(st, name, fTotal)
 			look[kind] = func(tx kv.Tx, p probe) ([]int64, error) {
-				return collect(x.Instantiate(tx).Range(kvutil.Between(p.Lo, p.Hi)))
+				return wl.CollectIDs(x.Instantiate(tx).Range(kvutil.Between(p.Lo, p.Hi)))
 			}
 		case "code":
 			x := index.Unique(st, name, fCode)
-			look[kind] = func(tx kv.Tx, p probe) ([]int64, error) { return collect(x.Instantiate(tx).Match(p.S)) }
+			look[kind] = func(tx kv.Tx, p probe) ([]int64, error) { return wl.CollectIDs(x.Instantiate(tx).Match(p.S)) }
 		case "composite":
 			x := index.Composite(st, name, field.List[V](fCustomer, fAt))
 			look[kind] = func(tx kv.Tx, p probe) ([]int64, error) {
-				return collect(x.Instantiate(tx).Lookup(fCustomer.Eq(p.S), fAt.Between(seconds(p.Lo), seconds(p.Hi))))
+				return wl.CollectIDs(x.Instantiate(tx).Lookup(fCustomer.Eq(p.S), fAt.Between(wl.Seconds(p.Lo), wl.Seconds(p.Hi))))
 			}
 		case "tags":
 			x := index.On(st, name, fTags)
-			look[kind] = func(tx kv.Tx, p probe) ([]int64, error) { return collect(x.Instantiate(tx).Match(p.S)) }
+			look[kind] = func(tx kv.Tx, p probe) ([]int64, error) { return wl.CollectIDs(x.Instantiate(tx).Match(p.S)) }
 		default:
 			panic("unknown index kind " + kind)
 		}

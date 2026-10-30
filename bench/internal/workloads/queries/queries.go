@@ -271,7 +271,7 @@ func (workload) Verify(ctx context.Context, sys harness.System, p harness.Params
 					default:
 						k = ent.prep
 					}
-					ans, err := e.answer(c, k)
+					ans, err := e.answer(k)
 					if err != nil {
 						return nil, fmt.Errorf("%s (%s): %w", c.label(ent.a), w, err)
 					}
