@@ -113,17 +113,11 @@ func (t *kvTarget) LoadEntities(ctx context.Context, m *model, workers int) erro
 // LoadPairs relates the records: each pair checks that both records exist and writes the
 // references of both directions.
 func (t *kvTarget) LoadPairs(ctx context.Context, m *model, workers int) error {
-	_, err := wl.TxLoad(ctx, t.db, 1, m.lefts+1, 50, workers, func() func(kv.Tx, int64) error {
-		return func(tx kv.Tx, l int64) error {
-			rel := t.members.Instantiate(tx)
-			for j := int64(0); j < int64(m.leftCount[l]); j++ {
-				r := m.rightOf(l, j)
-				d := m.data(l, r)
-				if err := rel.Set(l, r, &d); err != nil {
-					return err
-				}
-			}
-			return nil
+	_, err := wl.TxLoad(ctx, t.db, 0, m.pairs, loadBatch, workers, func() func(kv.Tx, int64) error {
+		return func(tx kv.Tx, i int64) error {
+			l, r := m.pairAt(i)
+			d := m.data(l, r)
+			return t.members.Instantiate(tx).Set(l, r, &d)
 		}
 	})
 	return err

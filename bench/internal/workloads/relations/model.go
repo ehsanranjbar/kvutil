@@ -3,6 +3,7 @@ package relations
 import (
 	"math"
 	"slices"
+	"sort"
 	"time"
 
 	"github.com/ehsanranjbar/kvutil/bench/internal/dataset"
@@ -68,9 +69,10 @@ type model struct {
 	lefts, rights, pairs int64
 
 	// childCount is the number of children of each parent, from index 1; leftCount the number of
-	// pairs of each left record.
+	// pairs of each left record; pairStart the number of pairs before each left record.
 	childCount []int32
 	leftCount  []int32
+	pairStart  []int64
 	stride     int64
 }
 
@@ -103,9 +105,12 @@ func newModel(seed uint64, scale int, values dataset.ValueSize) *model {
 		m.leftCount[l] = int32(min(max(c, 1), m.rights))
 	}
 	m.pairs = 0
+	m.pairStart = make([]int64, m.lefts+2)
 	for l := int64(1); l <= m.lefts; l++ {
+		m.pairStart[l] = m.pairs
 		m.pairs += int64(m.leftCount[l])
 	}
+	m.pairStart[m.lefts+1] = m.pairs
 
 	// The step through the right records is coprime to their number, so that the pairs of a left
 	// record are all different.
@@ -186,6 +191,12 @@ func (m *model) genEntity(side string, id int64, e *entity) {
 // rightOf is the right record of the j-th pair of a left record (j from 0).
 func (m *model) rightOf(left, j int64) int64 {
 	return 1 + (left*1000003+j*m.stride)%m.rights
+}
+
+// pairAt returns the i-th of all the pairs, 0 to pairs-1, in the order of the left records.
+func (m *model) pairAt(i int64) (left, right int64) {
+	left = int64(sort.Search(int(m.lefts), func(k int) bool { return m.pairStart[k+2] > i })) + 1
+	return left, m.rightOf(left, i-m.pairStart[left])
 }
 
 // data is the data of the pair.

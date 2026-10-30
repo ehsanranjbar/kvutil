@@ -62,6 +62,22 @@ func TestModelIsConsistent(t *testing.T) {
 	}
 }
 
+func TestPairAtWalksThePairsInOrder(t *testing.T) {
+	m := newModel(1, 10_000, dataset.Small)
+	i := int64(0)
+	for l := int64(1); l <= m.lefts; l++ {
+		for j := int64(0); j < int64(m.leftCount[l]); j++ {
+			if gotL, gotR := m.pairAt(i); gotL != l || gotR != m.rightOf(l, j) {
+				t.Fatalf("pair %d is (%d, %d), want (%d, %d)", i, gotL, gotR, l, m.rightOf(l, j))
+			}
+			i++
+		}
+	}
+	if i != m.pairs {
+		t.Errorf("walked %d pairs, the model has %d", i, m.pairs)
+	}
+}
+
 func TestKvutilVerifyMatchesTheModel(t *testing.T) {
 	p := testutil.Params(2000)
 	outs, _ := testutil.Verify(t, workload{}, testutil.Kvutil(t), p)

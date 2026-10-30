@@ -234,26 +234,35 @@ if [ "$VERIFY" = 1 ]; then
   fi
 fi
 
+# A workload that fails must not cost the other systems their run or the run its report: the failure
+# is remembered, and the script fails at its end.
+FAILED=""
+run_system() {
+  if ! harness run -system "$1" -durability "$2" -out "/results/$OUT_NAME/results-$2.jsonl" "${COMMON[@]}"; then
+    FAILED="$FAILED $1/$2"
+    echo "warning: $1 ($2) had workloads that failed; see the FAILED lines above" >&2
+  fi
+}
+
 for d in $DURABILITIES; do
   if [ "$d" = durable ]; then export PG_SYNCHRONOUS_COMMIT=on; else export PG_SYNCHRONOUS_COMMIT=off; fi
-  RESULTS="/results/$OUT_NAME/results-$d.jsonl"
   start_stats "$OUT/docker-stats-$d.csv"
 
   if has_system kvutil; then
     log "kvutil, $d"
-    harness run -system kvutil -durability "$d" -out "$RESULTS" "${COMMON[@]}"
+    run_system kvutil "$d"
   fi
   if has_system postgres; then
     log "$PG_SERVICE, $d (fsync=$PG_FSYNC synchronous_commit=$PG_SYNCHRONOUS_COMMIT)"
     start_pg
-    harness run -system postgres -durability "$d" -out "$RESULTS" "${COMMON[@]}"
+    run_system postgres "$d"
     docker logs "kvbench-$PG_SERVICE" > "$OUT/$PG_SERVICE-$d.log" 2>&1 || true
     stop_service "$PG_SERVICE"
   fi
   if has_system timescale && [ "$NEED_TS" = 1 ]; then
     log "timescaledb, $d (fsync=$PG_FSYNC synchronous_commit=$PG_SYNCHRONOUS_COMMIT)"
     start_service timescaledb
-    harness run -system timescale -durability "$d" -out "$RESULTS" "${COMMON[@]}"
+    run_system timescale "$d"
     docker logs kvbench-timescaledb > "$OUT/timescaledb-$d.log" 2>&1 || true
     stop_service timescaledb
   fi
@@ -276,3 +285,7 @@ fi
 
 log "results in bench/$OUT"
 ls -l "$OUT"
+if [ -n "$FAILED" ]; then
+  echo "error: workloads failed on:$FAILED" >&2
+  exit 1
+fi
