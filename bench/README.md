@@ -487,6 +487,279 @@ and `_max` over the trials, `trials` and `percent_of_the_table`, and `params.cas
 `cache`, `records`, `values` and `value_bytes`. The ways must read the same values, which they check
 (the number of values, their bytes, and a checksum that depends on the key of each).
 
+### The aggregations (group `agg`, stage B3)
+
+Stored aggregations of time-series events, on kvutil (`agg.Sum`, `agg.Count`, `agg.Max`, with a
+collector), on TimescaleDB (a hypertable and continuous aggregates with refresh policies) and, as
+the baselines, on PostgreSQL (computed at read time, and a summary table that a trigger keeps). It
+is the one group that runs on a third system, `timescale`: `kvbench run -system timescale`, with
+`KVB_TS_DSN` for its DSN. `run.sh` starts the `timescaledb` service (the compose profile `timescale`)
+only if a selected workload runs on it (`kvbench needs -workload …` says so), and runs the
+workloads of the group on kvutil, PostgreSQL and TimescaleDB one after the other, as for the rest.
+The version of the extension is in each result (`system_version`: `PostgreSQL 18.6 …; timescaledb 2.31.0`,
+and `settings.timescaledb`).
+
+```sh
+./run.sh --smoke -w agg                          # about 10 minutes
+./run.sh -w agg -s 1000000 --agg-interval 1s     # a run: a million events over a year
+./run.sh -w agg-freshness --agg-interval 5s      # the collector and the policies run every 5 seconds
+```
+
+#### The events
+
+`dataset.Event` is `(id, customer, amount, at, kind)`: the amount is in cents (an integer, so that
+sums and maxima are exact on every system and cannot drift), `at` has the resolution of a second
+(UTC), and `kind` is one of four words that no aggregate looks at.
+
+| | |
+| --- | --- |
+| Events | `-scale` of them, ids 1 to N |
+| Customers | `max(10, N/100)`, drawn from a Zipf law of exponent 1 (as the authors of the books): the first has ln 2 / ln(C+1) of the events (13% of 20,000 events), the one of rank k about 1/(k+1) of the first's. The reads draw their customer from the same law, so that the popular ones are read more |
+| Times | spread uniformly over the `KVB_AGG_SPAN_DAYS` (default 365, `--agg-span-days`) days that end at midnight (UTC) of `KVB_AGG_END` (exclusive; `run.sh` sets it to the day it started, once for the whole run, so that every system gets the same events even if the run goes past midnight) |
+| The stream | The new events of the write workloads: ids past N, a customer drawn as above, and `at` = now, which is in the day that `KVB_AGG_END` is (a run on a day other than it is also fine) |
+| Versions | The version of an event changes its amount only: the customer, the time and the kind are those of version 0. The updates of the workloads are new versions; the verification also moves events (another customer and time) |
+
+#### What each system keeps
+
+| System | Variant | What it keeps | What a read does |
+| --- | --- | --- | --- |
+| kvutil | `collector` (writes, rebuild), `exact`, `collected` (reads, freshness) | Three aggregations on a record store of the events (below). The collector runs with `agg.WithInterval(KVB_AGG_INTERVAL)` (1 s), `Spawn`ed while writes go on | `exact`: `Series`, `At`, `Get`, which fold the notes that are not collected yet; `collected`: `SeriesCollected`, `AtCollected`, `GetCollected`, the stored states only |
+| PostgreSQL | `computed` | Nothing: `events` with an index on `(customer, at)` | `GROUP BY date_trunc(…, 'UTC')` at read time |
+| | `trigger` | `daily_summary(customer, day, sum_amount, cnt, max_amount)` kept by a row trigger for every insert, update and delete | The summary (`date_trunc` over its days for weeks and months) |
+| TimescaleDB | `realtime` | Hypertable `events` and the continuous aggregates `daily`, `weekly` and `monthly`, with `materialized_only = false`; the policies refresh up to an hour ago | The aggregate: its materialization up to the watermark, and the hypertable after it |
+| | `materialized` | The same, with `materialized_only = true`; the policies refresh up to the end of the data | The materialization only |
+| | `caggs` (rebuild) | The same, built by the workload | The materialization only |
+
+**kvutil** (`internal/workloads/aggs/kvutil.go`), on `record.New[int64, Event]("events")` (msgpack):
+
+```go
+at := func(e *Event) time.Time { return e.At }
+amount := func(e *Event) (string, int64, bool) { return e.Customer, e.Amount, true }
+sum   := agg.Sum(events, "amount_sum", amount, agg.ByTime(at, agg.Daily, agg.Weekly, agg.Monthly, agg.AllTime))
+count := agg.Count(events, "event_count", func(e *Event) (string, bool) { return e.Customer, true },
+                   agg.ByTime(at, agg.Daily, agg.Weekly, agg.Monthly, agg.AllTime))
+max   := agg.Max(events, "amount_max", amount, agg.ByTime(at, agg.Daily, agg.Weekly, agg.Monthly))
+collector := agg.NewCollector(db, []agg.Source{events}, agg.WithInterval(interval))
+```
+
+`Sum` and `Count` are delta aggregations (a note for each write, folded by the collector into the
+four states of the customer). `Max` is a recomputed one: `agg.Max` gives it `WithMerge`, so only the
+days are stored and the weeks and months are put together from them when they are read. The task
+named the days and months for it; the weeks cost nothing more (they are merged), and give the read
+of the weeks a maximum too. Calendar buckets are in UTC, and the weeks start on Monday.
+
+**TimescaleDB 2.31** (`sqltext.go`; `S` is the schema of the variant):
+
+```sql
+CREATE TABLE S.events (id bigint NOT NULL, customer text NOT NULL, amount bigint NOT NULL,
+                       at timestamptz NOT NULL, kind text NOT NULL, PRIMARY KEY (at, id));
+SELECT create_hypertable('S.events', by_range('at', INTERVAL '7 days'), create_default_indexes => false);
+CREATE INDEX events_customer_at ON S.events (customer, at);
+
+CREATE MATERIALIZED VIEW S.daily WITH (timescaledb.continuous) AS
+SELECT time_bucket('1 day', at) AS bucket, customer,
+       sum(amount)::bigint AS sum_amount, count(*) AS cnt, max(amount) AS max_amount
+FROM S.events GROUP BY 1, 2 WITH NO DATA;
+
+-- hierarchical: the weeks and the months are made from the days (the months likewise, with '1 month')
+CREATE MATERIALIZED VIEW S.weekly WITH (timescaledb.continuous) AS
+SELECT time_bucket('1 week', bucket) AS bucket, customer,
+       sum(sum_amount)::bigint AS sum_amount, sum(cnt)::bigint AS cnt, max(max_amount) AS max_amount
+FROM S.daily GROUP BY 1, 2 WITH NO DATA;
+
+-- the variant `realtime` only (the three of them):
+ALTER MATERIALIZED VIEW S.daily SET (timescaledb.materialized_only = false);
+
+-- the policies of the workloads that write (KVB_AGG_INTERVAL is the schedule, 1000 ms):
+SELECT add_continuous_aggregate_policy('S.daily', start_offset => NULL,
+         end_offset => NULL,                 -- `materialized`; `realtime`: INTERVAL '1 hour'
+         schedule_interval => INTERVAL '1000 milliseconds');   -- and likewise for weekly and monthly
+
+-- the whole range, by hand (the catch-up, and the rebuild):
+CALL refresh_continuous_aggregate('S.daily', NULL, NULL);      -- `realtime`: up to the end of the loaded events
+```
+
+* A unique index of a hypertable must have the column of the time, so the key is `(at, id)`, and the
+  statements that find an event by its id (update, delete) give its time too. The hypertable
+  has the same `(customer, at)` index as the table of PostgreSQL; its chunks are the default 7 days;
+  nothing is compressed (a compressed chunk would make the size of the events smaller than the
+  PostgreSQL's, and the aggregates are not what compression is for).
+* `time_bucket('1 week', …)` is stored by TimescaleDB as `7 days`; its origin is a Monday. An `UPDATE`
+  that moves a row to another chunk fails with a check constraint, so the update of the time of an
+  event (only the verification makes one) is a `DELETE` and an `INSERT` in one transaction.
+* **Defaults found in 2.31.** A continuous aggregate created with no option is **materialized only**
+  (`materialized_only = t` in `timescaledb_information.continuous_aggregates`; real-time
+  aggregation is off by default since 2.13), so the real-time variant is made by the `ALTER`. A
+  continuous aggregate on another one (**hierarchical**) is supported: the weeks and the months are
+  defined on `daily`, not on the hypertable. They are refreshed after the days
+  (`daily`, `weekly`, `monthly`: `caggUnits`), which is the order they depend on one another in.
+* **The window of a refresh.** The end of a window is rounded down to the start of a bucket, so a
+  bucket that is not complete is not materialized, unless the end is `NULL`: then the last bucket
+  with data is, partial or not, and the watermark of the aggregate moves to the end of it. A
+  real-time aggregate reads the materialization up to its watermark and the hypertable after it, so it
+  does not see what is written to a partial bucket that was materialized, until the next refresh. That
+  is why the two variants have different refreshes: `materialized` refreshes up to `NULL`
+  (the materialization is as current as the schedule allows, and it is what its lag is
+  measured for), and `realtime` up to an hour ago (the policy) and up to the end of the loaded
+  events (the catch-up), which leaves the buckets of the new events to the real-time part. The
+  window starts at the beginning of time (`start_offset => NULL`), so that a change to an
+  old event is refreshed too; a policy with `start_offset => '3 days'` would never refresh it.
+* **What a real-time aggregate is exact for.** The events that are newer than its watermark (the new
+  events, by the design above). A change to an old event (an update or a delete) is in a region that
+  is materialized: until the next refresh the real-time aggregate has the old answer, which
+  `agg-freshness` measures (`lag-change-old`) and the verification keeps out of the comparison
+  (below). kvutil's exact read and PostgreSQL's are exact the moment a write commits.
+* The container has `max_worker_processes=32` and `timescaledb.max_background_workers=8` besides
+  the settings of PostgreSQL (see docker-compose.yml): the 8 worker processes of the default
+  would be shared with the parallel queries, and the policies would not get workers.
+
+**PostgreSQL** (`computed`: `events(id bigint PRIMARY KEY, customer, amount, at timestamptz, kind)` with
+`(customer, at)`). `trigger` adds:
+
+```sql
+CREATE TABLE S.daily_summary (customer text NOT NULL, day timestamptz NOT NULL, sum_amount bigint NOT NULL,
+                              cnt bigint NOT NULL, max_amount bigint NOT NULL, PRIMARY KEY (customer, day));
+-- AFTER INSERT OR UPDATE OR DELETE ON events FOR EACH ROW, in plpgsql:
+--   OLD (update, delete): sum_amount -= OLD.amount, cnt -= 1 for (OLD.customer, date_trunc('day', OLD.at, 'UTC'));
+--     the maximum of that day is computed again from the events of the day if it was OLD.amount or less;
+--     the row is deleted at cnt = 0
+--   NEW (insert, update): INSERT ... ON CONFLICT (customer, day) DO UPDATE
+--     SET sum_amount = s.sum_amount + EXCLUDED.sum_amount, cnt = s.cnt + 1, max_amount = greatest(...)
+```
+
+The trigger is off while the events are loaded; the summary is then built by one
+`INSERT … SELECT … GROUP BY` and the trigger turned on. Writers of the same customer and day take
+turns on the row of the summary: what `agg-hot-group` shows.
+
+#### The reads
+
+All the reads are answered by every variant from the same questions (`model.go`); a series returns a
+row for each span with events in it, with the sum, the count and the maximum, and a window is made of
+whole spans. The statements (`S` the schema) of the three sources:
+
+| Read | Computed (events) | Summary table | Continuous aggregate |
+| --- | --- | --- | --- |
+| series of a unit `u` (`day`, `week`, `month`) | `SELECT date_trunc('u', at, 'UTC'), sum(amount)::bigint, count(*), max(amount) FROM S.events WHERE customer = $1 AND at >= $2 AND at < $3 GROUP BY 1 ORDER BY 1` | `SELECT day, sum_amount, cnt, max_amount FROM S.daily_summary WHERE customer = $1 AND day >= $2 AND day < $3 ORDER BY day`; for weeks and months `date_trunc('u', day, 'UTC')` with `sum`, `sum`, `max` and `GROUP BY 1` | `SELECT bucket, sum_amount, cnt, max_amount FROM S.daily` (or `weekly`, `monthly`) `WHERE customer = $1 AND bucket >= $2 AND bucket < $3 ORDER BY bucket` |
+| total of a customer | `SELECT coalesce(sum(amount), 0)::bigint, count(*) FROM S.events WHERE customer = $1` | the same `sum(sum_amount)`, `sum(cnt)` of the summary | the same of `S.monthly` |
+| top 10 customers of a month | `SELECT customer, sum(amount)::bigint s FROM S.events WHERE at >= $1 AND at < $2 GROUP BY customer ORDER BY s DESC, customer LIMIT 10` | the same of `sum_amount` of the summary, `day >= $1 AND day < $2` | `SELECT customer, sum_amount FROM S.monthly WHERE bucket = $1 ORDER BY sum_amount DESC, customer LIMIT 10` |
+
+kvutil reads the series with three calls in one read transaction, one for each aggregation
+(`Series(bucket, customer, from, to)` of `amount_sum`, `event_count` and `amount_max`), merged by the
+start of the span; the total with `Get` of the sum and the count; and the top 10 has no read of its
+own: **an aggregation has no way to read all its groups**, so the top 10 reads the month of every
+customer (`At(Monthly, customer, month)`, C of them in one transaction) and sorts. That is the cost
+of the case `top10-monthly` on kvutil, and it grows with the number of customers.
+
+#### The workloads
+
+All of them load the events as the phases `load` (with the aggregates noted, summarized or
+invalidated, as the system does it: kvutil in transactions of 500 events with their notes,
+PostgreSQL by `COPY` and one `INSERT … SELECT` for the summary, TimescaleDB by `COPY` into a
+hypertable that has its continuous aggregates) and `catch-up` (kvutil's `Collect` of every
+note; a refresh of every continuous aggregate; nothing for PostgreSQL), then settle (a checkpoint, and
+`ANALYZE`). `load` + `catch-up` is what it costs to have N events and their aggregates.
+
+* **agg-write.** Cases `insert` (new events of the stream), `update` (a new amount for an old
+  event, picked at random) and `delete` (a pool of old events, each once, of the upper half of the ids:
+  a case of operations, the first tenth the warm-up), each at 1 worker and at `-concurrency`, with the
+  background work running: kvutil's collector, the refresh policies of TimescaleDB. Between the
+  cases everything is brought up to date, so that a case does not start with the debt of the one
+  before. A change to an old event forces kvutil to note the removal and the addition (and mark the
+  day to compute the maximum of again), and TimescaleDB to invalidate the range, which the next
+  refresh recomputes. The kvutil variant also reports `<case>-background` with the retries
+  (conflicts) of the collector's transactions and the errors it reported (`collector_retries`,
+  `collector_errors`); `retries` of the case itself are the writers'.
+* **agg-hot-group.** The writers insert events of one customer (rank 0) at the same time of the day
+  (now): the same group, the same day and the same month in every aggregation. `insert-hot` and, for
+  comparison, `insert-spread` (the same writers with the customers of the dataset), at 1 worker
+  and at `-concurrency`. Look at `errors`, `retries` and the latencies: writers of kvutil do not
+  conflict on an aggregation (they note), and the trigger's writers wait for one another on the row
+  of the summary.
+* **agg-read.** `daily-30` (a window of 30 days at random), `daily-365` (the whole span),
+  `weekly-year`, `monthly-year`, `total` and `top10-monthly` (a month of the span at random), each at 1
+  worker and at `-concurrency`, on all the events, caught up. The customer is drawn from the Zipf law
+  of the events. The ways: kvutil `exact` and `collected`; PostgreSQL `computed` and `trigger`;
+  TimescaleDB `realtime` and `materialized`. The first query of every case is checked against the
+  exact answer before it is measured. `units` are the rows returned.
+* **agg-freshness.** On all variants. *Lag* (`lag-insert`, `lag-change-old`): the trials wait until
+  the aggregates have everything, wait a random part of the interval (so that the trials do not
+  all start at the same point of the cycle of the background work), and write: a burst of 200 new
+  events of the customer of rank 0 by the workers at once, or (`lag-change-old`) 20 updates and 5
+  deletes of its events of the last 60 days. The clock starts when the last write returns. The exact
+  answer is read from the events (for kvutil from its exact read), and then the variant's read is
+  polled every 5 ms (`poll_ms`) until it is the same, for the series of days, weeks and months of
+  the customer over the last 60 days and the stream; `lag_daily_*` is the time until the series of
+  days was right and `lag_all_*` until all three were (so, for TimescaleDB, until the hierarchy has
+  gone through). The result has the minimum, mean, median, 95th percentile and maximum in milliseconds
+  (`extra`: `lag_daily_ms_p50` and so on, `trials`, `timeouts`), and the lag of every trial in
+  `info` (`lag_daily_ms`, `lag_all_ms`). The number of trials is twice the number of intervals in
+  `-duration` (4 to 40). A trial that is not right in 60 s is a timeout. The precision is the
+  poll (5 ms) and the time to read the exact answer (a few ms) after the writes: the lags of the
+  exact variants are that, not zero. *Cost of an exact read while data is pending*
+  (`daily30-pending-N`, `total-pending-N`; kvutil and TimescaleDB): the background work is stopped
+  (the collector shut down, the policies unscheduled), everything is brought up to date, and N events of
+  that customer, today, are left pending (N = 0, N/100, N/10 of the scale, at least 0, 100,
+  1000): a series of the last 30 days and a total are read at 1 worker for each N. kvutil's
+  `exact` folds the notes of the customer (and computes the marked days of the maximum from
+  their events), its `collected` does not look at them; TimescaleDB's `realtime` unions the
+  materialization with the hypertable beyond the watermark, `materialized` does not. The exact variants
+  check that the read is the exact answer at each N.
+* **agg-rebuild.** The events are loaded with no aggregate defined (`load-events`; kvutil by a write
+  batch of the records without the aggregations), and the aggregates are built over them, each step a
+  phase of N events: kvutil `migrate` (`store.Migrate` of the store with the three aggregations
+  defined, which builds the three; the report says three were built), then `rebuild-sum`,
+  `rebuild-count`, `rebuild-max` (`agg.Rebuild` of each alone: it deletes the aggregation and notes
+  every record again, and collects); TimescaleDB `create-with-data` (the three `CREATE MATERIALIZED
+  VIEW … WITH DATA`: the initial materialization), after which they are dropped and made `WITH NO
+  DATA`, then `refresh-day`, `refresh-week` and `refresh-month` (`refresh_continuous_aggregate(…,
+  NULL, NULL)` over the whole range); PostgreSQL `build-summary` (`INSERT … SELECT … GROUP BY`
+  into the summary; the trigger is created after). The built aggregates are checked against the exact
+  answers.
+* **Storage** is the last case of `agg-rebuild`, `storage`: `extra` has `events_bytes`,
+  `aggregate_bytes`, `aggregate_pct` (the aggregates as a share of the events) and the bytes per
+  event of each. TimescaleDB: `hypertable_size` of the events and of the materialization hypertables
+  of the three aggregates (with their indexes; no compression). PostgreSQL: `pg_total_relation_size` of
+  the table and of the summary. kvutil: the sum of the lengths of the keys and values under the
+  prefix of the records and under those of the three aggregations (`params.case.logical`:
+  true): **before** Badger compresses them, so it is not the size on disk of the same kind as the
+  others; the size of the whole directory on disk (`disk_bytes`) is in the result as always. The
+  state of an aggregation of kvutil has the temporary records of the notes that were collected
+  deleted, but Badger removes them from its files when it compacts.
+
+#### The time zone
+
+The buckets are UTC everywhere. kvutil's `agg.Daily`, `Weekly` (Monday) and `Monthly` are in UTC unless
+`In(loc)` is given; PostgreSQL's queries use the three-argument `date_trunc(unit, ts, 'UTC')`, which
+does not depend on the `TimeZone` of the session, and the trigger likewise; TimescaleDB's
+`time_bucket(interval, timestamptz)` without a time zone is in UTC too (`time_bucket('1 week', …)` has a Monday
+origin), whatever the session has. The windows of the queries are instants (`timestamptz`
+parameters). The verification makes this a test: events one second before and at the start of
+a month, a week, a day, a year, and of the end of the span, and the reads again in a session of
+`Pacific/Auckland` (12 or 13 hours from UTC) on PostgreSQL and TimescaleDB, which must give the
+answers of the session in UTC (kvutil has no session, and reads again).
+
+#### Verification of the aggregations
+
+The events are the same from the same seed on every system and the end of the span is fixed (a
+Monday, the first of a month: 2026-06-01, so that the last day, week and month are complete).
+`kvbench verify -workload agg` makes each variant of each system load the events, add the events of the
+boundaries, and answer 28 reads (four customers: the series by days, weeks and months over the span,
+and the total; a window of 30 days; the top 10 of every month), at stages. The answers are lines
+of the number of rows, the sum, the count and a digest of every row (sums, counts and maxima are
+integers, so they must be exact), and the groups of outputs are compared line by line:
+
+| Group | Stages | Variants |
+| --- | --- | --- |
+| `caught-up` | S1 the events loaded and caught up (collected, refreshed); S4 after the changes below and caught up again; S5 the same in a session of another time zone | all six, which includes `collected` and `materialized` |
+| `pending` | S0 the events loaded, nothing collected or refreshed; S2 after 40 new events (at and after the end of the span, singly and in a batch) | the variants that are exact before they catch up: kvutil `exact`, PostgreSQL both, TimescaleDB `realtime` |
+| `pending-old` | S3 after the changes of old events: a new amount for a ninth of them, a move to another customer and time for a thirteenth, a deletion of a seventeenth | the same without TimescaleDB `realtime`, whose answer is the old one until the refresh (see above) |
+
+`agg-write` and `agg-read` do all of it; `agg-hot-group` and `agg-freshness` have four writers insert
+events of one customer at the same time and compare the reads (pending and caught up) with the
+exact answer of the events; `agg-rebuild` builds the aggregates over events with none and
+compares their reads. The cases of the timed workloads check their first query against the exact
+answer too.
+
 ### Reading the plans
 
 The result of a case of the query workloads has `metrics.info`:

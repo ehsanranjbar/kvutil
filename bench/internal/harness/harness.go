@@ -240,8 +240,10 @@ func (rc *RunContext) Phase(ctx context.Context, c Case, fn func(ctx context.Con
 		Retries:    rc.retries() - retries0,
 		Resources:  res,
 	}
-	if res.WallSec > 0 {
-		m.RecordsPerSec = float64(records) / res.WallSec
+	// From the time as it was measured: the wall time of the result is rounded to milliseconds,
+	// which is nothing for a phase that is faster than that.
+	if wall := end.Sub(start).Seconds(); wall > 0 {
+		m.RecordsPerSec = float64(records) / wall
 	}
 	return rc.emit(ctx, c, conc, start, end, m)
 }

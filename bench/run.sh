@@ -15,14 +15,18 @@ usage() {
   cat <<'EOF'
 usage: ./run.sh [options]
 
-  -w, --workload LIST     workloads, groups (kv, load, records, index, query) or all  (all)
-  -s, --scale N           records                                                (100000)
+  -w, --workload LIST     workloads, groups (kv, load, records, index, query, agg) or all  (all)
+  -s, --scale N           records (events, for the aggregations)                 (100000)
   -V, --values SIZE       small (~200 B) or large (~4 KB)                        (small)
   -d, --durability MODE   durable, relaxed or both                               (durable)
   -c, --concurrency C     workers of the cases that run concurrently             (4)
       --duration D        measured interval of a timed case                      (10s)
       --warmup D          warm-up of a timed case                                (2s)
-      --systems LIST      kvutil, postgres or kvutil,postgres                    (kvutil,postgres)
+      --systems LIST      any of kvutil, postgres, timescale                     (kvutil,postgres,timescale)
+                          (TimescaleDB is started only if a selected workload runs on it)
+      --agg-span-days N   days that the events of the aggregations spread over   (365)
+      --agg-interval D    interval of kvutil's collector and of the refresh
+                          policies of TimescaleDB                                (1s)
       --seed N            seed of the dataset and the workers                    (1)
       --cpus N            CPUs for the database and for the harness each         (4, or $BENCH_CPUS)
       --mem SIZE          memory for each of them, like 4g or 6144m              (4g, or $BENCH_MEM)
@@ -37,7 +41,8 @@ EOF
 }
 
 WORKLOAD=all SCALE=100000 VALUES=small DURABILITY=durable CONCURRENCY=4
-DURATION=10s WARMUP=2s SYSTEMS=kvutil,postgres SEED=1 VERIFY=0 KEEP=0 BUILD=1 OUT=""
+DURATION=10s WARMUP=2s SYSTEMS=kvutil,postgres,timescale SEED=1 VERIFY=0 KEEP=0 BUILD=1 OUT=""
+AGG_SPAN_DAYS=${KVB_AGG_SPAN_DAYS:-365} AGG_INTERVAL=${KVB_AGG_INTERVAL:-1s}
 PG_SERVICE=${PG_SERVICE:-postgres}
 BENCH_CPUS=${BENCH_CPUS:-4}
 BENCH_MEM=${BENCH_MEM:-4g}
@@ -52,6 +57,8 @@ while [ $# -gt 0 ]; do
     --duration) DURATION=$2; shift 2 ;;
     --warmup) WARMUP=$2; shift 2 ;;
     --systems) SYSTEMS=$2; shift 2 ;;
+    --agg-span-days) AGG_SPAN_DAYS=$2; shift 2 ;;
+    --agg-interval) AGG_INTERVAL=$2; shift 2 ;;
     --seed) SEED=$2; shift 2 ;;
     --cpus) BENCH_CPUS=$2; shift 2 ;;
     --mem) BENCH_MEM=$2; shift 2 ;;
@@ -104,6 +111,11 @@ else
 fi
 export KVUTIL_COMMIT
 
+# The day after the last day of the events of the aggregations, fixed for the whole run so that
+# every system gets the same events even if the run goes past midnight (UTC).
+KVB_AGG_END=${KVB_AGG_END:-$(date -u +%Y-%m-%d)}
+export KVB_AGG_END KVB_AGG_SPAN_DAYS=$AGG_SPAN_DAYS KVB_AGG_INTERVAL=$AGG_INTERVAL
+
 BENCH_HOST=$(hostname -s 2>/dev/null || hostname)
 export BENCH_HOST
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
@@ -118,8 +130,7 @@ BENCH_DOCKER_MEM_TOTAL=$(docker info --format '{{.MemTotal}}')
 BENCH_DOCKER_KERNEL=$(docker info --format '{{.KernelVersion}}')
 export BENCH_DOCKER_SERVER_VERSION BENCH_DOCKER_OS BENCH_DOCKER_NCPU BENCH_DOCKER_MEM_TOTAL BENCH_DOCKER_KERNEL
 
-COMPOSE=(docker compose --profile bench)
-[ "$PG_SERVICE" = timescaledb ] && COMPOSE+=(--profile timescale)
+COMPOSE=(docker compose --profile bench --profile timescale)
 
 log() { printf '\n==> %s\n' "$*"; }
 
@@ -151,7 +162,7 @@ cleanup() {
   stop_stats
   if [ "$KEEP" = 0 ]; then
     log "tearing down"
-    "${COMPOSE[@]}" --profile timescale down -v --remove-orphans >/dev/null 2>&1 || true
+    "${COMPOSE[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
   fi
 }
 trap cleanup EXIT
@@ -173,6 +184,8 @@ has_system() { case ",$SYSTEMS," in *",$1,"*) return 0 ;; *) return 1 ;; esac; }
   printf '  "kvutil_commit": "%s",\n' "$KVUTIL_COMMIT"
   printf '  "args": {"workload": "%s", "scale": %s, "values": "%s", "durability": "%s", "concurrency": %s, "duration": "%s", "warmup": "%s", "systems": "%s", "seed": %s, "pg_service": "%s"},\n' \
     "$WORKLOAD" "$SCALE" "$VALUES" "$DURABILITY" "$CONCURRENCY" "$DURATION" "$WARMUP" "$SYSTEMS" "$SEED" "$PG_SERVICE"
+  printf '  "aggregations": {"end": "%s", "span_days": %s, "interval": "%s"},\n' \
+    "$KVB_AGG_END" "$AGG_SPAN_DAYS" "$AGG_INTERVAL"
   printf '  "limits": {"cpus": "%s", "mem": "%s", "shared_buffers": "%s", "effective_cache_size": "%s"},\n' \
     "$BENCH_CPUS" "$BENCH_MEM" "$PG_SHARED_BUFFERS" "$PG_EFFECTIVE_CACHE_SIZE"
   printf '  "docker": {"server": "%s", "os": "%s", "ncpu": %s, "mem_total": %s, "kernel": "%s"}\n' \
@@ -189,16 +202,32 @@ fi
 
 COMMON=(-scale "$SCALE" -values "$VALUES" -concurrency "$CONCURRENCY" -duration "$DURATION" -warmup "$WARMUP" -seed "$SEED" -workload "$WORKLOAD")
 
-start_pg() {
-  "${COMPOSE[@]}" up -d --wait --force-recreate "$PG_SERVICE" >/dev/null
+start_service() {
+  "${COMPOSE[@]}" up -d --wait --force-recreate "$1" >/dev/null
 }
+stop_service() {
+  "${COMPOSE[@]}" stop "$1" >/dev/null
+}
+start_pg() { start_service "$PG_SERVICE"; }
+
+# TimescaleDB is started only if a selected workload runs on it (the aggregations).
+NEED_TS=0
+if has_system timescale && [ -n "$(harness needs -workload "$WORKLOAD" | tr -d '[:space:]')" ]; then
+  NEED_TS=1
+fi
 
 if [ "$VERIFY" = 1 ]; then
-  log "verifying that both systems return the same"
+  log "verifying that the systems return the same"
   export PG_SYNCHRONOUS_COMMIT=on
   start_pg
+  if [ "$NEED_TS" = 1 ] && [ "$PG_SERVICE" != timescaledb ]; then
+    start_service timescaledb
+  fi
   harness verify -workload "$WORKLOAD" -seed "$SEED" -values "$VALUES" | tee "$OUT/verify.txt"
-  "${COMPOSE[@]}" stop "$PG_SERVICE" >/dev/null
+  stop_service "$PG_SERVICE"
+  if [ "$NEED_TS" = 1 ] && [ "$PG_SERVICE" != timescaledb ]; then
+    stop_service timescaledb
+  fi
 fi
 
 for d in $DURABILITIES; do
@@ -215,7 +244,14 @@ for d in $DURABILITIES; do
     start_pg
     harness run -system postgres -durability "$d" -out "$RESULTS" "${COMMON[@]}"
     docker logs "kvbench-$PG_SERVICE" > "$OUT/$PG_SERVICE-$d.log" 2>&1 || true
-    "${COMPOSE[@]}" stop "$PG_SERVICE" >/dev/null
+    stop_service "$PG_SERVICE"
+  fi
+  if has_system timescale && [ "$NEED_TS" = 1 ]; then
+    log "timescaledb, $d (fsync=$PG_FSYNC synchronous_commit=$PG_SYNCHRONOUS_COMMIT)"
+    start_service timescaledb
+    harness run -system timescale -durability "$d" -out "$RESULTS" "${COMMON[@]}"
+    docker logs kvbench-timescaledb > "$OUT/timescaledb-$d.log" 2>&1 || true
+    stop_service timescaledb
   fi
   stop_stats
 done

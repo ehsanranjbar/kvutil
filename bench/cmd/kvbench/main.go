@@ -1,8 +1,9 @@
 // Command kvbench runs the benchmarks of kvutil against PostgreSQL.
 //
-//	kvbench run    -system kvutil|postgres -workload NAME|GROUP|all -scale N ...
+//	kvbench run    -system kvutil|postgres|timescale -workload NAME|GROUP|all -scale N ...
 //	kvbench verify -workload NAME|GROUP|all -scale N
 //	kvbench list
+//	kvbench needs  -workload NAME|GROUP|all
 package main
 
 import (
@@ -22,7 +23,9 @@ import (
 	"github.com/ehsanranjbar/kvutil/bench/internal/metrics"
 	"github.com/ehsanranjbar/kvutil/bench/internal/systems/kvsys"
 	"github.com/ehsanranjbar/kvutil/bench/internal/systems/pgsys"
+	"github.com/ehsanranjbar/kvutil/bench/internal/systems/tssys"
 
+	_ "github.com/ehsanranjbar/kvutil/bench/internal/workloads/aggs"
 	_ "github.com/ehsanranjbar/kvutil/bench/internal/workloads/bulkload"
 	_ "github.com/ehsanranjbar/kvutil/bench/internal/workloads/codecs"
 	_ "github.com/ehsanranjbar/kvutil/bench/internal/workloads/indexmaint"
@@ -48,6 +51,8 @@ func main() {
 		err = verifyCmd(ctx, os.Args[2:])
 	case "list":
 		err = listCmd()
+	case "needs":
+		err = needsCmd(os.Args[2:])
 	case "-h", "-help", "--help", "help":
 		usage()
 		return
@@ -63,13 +68,15 @@ func main() {
 
 func usage() {
 	fmt.Fprint(os.Stderr, `usage:
-  kvbench run    -system kvutil|postgres -workload <name|group|all> [-scale N] [-values small|large]
+  kvbench run    -system kvutil|postgres|timescale -workload <name|group|all> [-scale N] [-values small|large]
                  [-durability durable|relaxed] [-concurrency C] [-duration D] [-warmup W] [-out file.jsonl]
   kvbench verify -workload <name|group|all> [-scale N] [-values small|large]
   kvbench list
+  kvbench needs  -workload <name|group|all>   prints the systems besides kvutil and postgres that the workloads run on
 
-The environment: KVB_PG_DSN (the DSN of PostgreSQL), KVB_DATA_DIR (where Badger keeps its databases),
-KVB_BADGER_CACHE_MB, KVB_PREFETCH. "kvbench run -h" has the flags.
+The environment: KVB_PG_DSN (the DSN of PostgreSQL), KVB_TS_DSN (the DSN of TimescaleDB),
+KVB_DATA_DIR (where Badger keeps its databases), KVB_BADGER_CACHE_MB, KVB_PREFETCH; KVB_AGG_END,
+KVB_AGG_SPAN_DAYS and KVB_AGG_INTERVAL for the aggregations. "kvbench run -h" has the flags.
 `)
 }
 
@@ -82,6 +89,7 @@ type common struct {
 	seed       uint64
 	dataDir    string
 	pgDSN      string
+	tsDSN      string
 	cacheMB    int
 	prefetch   int
 }
@@ -94,6 +102,7 @@ func (c *common) register(fs *flag.FlagSet, defScale int, defDurability string) 
 	fs.Uint64Var(&c.seed, "seed", 1, "seed of the dataset and of the choices of the workers")
 	fs.StringVar(&c.dataDir, "data-dir", envOr("KVB_DATA_DIR", ""), "directory of the Badger databases (default: /data if it exists, else a temporary one)")
 	fs.StringVar(&c.pgDSN, "pg-dsn", os.Getenv("KVB_PG_DSN"), "DSN of PostgreSQL")
+	fs.StringVar(&c.tsDSN, "ts-dsn", os.Getenv("KVB_TS_DSN"), "DSN of TimescaleDB")
 	fs.IntVar(&c.cacheMB, "cache-mb", envInt("KVB_BADGER_CACHE_MB", 0), "block cache of Badger in MiB (default: a quarter of the memory limit of the container, or 256)")
 	fs.IntVar(&c.prefetch, "prefetch", envInt("KVB_PREFETCH", 64), "values that the iterators of kvutil read ahead")
 }
@@ -152,11 +161,18 @@ func (c *common) postgres(ctx context.Context, d harness.Durability, conns int) 
 	return pgsys.Open(ctx, pgsys.Config{DSN: c.pgDSN, Durability: d, MaxConns: int32(conns)})
 }
 
+func (c *common) timescale(ctx context.Context, d harness.Durability, conns int) (*tssys.System, error) {
+	if c.tsDSN == "" {
+		return nil, errors.New("TimescaleDB needs a DSN: -ts-dsn or KVB_TS_DSN")
+	}
+	return tssys.Open(ctx, pgsys.Config{DSN: c.tsDSN, Durability: d, MaxConns: int32(conns)})
+}
+
 func runCmd(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	var c common
 	c.register(fs, 100_000, "durable")
-	system := fs.String("system", "", "kvutil or postgres")
+	system := fs.String("system", "", "kvutil, postgres or timescale")
 	concurrency := fs.Int("concurrency", 4, "workers of the cases that run concurrently")
 	duration := fs.Duration("duration", 10*time.Second, "length of the measured interval of a timed case")
 	warmup := fs.Duration("warmup", 2*time.Second, "warm-up of a timed case, which is not measured")
@@ -192,8 +208,14 @@ func runCmd(ctx context.Context, args []string) error {
 			return err
 		}
 		sys = s
+	case "timescale":
+		s, err := c.timescale(ctx, p.Durability, p.Concurrency+4)
+		if err != nil {
+			return err
+		}
+		sys = s
 	default:
-		return fmt.Errorf("-system must be kvutil or postgres, not %q", *system)
+		return fmt.Errorf("-system must be kvutil, postgres or timescale, not %q", *system)
 	}
 	defer sys.Close()
 
@@ -251,6 +273,14 @@ func verifyCmd(ctx context.Context, args []string) error {
 	}
 	defer pgs.Close()
 	systems := []harness.System{kvs, pgs}
+	if needsTimescale(workloads) {
+		tss, err := c.timescale(ctx, p.Durability, 8)
+		if err != nil {
+			return err
+		}
+		defer tss.Close()
+		systems = append(systems, tss)
+	}
 
 	failed := false
 	for _, w := range workloads {
@@ -290,12 +320,39 @@ func verifyCmd(ctx context.Context, args []string) error {
 
 func listCmd() error {
 	tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "WORKLOAD\tGROUP\tKVUTIL VARIANTS\tPOSTGRES VARIANTS\tDESCRIPTION")
+	fmt.Fprintln(tw, "WORKLOAD\tGROUP\tKVUTIL VARIANTS\tPOSTGRES VARIANTS\tTIMESCALE VARIANTS\tDESCRIPTION")
 	for _, w := range harness.All() {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", w.Name(), w.Group(),
-			names(w.Variants((*kvsys.System)(nil))), names(w.Variants((*pgsys.System)(nil))), w.Description())
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", w.Name(), w.Group(),
+			names(w.Variants((*kvsys.System)(nil))), names(w.Variants((*pgsys.System)(nil))),
+			names(w.Variants((*tssys.System)(nil))), w.Description())
 	}
 	return tw.Flush()
+}
+
+// needsTimescale reports whether any of the workloads runs on TimescaleDB.
+func needsTimescale(workloads []harness.Workload) bool {
+	for _, w := range workloads {
+		if len(w.Variants((*tssys.System)(nil))) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// needsCmd prints "timescale" if a workload of the selection runs on TimescaleDB, which is how the
+// scripts know to start it.
+func needsCmd(args []string) error {
+	fs := flag.NewFlagSet("needs", flag.ExitOnError)
+	workload := fs.String("workload", "all", "workloads: names and groups separated by commas, or all")
+	fs.Parse(args)
+	workloads, err := harness.Select(*workload)
+	if err != nil {
+		return err
+	}
+	if needsTimescale(workloads) {
+		fmt.Println("timescale")
+	}
+	return nil
 }
 
 func names(vs []harness.Variant) string {

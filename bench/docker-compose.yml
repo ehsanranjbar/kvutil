@@ -81,11 +81,64 @@ services:
 
   # TimescaleDB, for the stored aggregations only (stage B3): the same Postgres major, the same
   # settings and the same limits. It is started with the profile "timescale".
+  #
+  # The command is that of postgres (a YAML list cannot be extended, so the settings are repeated:
+  # keep them the same) and two more: the extension runs the refresh policies of the continuous
+  # aggregates in background workers, which the 8 worker processes of the default configuration
+  # (parallel queries take from them too) do not leave enough of; timescaledb-tune would have
+  # raised them, but it is off (NO_TS_TUNE) so that the settings are those of postgres.
   timescaledb:
     image: timescale/timescaledb:2.31.0-pg18
     container_name: kvbench-timescaledb
     profiles: ["timescale"]
-    command: *postgres-command
+    command:
+      - postgres
+      - -c
+      - shared_buffers=${PG_SHARED_BUFFERS:-1GB}
+      - -c
+      - effective_cache_size=${PG_EFFECTIVE_CACHE_SIZE:-3GB}
+      - -c
+      - work_mem=${PG_WORK_MEM:-32MB}
+      - -c
+      - maintenance_work_mem=${PG_MAINTENANCE_WORK_MEM:-512MB}
+      - -c
+      - max_connections=200
+      - -c
+      - wal_level=replica
+      - -c
+      - wal_buffers=64MB
+      - -c
+      - max_wal_size=4GB
+      - -c
+      - min_wal_size=1GB
+      - -c
+      - checkpoint_timeout=15min
+      - -c
+      - checkpoint_completion_target=0.9
+      - -c
+      - wal_compression=off
+      - -c
+      - full_page_writes=on
+      - -c
+      - fsync=${PG_FSYNC:-on}
+      - -c
+      - synchronous_commit=${PG_SYNCHRONOUS_COMMIT:-on}
+      - -c
+      - autovacuum=on
+      - -c
+      - autovacuum_naptime=15s
+      - -c
+      - random_page_cost=1.1
+      - -c
+      - effective_io_concurrency=64
+      - -c
+      - track_io_timing=on
+      - -c
+      - log_checkpoints=on
+      - -c
+      - max_worker_processes=32
+      - -c
+      - timescaledb.max_background_workers=8
     <<: *limits
     shm_size: 1g
     environment:
@@ -111,7 +164,13 @@ services:
     <<: *limits
     environment:
       KVB_PG_DSN: postgres://postgres:bench@${PG_SERVICE:-postgres}:5432/bench?sslmode=disable
+      KVB_TS_DSN: postgres://postgres:bench@timescaledb:5432/bench?sslmode=disable
       KVB_DATA_DIR: /data
+      # The aggregations (see README.md): the end of the span of the events, their span in days,
+      # and the interval of the collector and of the refresh policies. run.sh sets them.
+      KVB_AGG_END:
+      KVB_AGG_SPAN_DAYS:
+      KVB_AGG_INTERVAL:
       GOMEMLIMIT: ${BENCH_GOMEMLIMIT:-3GiB}
       BENCH_HOST:
       BENCH_CPUS:
