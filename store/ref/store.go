@@ -17,6 +17,8 @@ var (
 	ErrPrimaryKeyTooLong = errors.New("ref: primary key is longer than 255 bytes")
 	// ErrDuplicate is returned by a unique store when a key already refers to another primary key.
 	ErrDuplicate = errors.New("ref: key refers to another primary key")
+	// ErrNotUnique is returned when the primary key of a key is asked of a store that is not unique.
+	ErrNotUnique = errors.New("ref: store is not unique")
 	// ErrCorrupt is returned for an entry that cannot be read.
 	ErrCorrupt = errors.New("ref: corrupt entry")
 )
@@ -187,6 +189,29 @@ func (i *Instance) Has(key, primaryKey []byte) (bool, error) {
 
 	pk, _, err := splitUnique(existing)
 	return bytes.Equal(pk, primaryKey), err
+}
+
+// PrimaryKeyOf returns the primary key that a key of a unique store refers to, and whether the
+// key refers to one. The slice is one that the caller owns.
+// It returns ErrNotUnique if the store is not unique, as a key may refer to many primary keys then.
+func (i *Instance) PrimaryKeyOf(key []byte) ([]byte, bool, error) {
+	if !i.store.unique {
+		return nil, false, ErrNotUnique
+	}
+
+	existing, err := i.tx.Get(key)
+	if errors.Is(err, kv.ErrNotFound) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+
+	pk, _, err := splitUnique(existing)
+	if err != nil {
+		return nil, false, err
+	}
+	return bytes.Clone(pk), true, nil
 }
 
 // Iterator iterates over the references whose keys are in [start, end), in ascending order.

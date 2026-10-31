@@ -213,3 +213,75 @@ func TestCorruptEntries(t *testing.T) {
 	})
 	require.NoError(t, err)
 }
+
+func TestPrimaryKeyOf(t *testing.T) {
+	testkv.Each(t, func(t *testing.T, db kv.DB) {
+		store := refstore.NewUnique([]byte("refs"))
+
+		err := db.Update(func(tx kv.Tx) error {
+			refs := store.Instantiate(tx)
+			require.NoError(t, refs.Set([]byte("k1"), []byte("a"), []byte("v")))
+			require.NoError(t, refs.Set([]byte("k2"), nil, nil))
+
+			pk, ok, err := refs.PrimaryKeyOf([]byte("k1"))
+			require.NoError(t, err)
+			require.True(t, ok)
+			require.Equal(t, []byte("a"), pk)
+
+			// A reference to the empty primary key is there all the same.
+			pk, ok, err = refs.PrimaryKeyOf([]byte("k2"))
+			require.NoError(t, err)
+			require.True(t, ok)
+			require.Empty(t, pk)
+
+			_, ok, err = refs.PrimaryKeyOf([]byte("k3"))
+			require.NoError(t, err)
+			require.False(t, ok)
+
+			// A reference that is deleted in the same transaction is gone.
+			require.NoError(t, refs.Delete([]byte("k1"), []byte("a")))
+			_, ok, err = refs.PrimaryKeyOf([]byte("k1"))
+			require.NoError(t, err)
+			require.False(t, ok)
+			return nil
+		})
+		require.NoError(t, err)
+	})
+}
+
+func TestPrimaryKeyOfNotUnique(t *testing.T) {
+	testkv.Each(t, func(t *testing.T, db kv.DB) {
+		store := refstore.New([]byte("refs"))
+
+		err := db.Update(func(tx kv.Tx) error {
+			refs := store.Instantiate(tx)
+			require.NoError(t, refs.Set([]byte("k1"), []byte("a"), nil))
+
+			_, _, err := refs.PrimaryKeyOf([]byte("k1"))
+			require.ErrorIs(t, err, refstore.ErrNotUnique)
+			return nil
+		})
+		require.NoError(t, err)
+	})
+}
+
+func TestPrimaryKeyOfIsIndependent(t *testing.T) {
+	testkv.Each(t, func(t *testing.T, db kv.DB) {
+		store := refstore.NewUnique([]byte("refs"))
+
+		err := db.Update(func(tx kv.Tx) error {
+			refs := store.Instantiate(tx)
+			require.NoError(t, refs.Set([]byte("k"), []byte("abc"), []byte("v")))
+
+			pk, _, err := refs.PrimaryKeyOf([]byte("k"))
+			require.NoError(t, err)
+			pk[0] = 'x'
+
+			again, _, err := refs.PrimaryKeyOf([]byte("k"))
+			require.NoError(t, err)
+			require.Equal(t, []byte("abc"), again)
+			return nil
+		})
+		require.NoError(t, err)
+	})
+}

@@ -1,6 +1,7 @@
 package relation_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"github.com/ehsanranjbar/kvutil/internal/testkv"
 	"github.com/ehsanranjbar/kvutil/iterutil"
 	"github.com/ehsanranjbar/kvutil/kv"
+	"github.com/ehsanranjbar/kvutil/kv/prefix"
 	"github.com/ehsanranjbar/kvutil/migrate"
 	"github.com/ehsanranjbar/kvutil/relation"
 	"github.com/ehsanranjbar/kvutil/store/record"
@@ -707,6 +709,113 @@ func TestAssociationRandom(t *testing.T) {
 
 		err = db.View(func(tx kv.Tx) error {
 			compare(tx)
+			return nil
+		})
+		require.NoError(t, err)
+	})
+}
+
+// countingTx counts the calls of a transaction that cost more than a point read.
+type countingTx struct {
+	kv.Tx
+	iterators, sets, deletes int
+}
+
+func (c *countingTx) Iterator(start, end []byte) (kv.Iterator, error) {
+	c.iterators++
+	return c.Tx.Iterator(start, end)
+}
+
+func (c *countingTx) ReverseIterator(start, end []byte) (kv.Iterator, error) {
+	c.iterators++
+	return c.Tx.ReverseIterator(start, end)
+}
+
+func (c *countingTx) Set(key, value []byte) error {
+	c.sets++
+	return c.Tx.Set(key, value)
+}
+
+func (c *countingTx) Delete(key []byte) error {
+	c.deletes++
+	return c.Tx.Delete(key)
+}
+
+// cascadeCost returns the calls that deleting a parent of n children takes, and the calls that
+// setting the children took.
+func cascadeCost(t *testing.T, db kv.DB, n int) (set, del countingTx) {
+	t.Helper()
+
+	owners := record.New[int64, person]("owners")
+	pets := record.New[int64, pet]("pets")
+	ownership := relation.Associate("owned", owners, pets)
+
+	err := db.Update(func(tx kv.Tx) error {
+		ctx := &countingTx{Tx: tx}
+		ins := ownership.Instantiate(ctx)
+		require.NoError(t, ins.Set(&person{id: 1, Name: "Ann"}))
+		before := *ctx
+		for i := range n {
+			require.NoError(t, ins.Set(&person{id: 1, Name: "Ann"}, &pet{id: int64(i + 1), Name: "p"}))
+		}
+		set = countingTx{iterators: ctx.iterators - before.iterators, sets: ctx.sets - before.sets,
+			deletes: ctx.deletes - before.deletes}
+
+		before = *ctx
+		require.NoError(t, owners.Instantiate(ctx).Delete(1))
+		del = countingTx{iterators: ctx.iterators - before.iterators, sets: ctx.sets - before.sets,
+			deletes: ctx.deletes - before.deletes}
+		require.Zero(t, rawCount(t, tx, ownership.Prefix()))
+		require.Zero(t, rawCount(t, tx, pets.Prefix()))
+		return nil
+	})
+	require.NoError(t, err)
+	return set, del
+}
+
+func TestAssociationCascadeCost(t *testing.T) {
+	testkv.Each(t, func(t *testing.T, db kv.DB) {
+		_, small := cascadeCost(t, db, 50)
+		set, large := cascadeCost(t, db, 200)
+
+		// The iterators are not opened per child, in the cascade nor when setting the children.
+		require.Equal(t, small.iterators, large.iterators)
+		require.Zero(t, set.iterators)
+
+		// A child costs the delete of its record and of its two references, and nothing more.
+		require.Equal(t, 150*3, large.deletes-small.deletes)
+	})
+}
+
+func TestAssociationCascadeDropsDanglingReferences(t *testing.T) {
+	// No other test has a reference whose child record is gone.
+	testkv.Each(t, func(t *testing.T, db kv.DB) {
+		owners := record.New[int64, person]("owners")
+		pets := record.New[int64, pet]("pets")
+		ownership := relation.Associate("owned", owners, pets)
+
+		err := db.Update(func(tx kv.Tx) error {
+			ins := ownership.Instantiate(tx)
+			require.NoError(t, ins.Set(&person{id: 1, Name: "Ann"}, &pet{id: 1, Name: "a"}, &pet{id: 2, Name: "b"}))
+			require.Equal(t, 2, rawCount(t, tx, pets.DataPrefix()))
+
+			// The records of the children are removed below the association.
+			data := prefix.New(tx, pets.DataPrefix())
+			it, err := data.Iterator(nil, nil)
+			require.NoError(t, err)
+			var keys [][]byte
+			for ; it.Valid(); it.Next() {
+				keys = append(keys, bytes.Clone(it.Key()))
+			}
+			require.NoError(t, it.Close())
+			for _, k := range keys {
+				require.NoError(t, data.Delete(k))
+			}
+			require.Zero(t, rawCount(t, tx, pets.DataPrefix()))
+			require.NotZero(t, rawCount(t, tx, ownership.Prefix()))
+
+			require.NoError(t, owners.Instantiate(tx).Delete(1))
+			require.Zero(t, rawCount(t, tx, ownership.Prefix()))
 			return nil
 		})
 		require.NoError(t, err)

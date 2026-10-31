@@ -215,9 +215,17 @@ func (a *Association[PI, PT, CI, CT]) deleteChildren(tx kv.Tx, id PI, _ []byte) 
 			return fmt.Errorf("failed to delete child %v: %w", cid, err)
 		}
 
-		// A reference whose child does not exist is dropped all the same.
-		if err := pc.Delete(pk.app, raw); err != nil {
+		// Deleting the child has removed both references already, unless the child did not exist.
+		// A reference whose child does not exist is dropped all the same, but a second delete of
+		// a key counts against the limit of the transaction, so it is only made if needed.
+		left, err := pc.Has(pk.app, raw)
+		if err != nil {
 			return err
+		}
+		if left {
+			if err := pc.Delete(pk.app, raw); err != nil {
+				return err
+			}
 		}
 		if err := cp.Delete(raw, pk.enc); err != nil {
 			return err
@@ -248,21 +256,8 @@ func childrenOf(pc *ref.Instance, parent []byte) ([][]byte, error) {
 // parentOfChild returns the key of the parent of a child, as the parent store encodes it, and
 // whether the child has one.
 func parentOfChild(cp *ref.Instance, child []byte) ([]byte, bool, error) {
-	// The range has the one key that is the child alone.
-	it, err := cp.Iterator(child, append(bytes.Clone(child), 0))
-	if err != nil {
-		return nil, false, err
-	}
-	defer it.Close()
-
-	if !it.Valid() {
-		return nil, false, nil
-	}
-	pk, err := it.PrimaryKey()
-	if err != nil {
-		return nil, false, err
-	}
-	return bytes.Clone(pk), true, nil
+	// A point read, as an iterator in a write transaction copies and sorts its pending writes.
+	return cp.PrimaryKeyOf(child)
 }
 
 // childExtension is the extension of the child store that keeps the references of the association.
