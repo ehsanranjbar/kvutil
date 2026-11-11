@@ -88,6 +88,15 @@
 // all that the rows need: that is an IndexOnlyScan in the plan, which costs no fetch of records.
 // A row can still give its record (Row.Record), which is read when it is asked for.
 //
+// # Decoding
+//
+// A query checks its conditions on the fields that they read, which it decodes for every record
+// that it checks, and decodes the records that satisfy them in full. A projection and Count decode
+// the fields that the conditions, the items and the order read only. This is done by the codec of
+// the store if it can decode some fields of a record (codec.PartialDecoder, which the default
+// codecs do for a struct), and by the conditions and fields that say what they read: a function
+// that does not (cond.Func and field.Of without Reading) makes the query decode the whole record.
+//
 // # Nearest
 //
 // A query can order its records by their distance from something that an index of the store

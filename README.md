@@ -576,6 +576,59 @@ of what it is identified by: the names and codecs of its included fields and cov
 of them is a migration (`Migrate` builds the index again). The format of an entry is described in
 [index/hold.go](index/hold.go).
 
+## Partial decoding
+
+A query does not decode a record to look at one field of it. For every record it checks, it
+decodes the fields that its conditions read; the records that satisfy them are decoded in full.
+A projection or `Count` decodes the fields that the conditions, the items and the order read, and
+nothing else. `Row.Record()` reads the record from the store when it is asked for.
+
+Stores with the default codecs need nothing for this. Msgpack and JSON decode a struct into a
+narrower one that has the wanted fields, which skips the rest of the data. It does not apply to a
+struct with an embedded field, a `_msgpack` field (options like `as_array`), or a decoder of its
+own (`UnmarshalBinary`, `UnmarshalText`, `UnmarshalJSON`), nor to a custom `codec.Format`; the
+record is then decoded in full, with the same results.
+
+A type that encodes itself (`MarshalBinary` and `UnmarshalBinary`) decodes in part by also
+implementing `codec.PartialUnmarshaler`:
+
+```go
+// The receiver is zero; fields are paths like "Samples" or "Meta.Unit". Decoding more is fine.
+func (r *Reading) UnmarshalPartial(bz []byte, fields []string) error {
+    r.At = int64(binary.BigEndian.Uint64(bz)) // eight bytes: always decoded
+    if slices.Contains(fields, "Samples") {
+        r.Samples = decodeSamples(bz[8:])      // the expensive part, when it is read
+    }
+    return nil
+}
+```
+
+A function is opaque: a query cannot tell which fields it reads, so it decodes the whole record
+for it. `Reading` declares them, for `field.Of`, `field.Each`, `field.Computed` and `cond.Func`
+(`field.Path` knows its own):
+
+```go
+year := field.Of("Year", func(b *Book) int { return b.Published.Year() }).Reading("Published")
+long := cond.Func("long", func(b *Book) bool { return len(b.Title) > 40 }).Reading("Title")
+
+q := query.From(books).Where(year.Gte(1990), long) // decodes Published and Title to check them
+```
+
+A function that reads a field that it does not declare sees the zero value of it, and the query
+gives wrong results. `Reading()` with no paths says that it reads nothing.
+
+`codec.WithoutPartial(codec.ValueFor[Book](nil))`, given to
+`extstore.NewWithCodecs("books", nil, c)`, is the same codec with the partial decoding hidden:
+every query decodes every record in full. It is there to compare, or to rule partial decoding out.
+
+On an Apple M5 Pro, with 10,000 records in `memkv` and no index, a scan with a condition that 10%
+of the records satisfy takes 8.2 ms on books with a payload of 4 KB, against 11.6 ms with the
+records decoded in full, and allocates 5.2 MiB against 43 MiB. `Count` of the same takes 7.2 ms
+against 11.4 ms, and allocates 1 MiB. On records of 384-dimensional vectors a `Count` takes
+54 ms against 110 ms. When half of the records satisfy the condition, `Run` gains nothing, as
+they are decoded twice, in part and in full; a projection and `Count` still do
+([query/partial_bench_test.go](query/partial_bench_test.go)).
+
 ## Conditions as text
 
 `query/sql` reads the WHERE clause of a query, in the SQL of SQLite
