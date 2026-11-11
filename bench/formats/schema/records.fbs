@@ -1,0 +1,37 @@
+// The values of the records of the benchmarks, without the id: kvutil keeps it in the key.
+//
+// An absent string (the field is not set) is a nil pointer in the Go record, and a string that
+// is present, even an empty one, is a non-nil pointer. Time is Unix nanoseconds.
+namespace fbgen;
+
+table Order {
+  code:string;
+  customer:string;
+  name:string;
+  status:string;
+  total:long;
+  qty:int;
+  at:long;
+  note:string;      // absent = nil
+  tags:[string];
+  payload:[ubyte];
+}
+
+table Book {
+  code:string;
+  author:string;
+  year:long;
+  price:long;
+  in_print:bool;
+  tags:[string];
+  title:string;
+  subtitle:string;  // absent = nil
+  score:long;
+  payload:[ubyte];
+}
+
+table Doc {
+  lang:string;
+  year:long;
+  embedding:[float];
+}

@@ -27,3 +27,6 @@ jobs:
       - name: Test the benchmarks (no Docker needed)
         working-directory: bench
         run: go vet ./... && go build ./... && go test ./...
+      - name: Test the formats of the values (a module of its own)
+        working-directory: bench/formats
+        run: go vet ./... && go test ./...
