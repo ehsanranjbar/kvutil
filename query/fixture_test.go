@@ -11,6 +11,7 @@ import (
 	"github.com/ehsanranjbar/kvutil/codec"
 	"github.com/ehsanranjbar/kvutil/field"
 	"github.com/ehsanranjbar/kvutil/index"
+	"github.com/ehsanranjbar/kvutil/internal/testkv"
 	"github.com/ehsanranjbar/kvutil/kv"
 	"github.com/ehsanranjbar/kvutil/query/sql"
 	extstore "github.com/ehsanranjbar/kvutil/store/ext"
@@ -68,10 +69,42 @@ type fixture struct {
 	items map[int64]*Item
 }
 
+// itemCodecs are the codecs that the oracles run the store of items with: the default, which
+// decodes in part, the same without it, and a format of the other kind.
+var itemCodecs = []struct {
+	name  string
+	codec codec.ValueCodec[Item]
+}{
+	{"default", nil},
+	{"without partial decoding", codec.WithoutPartial(codec.ValueFor[Item](nil))},
+	{"json", codec.Formatted[Item](codec.JSON)},
+}
+
+// eachItemCodec runs a test with every codec of the items, on every kind of database. With the
+// race detector it runs the default codec only: the oracles are single threaded and take minutes
+// with it, and the other codecs are run by the tests without it.
+func eachItemCodec(t *testing.T, test func(t *testing.T, db kv.DB, c codec.ValueCodec[Item])) {
+	t.Helper()
+
+	for i, ic := range itemCodecs {
+		if i > 0 && raceEnabled {
+			break
+		}
+		t.Run(ic.name, func(t *testing.T) {
+			testkv.Each(t, func(t *testing.T, db kv.DB) { test(t, db, ic.codec) })
+		})
+	}
+}
+
 // defineItems defines the store of items and its indexes. The indexes are in the order in which
 // ties between them are resolved.
 func defineItems() *extstore.Store[int64, Item] {
-	items := extstore.New[int64, Item]("items")
+	return defineItemsWith(nil)
+}
+
+// defineItemsWith is defineItems for a codec of the items, and the default one if it is nil.
+func defineItemsWith(c codec.ValueCodec[Item]) *extstore.Store[int64, Item] {
+	items := extstore.NewWithCodecs[int64, Item]("items", nil, c)
 	// The indexes hold fields that are not in their keys (Including), of one value for an item,
 	// of none or one, and of several, and values that are computed from an item (Covering).
 	index.Composite(items, "by_group_rank", field.List(group, rank.Desc()),
@@ -133,7 +166,14 @@ func randomItem(rng *rand.Rand, id int64) *Item {
 func newFixture(t *testing.T, db kv.DB) *fixture {
 	t.Helper()
 
-	f := &fixture{store: defineItems(), items: map[int64]*Item{}}
+	return newFixtureWith(t, db, nil)
+}
+
+// newFixtureWith is newFixture for a codec of the items, and the default one if it is nil.
+func newFixtureWith(t *testing.T, db kv.DB, c codec.ValueCodec[Item]) *fixture {
+	t.Helper()
+
+	f := &fixture{store: defineItemsWith(c), items: map[int64]*Item{}}
 	require.NoError(t, f.store.Check(db))
 
 	rng := rand.New(rand.NewPCG(11, 12))

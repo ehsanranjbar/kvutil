@@ -11,17 +11,67 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/ehsanranjbar/kvutil/codec"
 	"github.com/ehsanranjbar/kvutil/cond"
 	"github.com/ehsanranjbar/kvutil/query/sql"
 )
 
+// viaCodec is a codec that books are passed through, and the partial decoder of it for a condition.
+type viaCodec struct {
+	name   string
+	codec  codec.ValueCodec[Book]
+	decode func([]byte, *Book) error
+}
+
+// newViaCodecs returns the codecs that books are checked through, with a partial decoder of the
+// fields that the condition reads for the ones that have one.
+func newViaCodecs(c cond.Cond[Book]) []viaCodec {
+	var out []viaCodec
+	for _, v := range []viaCodec{
+		{name: "default", codec: codec.ValueFor[Book](nil)},
+		{name: "without partial decoding", codec: codec.WithoutPartial(codec.ValueFor[Book](nil))},
+		{name: "json", codec: codec.Formatted[Book](codec.JSON)},
+	} {
+		if reads, ok := cond.Reads(c); ok {
+			v.decode, _ = codec.PartialOf(v.codec, reads)
+		}
+		out = append(out, v)
+	}
+	return out
+}
+
+// check checks that the condition is satisfied by the book after the codec as it was before, and
+// that it is by the book decoded in part.
+func (v viaCodec) check(t *testing.T, c cond.Cond[Book], text string, b *Book, want bool) {
+	t.Helper()
+
+	bz, err := v.codec.Encode(*b)
+	require.NoError(t, err, "%s: %s on %+v", v.name, text, b)
+	full, err := v.codec.Decode(bz)
+	require.NoError(t, err, "%s: %s on %+v", v.name, text, b)
+	got, err := c.Match(&full)
+	require.NoError(t, err, "%s: %s on %+v", v.name, text, b)
+	require.Equal(t, want, got, "%s: %s (%s) on %+v after the codec", v.name, text, c, b)
+
+	if v.decode == nil {
+		return
+	}
+	var part Book
+	require.NoError(t, v.decode(bz, &part), "%s: %s on %+v", v.name, text, b)
+	got, err = c.Match(&part)
+	require.NoError(t, err, "%s: %s on %+v", v.name, text, b)
+	require.Equal(t, want, got, "%s: %s (%s) on %+v decoded in part: %+v", v.name, text, c, b, part)
+}
+
 // TestAgreesWithGo checks every kind of condition against the same condition written in Go,
-// on random books.
+// on random books, as they are and after they go through a codec, in full and in part.
 func TestAgreesWithGo(t *testing.T) {
 	y1970 := time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC)
 	lower := strings.ToLower
 
 	matched := map[string]int{}
+	// partial counts the conditions that a codec decodes the fields of in part, for.
+	partial := map[string]int{}
 	for text, want := range map[string]func(b *Book) bool{
 		// Comparisons of a field with values.
 		`Author = 'Herbert'`:              func(b *Book) bool { return b.Author == "Herbert" },
@@ -227,6 +277,15 @@ func TestAgreesWithGo(t *testing.T) {
 		c, err := sql.ParseWhere[Book](text)
 		require.NoError(t, err, text)
 
+		// The condition is also checked on books that went through a codec, in full and with the
+		// fields that the condition reads only, which is how a query checks the records it reads.
+		viaCodecs := newViaCodecs(c)
+		for _, v := range viaCodecs {
+			if v.decode != nil {
+				partial[v.name]++
+			}
+		}
+
 		rng := rand.New(rand.NewPCG(3, 4))
 		for range 400 {
 			b := randomBook(rng)
@@ -236,8 +295,16 @@ func TestAgreesWithGo(t *testing.T) {
 			if got {
 				matched[text]++
 			}
+			for _, v := range viaCodecs {
+				v.check(t, c, text, b, got)
+			}
 		}
 	}
+
+	// Most conditions read fields that are known, so that their records are decoded in part.
+	require.Greater(t, partial["default"], 100, "%v", partial)
+	require.Greater(t, partial["json"], 100, "%v", partial)
+	require.Zero(t, partial["without partial decoding"], "%v", partial)
 
 	// Some conditions have nothing to match or everything, which is what they are about; the
 	// others must have both kinds of books to be checked by.

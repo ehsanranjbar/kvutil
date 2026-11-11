@@ -8,9 +8,11 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/ehsanranjbar/kvutil/codec"
 	"github.com/ehsanranjbar/kvutil/cond"
 	"github.com/ehsanranjbar/kvutil/field"
 	"github.com/ehsanranjbar/kvutil/index"
+	"github.com/ehsanranjbar/kvutil/store/ext"
 )
 
 // The numbers that the planner estimates the cost of a plan with. There are no statistics of
@@ -74,6 +76,10 @@ type plan[K, V any] struct {
 	reversed bool
 	// check are the conditions that the records that are found are checked against.
 	check []cond.Cond[V]
+	// checkDecode decodes the fields that check reads, and no other, of an encoded record. It is
+	// nil if they are not known or the codec of the store cannot decode in part, and the records
+	// are then decoded in full to be checked. It is safe for concurrent use, like the plan.
+	checkDecode func(bz []byte, v *V) error
 	// combo is set instead of index and ranges if the records are those of several indexes
 	// together: their intersection or their union.
 	combo *combo[K, V]
@@ -197,7 +203,27 @@ func (q *Query[K, V]) plan(sel *selection[V]) (*plan[K, V], error) {
 		return nil, err
 	}
 	e.fill(pl, best)
+	pl.prepareDecode(q.store)
 	return pl, nil
+}
+
+// prepareDecode sets the partial decoder of the check, if the store tells its codec, the fields
+// that the check reads are known, and the codec can decode them without the rest.
+func (pl *plan[K, V]) prepareDecode(store Store[K, V]) {
+	if len(pl.check) == 0 {
+		return
+	}
+	coded, ok := store.(ext.ValueCoded[V])
+	if !ok {
+		return
+	}
+	reads, ok := cond.Reads(pl.check...)
+	if !ok {
+		return
+	}
+	if decode, ok := codec.PartialOf(coded.ValueCodec(), reads); ok {
+		pl.checkDecode = decode
+	}
 }
 
 // orderFields returns the fields that the records are ordered by, each path once, or says why

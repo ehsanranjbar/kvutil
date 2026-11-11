@@ -413,7 +413,7 @@ func (pl *plan[K, V]) openAccess(tx kv.Tx, store Store[K, V]) (node[K, *V], erro
 	}
 
 	if len(pl.check) > 0 {
-		n = newFilter(n, pl.check)
+		n = newFilter(n, pl.check, pl.checkDecode)
 	}
 	return n, nil
 }

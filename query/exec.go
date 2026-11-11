@@ -9,6 +9,7 @@ import (
 	"github.com/ehsanranjbar/kvutil/cond"
 	"github.com/ehsanranjbar/kvutil/field"
 	"github.com/ehsanranjbar/kvutil/iterutil"
+	"github.com/ehsanranjbar/kvutil/store/ext"
 )
 
 // node is an operator of a plan: an iterator that can say why it stopped. What it iterates over
@@ -67,25 +68,65 @@ func (none[K, T]) Value() (t T, _ error) {
 func (none[K, T]) Close() error { return nil }
 func (none[K, T]) Err() error   { return nil }
 
+// iterator returns the iterator that the source wraps. It is how a node above finds out what
+// the iterator can do besides iterating, like giving the records without decoding them.
+func (s *source[K, T]) iterator() any { return s.Iterator }
+
 // filter is the node of the records of another one that satisfy conditions.
+//
+// If it is given a partial decoder and the iterator under its base gives the records without
+// decoding them, it decodes the fields that the conditions read only, into a value that it reuses,
+// and decodes in full the records that satisfy the conditions only, from the bytes it read.
 type filter[K, V any] struct {
-	base   node[K, *V]
-	conds  []cond.Cond[V]
+	base  node[K, *V]
+	conds []cond.Cond[V]
+
+	// decode is the partial decoder of the conditions, and is nil to decode the records in full.
+	decode func([]byte, *V) error
+	// stored is the iterator of the records without decoding them, if the base has one and there
+	// is a decoder. The scratch is what the fields are decoded into, which is never handed out.
+	stored  ext.StoredIterator[K, V]
+	scratch *V
+
+	// record is the current record, once it is decoded in full. st is the current one before that,
+	// valid as the base has not moved.
 	record *V
+	st     ext.Stored[K, V]
+	hasSt  bool
 	err    error
 }
 
-func newFilter[K, V any](base node[K, *V], conds []cond.Cond[V]) *filter[K, V] {
+// newFilter returns the node of the records of the base that satisfy the conditions. decode, if
+// it is not nil, is the partial decoder of the fields that the conditions read.
+func newFilter[K, V any](base node[K, *V], conds []cond.Cond[V], decode func([]byte, *V) error) *filter[K, V] {
 	f := &filter[K, V]{base: base, conds: conds}
+	if decode != nil {
+		if s, ok := base.(interface{ iterator() any }); ok {
+			if it, ok := s.iterator().(ext.StoredIterator[K, V]); ok {
+				f.decode, f.stored, f.scratch = decode, it, new(V)
+			}
+		}
+	}
 	f.settle()
 	return f
 }
 
 // settle moves to the first record, from where the base is, that satisfies the conditions.
 func (f *filter[K, V]) settle() {
-	f.record = nil
+	f.record, f.st, f.hasSt = nil, ext.Stored[K, V]{}, false
 	for f.err == nil && f.base.Valid() {
-		record, err := f.base.Value()
+		var (
+			record *V
+			st     ext.Stored[K, V]
+			err    error
+		)
+		if f.stored != nil {
+			if st, err = f.stored.Stored(); err == nil {
+				record, err = st.Partial(f.decode, f.scratch)
+			}
+		} else {
+			record, err = f.base.Value()
+		}
 		if err != nil {
 			f.err = err
 			return
@@ -103,7 +144,12 @@ func (f *filter[K, V]) settle() {
 			}
 		}
 		if ok {
-			f.record = record
+			if f.stored != nil && record == f.scratch {
+				// Only the fields of the conditions are decoded: the rest waits for Value.
+				f.st, f.hasSt = st, true
+			} else {
+				f.record = record
+			}
 			return
 		}
 		f.base.Next()
@@ -129,6 +175,14 @@ func (f *filter[K, V]) Key() (K, error) { return f.base.Key() }
 func (f *filter[K, V]) Value() (*V, error) {
 	if f.record != nil {
 		return f.record, nil
+	}
+	if f.hasSt {
+		record, err := f.st.Record()
+		if err != nil {
+			return nil, err
+		}
+		f.record = record
+		return record, nil
 	}
 	return f.base.Value()
 }

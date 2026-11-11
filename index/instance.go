@@ -6,6 +6,7 @@ import (
 	"slices"
 
 	"github.com/RoaringBitmap/roaring/v2/roaring64"
+	"github.com/ehsanranjbar/kvutil/codec"
 	"github.com/ehsanranjbar/kvutil/cond"
 	"github.com/ehsanranjbar/kvutil/kv"
 	extstore "github.com/ehsanranjbar/kvutil/store/ext"
@@ -39,6 +40,25 @@ func (i *Instance[K, V]) ScanAll(ranges []Bounds, reverse bool) (*Iterator[K, V]
 	return i.scan(ranges, reverse, nil)
 }
 
+// partialDecoder returns the decoder of the fields that the conditions read, and no other, of an
+// encoded record. It is nil if there are no conditions, the store does not tell its codec, what the
+// conditions read is not known, or the codec cannot decode in part.
+func (i *Instance[K, V]) partialDecoder(conds []cond.Cond[V]) func([]byte, *V) error {
+	if len(conds) == 0 {
+		return nil
+	}
+	coded, ok := i.x.store.(extstore.ValueCoded[V])
+	if !ok {
+		return nil
+	}
+	reads, ok := cond.Reads(conds...)
+	if !ok {
+		return nil
+	}
+	decode, _ := codec.PartialOf(coded.ValueCodec(), reads)
+	return decode
+}
+
 func (i *Instance[K, V]) scan(ranges []Bounds, reverse bool, filter []cond.Cond[V]) (*Iterator[K, V], error) {
 	it := &Iterator[K, V]{
 		ins:     i,
@@ -49,6 +69,9 @@ func (i *Instance[K, V]) scan(ranges []Bounds, reverse bool, filter []cond.Cond[
 	// A record can only come up twice if it has several entries, or if there are several ranges.
 	if i.x.desc.MultiEntry || len(ranges) > 1 {
 		it.seen = make(map[string]struct{})
+	}
+	if decode := i.partialDecoder(filter); decode != nil {
+		it.decode, it.scratch = decode, new(V)
 	}
 
 	it.settle()
@@ -136,9 +159,13 @@ type Iterator[K, V any] struct {
 	cur    *refstore.Iterator  // the iterator of the current range
 	seen   map[string]struct{} // the primary keys that were returned, if they have to be remembered
 	filter []cond.Cond[V]      // the conditions that the records are checked against
-	pos    position[K, V]      // the record of the current entry, once it is read
-	viewed entryView           // what the current entry holds, once it is split
-	err    error
+	// decode decodes the fields that the filter reads, if that is known and the codec can do so;
+	// they are decoded into the scratch, which is never handed out.
+	decode  func([]byte, *V) error
+	scratch *V
+	pos     position[K, V] // the record of the current entry, once it is read
+	viewed  entryView      // what the current entry holds, once it is split
+	err     error
 }
 
 // Bitmap reads the primary keys of the records that the iterator has left into a bitmap, and
@@ -206,7 +233,20 @@ func (it *Iterator[K, V]) matches() (bool, error) {
 		return true, nil
 	}
 
-	record, err := it.Value()
+	var (
+		record *V
+		err    error
+	)
+	if it.decode != nil {
+		// The fields that the conditions read are decoded; the record in full is decoded by Value,
+		// from the same bytes, if it is asked for.
+		var st extstore.Stored[K, V]
+		if st, err = it.Stored(); err == nil {
+			record, err = st.Partial(it.decode, it.scratch)
+		}
+	} else {
+		record, err = it.Value()
+	}
 	if err != nil {
 		return false, err
 	}

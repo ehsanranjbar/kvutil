@@ -9,6 +9,7 @@ import (
 	"math"
 	"slices"
 
+	"github.com/ehsanranjbar/kvutil/codec"
 	"github.com/ehsanranjbar/kvutil/cond"
 	"github.com/ehsanranjbar/kvutil/iterutil"
 	"github.com/ehsanranjbar/kvutil/kv"
@@ -438,6 +439,10 @@ func (s Search[K, V]) filtered(q []float32, src iterutil.Iterator[K, *V]) ([]hit
 	candidates := &hitHeap[V]{hits: all}
 	heap.Init(candidates)
 
+	// The fields that the conditions read are decoded for each candidate, and the record in full
+	// for the ones that satisfy them, if the store and its codec can do so.
+	partial := s.partialCheck()
+
 	var hits []hit[V]
 	for candidates.Len() > 0 && (!s.limited || len(hits) < s.limit) {
 		h := heap.Pop(candidates).(hit[V])
@@ -446,7 +451,18 @@ func (s Search[K, V]) filtered(q []float32, src iterutil.Iterator[K, *V]) ([]hit
 		if err != nil {
 			return nil, counts{}, fmt.Errorf("failed to decode a key of the index: %w", err)
 		}
-		record, err := s.ins.records().Get(key)
+
+		var (
+			record *V
+			stored extstore.Stored[K, V]
+		)
+		if partial != nil {
+			if stored, err = partial.getter.GetStored(key); err == nil {
+				record, err = stored.Partial(partial.decode, partial.scratch)
+			}
+		} else {
+			record, err = s.ins.records().Get(key)
+		}
 		if err != nil {
 			return nil, counts{}, fmt.Errorf("failed to get the record %v: %w", key, err)
 		}
@@ -460,12 +476,54 @@ func (s Search[K, V]) filtered(q []float32, src iterutil.Iterator[K, *V]) ([]hit
 				break
 			}
 		}
-		if match {
-			h.record = record
-			hits = append(hits, h)
+		if !match {
+			continue
 		}
+		if partial != nil && record == partial.scratch {
+			// The scratch is reused for the next candidate: the record is decoded in full.
+			if record, err = stored.Record(); err != nil {
+				return nil, counts{}, fmt.Errorf("failed to get the record %v: %w", key, err)
+			}
+		}
+		h.record = record
+		hits = append(hits, h)
 	}
 	return hits, n, nil
+}
+
+// partialReader is how the records of a filtered search are read to check the conditions of the
+// search on some of their fields only.
+type partialReader[K, V any] struct {
+	getter  extstore.StoredGetter[K, V]
+	decode  func([]byte, *V) error
+	scratch *V
+}
+
+// partialCheck prepares the partial reading of the records for the conditions of the search, and
+// returns nil if the records of the store cannot be read so: the getter of the store does not give
+// records without decoding them, the store does not tell its codec, what the conditions read is not
+// known, or the codec cannot decode in part.
+func (s Search[K, V]) partialCheck() *partialReader[K, V] {
+	if len(s.conds) == 0 {
+		return nil
+	}
+	getter, ok := s.ins.records().(extstore.StoredGetter[K, V])
+	if !ok {
+		return nil
+	}
+	coded, ok := s.ins.x.store.(extstore.ValueCoded[V])
+	if !ok {
+		return nil
+	}
+	reads, ok := cond.Reads(s.conds...)
+	if !ok {
+		return nil
+	}
+	decode, ok := codec.PartialOf(coded.ValueCodec(), reads)
+	if !ok {
+		return nil
+	}
+	return &partialReader[K, V]{getter: getter, decode: decode, scratch: new(V)}
 }
 
 // scan calls found for every candidate whose distance from the query is not too much, in no

@@ -176,6 +176,7 @@ func (q *Query[K, V]) planNearest() (*plan[K, V], error) {
 		return pl, nil
 	}
 	e.fill(pl, best)
+	pl.prepareDecode(q.store)
 	pl.prefilter, pl.ordered = true, true
 	return pl, nil
 }

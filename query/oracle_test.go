@@ -12,9 +12,9 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/ehsanranjbar/kvutil"
+	"github.com/ehsanranjbar/kvutil/codec"
 	"github.com/ehsanranjbar/kvutil/cond"
 	"github.com/ehsanranjbar/kvutil/field"
-	"github.com/ehsanranjbar/kvutil/internal/testkv"
 	"github.com/ehsanranjbar/kvutil/kv"
 	"github.com/ehsanranjbar/kvutil/query"
 )
@@ -553,8 +553,8 @@ func (f *fixture) requireImplied(t *testing.T, s spec, index, msg string) {
 // TestAgreesWithBruteForce checks the results of random queries, with the plan that the planner
 // chooses and with every plan that can be forced, against checking and sorting all the items.
 func TestAgreesWithBruteForce(t *testing.T) {
-	testkv.Each(t, func(t *testing.T, db kv.DB) {
-		f := newFixture(t, db)
+	eachItemCodec(t, func(t *testing.T, db kv.DB, c codec.ValueCodec[Item]) {
+		f := newFixtureWith(t, db, c)
 		indexes := []string{
 			"by_group_rank", "by_score_label", "by_code", "by_group_code", "by_tag_rank", "by_note",
 			"ready_by_rank", "ab_by_score", "by_total", "by_upper_tag",
