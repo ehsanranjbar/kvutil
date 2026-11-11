@@ -103,6 +103,11 @@ func (w *wctx) summaryTable() *Table {
 			conc = summaryWorkers
 		}
 		rows := c.byConc[conc]
+		if hasRecall(rows) {
+			// The best throughput of variants that find different shares of the right answers is
+			// not a comparison: the section of the workload shows them side by side.
+			continue
+		}
 		m, unit := summaryMetric(rows)
 		if m == nil {
 			continue
@@ -152,6 +157,19 @@ func (w *wctx) summaryTable() *Table {
 		return nil
 	}
 	return t
+}
+
+// recallKey is the extra of a search that says the share of the exact nearest results it found.
+const recallKey = "recall_at_10"
+
+// hasRecall reports whether a result of the rows says its recall.
+func hasRecall(rows []*row) bool {
+	for _, x := range rows {
+		if _, ok := x.r.Metrics.Extra[recallKey]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // summaryMetric is the first of summaryMetrics that applies to a result of the rows, and its name.

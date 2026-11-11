@@ -18,8 +18,10 @@ The short way, for someone who has the repository and Docker and wants numbers t
 ### What a machine needs
 
 * Docker with compose v2, and bash. Nothing else: Go is in the image of the harness, and the
-  databases are images. The first run builds the harness and pulls `postgres:18` (about 0.7 GB)
-  and, for the stored aggregations, `timescale/timescaledb` (about 1.5 GB).
+  databases are images. The first run builds the harness and pulls `pgvector/pgvector:0.8.1-pg18`
+  (PostgreSQL 18 with the extension pgvector: about 0.8 GB, an estimate, as it is the 0.7 GB of
+  `postgres:18` with the extension added) and, for the stored aggregations,
+  `timescale/timescaledb` (about 1.5 GB).
 * CPUs and memory for two containers at once, the database and the harness, each with the limits
   of `--cpus` and `--mem` (4 CPUs and 4 GB by default). The machine, or the VM of Docker Desktop,
   needs the sum of the two and room for the system: 8 CPUs and 8 GB for the defaults (a full run was
@@ -77,8 +79,8 @@ time = 841 x (warm-up + duration)  x  (2 for -d both)  +  20 s x (scale / 10,000
 
 | Run | Estimate |
 | --- | --- |
-| `./run.sh --smoke` (all workloads, with `verify`) | 25 minutes |
-| `./run.sh -s 100000` (10 s and 2 s per case, durable) | 3 hours |
+| `./run.sh --smoke` (all workloads, with `verify`) | 25 minutes (30 with `vector-search`) |
+| `./run.sh -s 100000` (10 s and 2 s per case, durable) | 3 hours (3.4 with `vector-search`) |
 | `./run.sh -s 1000000 --verify` (small values, durable) | 3.5 hours (measured, below) |
 | `./run.sh -s 1000000 -d both` | 7 hours |
 | `./run.sh -s 1000000 -d both --duration 5s --warmup 1s` | 3.5 hours |
@@ -96,18 +98,23 @@ hour. The timed results of each workload at the defaults
 170 (34), `index-maintenance` 120 (24), `concurrency` 125 (25), `selectivity-sweep` 96 (19),
 `relations` 92 (18), `agg-read` 72 (14), `record-codecs` 36 (7), `agg-write` 30 (6),
 `agg-freshness` 24 (5), `agg-hot-group` 20 (4), `storage` 8 (2); `bulk-load`, `key-order-fetch`,
-`agg-rebuild` and `lifecycle` have none (their cases are single measurements). A part of the suite
-is a run of its own: `./run.sh -s 1000000 -w kv,query`.
+`agg-rebuild` and `lifecycle` have none (their cases are single measurements). `vector-search` was
+added after the measurements above, and its figures are an estimate, not a measurement: 63 timed
+results (kvutil 33, PostgreSQL 30; 13 minutes at the defaults), and with the loading and building of
+its six databases and the recall of every case about 25 minutes at `-s 100000` and 5 at `--smoke`.
+A part of the suite is a run of its own: `./run.sh -s 1000000 -w kv,query`.
 
 **Disk.** The data of both systems is in Docker volumes, removed at the end of a run (`--keep` does
 not). At 10,000 small records the largest database of a workload was 44 MiB (PostgreSQL's
 `concurrency`, with 96 MiB of WAL, which grows to `max_wal_size` of 4 GB in a long run) and kvutil's
 largest 42 MiB (`index-maintenance` and `key-order-fetch`, which keep several copies of the data and
 the large values), so a million small records need about 5 GB for each system at the most, and at
-most one database of each is alive at a time. With the 2.4 GB of images (`postgres:18` 0.7 GB,
+most one database of each is alive at a time. With the 2.5 GB of images (`pgvector/pgvector` 0.8 GB,
 TimescaleDB 1.5 GB, the harness 0.2 GB), the cache of the build and the report, plan on **20 GB free
 for `-s 1000000`** (small values), and **60 GB for `-s 500000 -V large`**, where a record is 20
-times larger. On Docker Desktop the limit is the size of its disk image (Settings > Resources).
+times larger. `vector-search` stops at 250,000 documents whatever the scale is: its databases are
+about 1 GB each at that size (an estimate: kvutil keeps a document of about 1.9 KB and its 1.5 KB
+vector, PostgreSQL a row of 1.6 KB and an index), which `-V` does not change. On Docker Desktop the limit is the size of its disk image (Settings > Resources).
 The results of a run are 3 to 10 MB, the report about 1 MB.
 
 ### The Docker socket
@@ -148,8 +155,10 @@ to read first (below); for each workload the tables of every case (a column for 
 percentiles, errors and retries, plans, extras) with bars of throughput and p99; charts of its
 own for `selectivity-sweep` (throughput against selectivity and the plan at each step),
 `key-order-fetch` (ns per record against K), `agg-freshness` (the lag, and the cost of pending
-events), `concurrency` (throughput and retries against workers) and `storage` (bytes after each
-step, write amplification, the size before and after the steps that give space back); and the
+events), `concurrency` (throughput and retries against workers), `storage` (bytes after each
+step, write amplification, the size before and after the steps that give space back) and
+`vector-search` (every search with its recall, and queries per second against recall for the
+sweeps; a case that has a recall is not in the summary); and the
 resources of each case: the harness's own (CPU and peak memory, from `getrusage`) and the
 database's (docker stats, joined to the case by its start and end). It draws no conclusions.
 
@@ -234,7 +243,7 @@ cd bench
 ./run.sh --smoke
 
 # The same for one workload (or a group: kv, load, records, index, query, agg, relations,
-# lifecycle, concurrency, storage), which is quicker:
+# lifecycle, concurrency, storage, vector), which is quicker:
 ./run.sh --smoke -w kv-basic
 ./run.sh --smoke -w queries,selectivity-sweep,key-order-fetch   # the same as -w query
 ./run.sh --smoke -w relations,lifecycle,concurrency,storage     # a group each
@@ -266,7 +275,8 @@ docker compose run --rm --no-deps bench run -system kvutil -workload kv-basic -s
 docker compose down -v
 ```
 
-Without Docker, for development, the harness runs on the host against any PostgreSQL:
+Without Docker, for development, the harness runs on the host against any PostgreSQL (`vector-search`
+needs one with the extension pgvector 0.8 or later, and a user that can `CREATE EXTENSION`):
 
 ```sh
 go build -o /tmp/kvbench ./cmd/kvbench
@@ -316,7 +326,9 @@ exactly the same. It exits with 1 on any difference. It uses a small scale; the 
 * **Limits.** The database and the harness (which has kvutil in its process) get the same CPUs,
   memory and no swap (`BENCH_CPUS`, `BENCH_MEM`; 4 and 4g by default), and their data is on named
   volumes of Docker, not on a bind mount of the host.
-* **Images.** `postgres:18` (18.6 when this was written; `postgres:latest` was 18),
+* **Images.** `pgvector/pgvector:0.8.1-pg18` (PostgreSQL 18 with the extension pgvector 0.8.1; it
+  was `postgres:18`, 18.6 when this was written, before `vector-search`). Every other workload runs
+  on the same server: it is PostgreSQL 18 with an extension that they do not load.
   `timescale/timescaledb:2.31.0-pg18` (the same major) for the aggregations, `golang:1.27` for the build and
   `debian:trixie-slim` to run. `results/<run>/images.txt` has their digests.
 * **Records.** Generated from the seed, the id and a version only, by `internal/dataset`, so both
@@ -481,6 +493,7 @@ how `kvbench verify` checks it, is in [docs/workloads.md](docs/workloads.md).
 | [`lifecycle`](docs/workloads.md#the-lifecycle-group-lifecycle) | `lifecycle` | adding and dropping indexes, converting records, opening and restarting |
 | [`concurrency`](docs/workloads.md#the-concurrency-group-concurrency) | `concurrency` | contention at 1 to 16 workers |
 | [`storage`](docs/workloads.md#the-storage-group-storage) | `storage` | bytes on disk, write amplification, giving space back, expiry |
+| [`vector-search`](docs/workloads.md#vector-search-group-vector) | `vector` | the 10 nearest of 384-dimension embeddings, filtered and not, with recall: kvutil's vector index (exact, partitioned, quantized) against pgvector (exact, HNSW, IVFFlat) |
 
 ## Adding a workload
 
@@ -505,9 +518,10 @@ type Variant interface {
 creates what it needs (a fresh Badger database with `*kvsys.System.Open`, a schema with
 `*pgsys.System.Schema`), and removes it. Through the `RunContext` it measures:
 
-* `rc.Measure(ctx, Case{Name, Concurrency, Params, Unit, Init, Info}, op)`: a timed case. `op` takes
+* `rc.Measure(ctx, Case{Name, Concurrency, Params, Unit, Init, Info, Extra}, op)`: a timed case. `op` takes
   the `Worker` (its `Rand`, `State`, `Begin()`, `Add(n)`) and returns an error, or `harness.ErrDone`.
-  `Info` is text that goes into the result (`metrics.info`), like a plan.
+  `Info` is text that goes into the result (`metrics.info`), like a plan, and `Extra` numbers
+  (`metrics.extra`) that the case found before it was timed, like a recall.
 * `rc.Phase(ctx, Case{...}, fn)`: a load or a build, with its time, records per second, resources.
 * `rc.Report(ctx, Case{...}, start, end, metrics.Metrics{Extra: ...})`: anything else.
 * `rc.SizeFn` says how to measure the size of the database after each of them.
@@ -569,7 +583,9 @@ variants against one another, the indexes and the queries against the records co
 statements of PostgreSQL that the cases make and their parameters, a run of every case with the plans
 that kvutil is expected to choose), the data of the relations against the model, the
 answers of the lifecycle against the records computed in Go, the consistency checks of the
-concurrency scenarios, the counts of the storage steps, the Zipf keys, the parsers of the cgroup and
+concurrency scenarios, the counts of the storage steps, the vectors (the generator, the exact
+nearest against a naive computation, the recall of every kvutil variant, the statements of pgvector),
+the Zipf keys, the parsers of the cgroup and
 of the Docker API (with a fake daemon on a unix socket) and the SQL of every case. For the report
 (`internal/report`, with two small result directories in `testdata`): the parsing, the join of the
 samples of docker stats to the cases, the ratios, the figures that are not available (n/a and

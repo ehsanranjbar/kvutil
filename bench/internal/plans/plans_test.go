@@ -25,6 +25,17 @@ func TestKVPlan(t *testing.T) {
 	if p := KV("StoreScan, then check [Title LIKE 'a%']"); p.Nodes != "StoreScan" {
 		t.Errorf("scan: %q", p.Nodes)
 	}
+
+	// A search by the distance of a vector, with the access path it ranks and without one.
+	for _, c := range []struct{ text, want string }{
+		{"Limit 10\n└─ Nearest by_embedding (partitioned, quantized, probes 4)\n   └─ IndexLookup by_lang: 1 range", "Limit > Nearest[by_embedding] > IndexLookup[by_lang]"},
+		{"Limit 10\n└─ Nearest by_embedding (exact), then check [Year >= 2000]", "Limit > Nearest[by_embedding]"},
+		{"Nearest by_embedding", "Nearest[by_embedding]"},
+	} {
+		if p := KV(c.text); p.Nodes != c.want {
+			t.Errorf("nearest %q: %q, want %q", c.text, p.Nodes, c.want)
+		}
+	}
 }
 
 func TestPGPlan(t *testing.T) {

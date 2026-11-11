@@ -125,6 +125,40 @@ func TestCaseInfoIsInTheResult(t *testing.T) {
 	}
 }
 
+func TestCaseExtraIsInTheResult(t *testing.T) {
+	p := Params{Scale: 100, Values: "small", Durability: Durable, Concurrency: 1, Duration: 20 * time.Millisecond, Warmup: 5 * time.Millisecond, Seed: 1}
+	rc, results := newContext(t, p)
+
+	extra := map[string]float64{"recall_at_10": 0.97}
+	if err := rc.Measure(context.Background(), Case{Name: "q", Extra: extra}, func(context.Context, *Worker) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	// A case that reports a number of its own keeps it, and gets the case's besides.
+	err := rc.Report(context.Background(), Case{Name: "r", Extra: extra}, time.Now(), time.Now(), metrics.Metrics{Extra: map[string]float64{"x": 2}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rc.Report(context.Background(), Case{Name: "s"}, time.Now(), time.Now(), metrics.Metrics{}); err != nil {
+		t.Fatal(err)
+	}
+	rs := results()
+	if len(rs) != 3 {
+		t.Fatalf("%d results", len(rs))
+	}
+	if rs[0].Metrics.Extra["recall_at_10"] != 0.97 || len(rs[0].Metrics.Extra) != 1 {
+		t.Errorf("extra %v", rs[0].Metrics.Extra)
+	}
+	if rs[1].Metrics.Extra["recall_at_10"] != 0.97 || rs[1].Metrics.Extra["x"] != 2 {
+		t.Errorf("extra %v", rs[1].Metrics.Extra)
+	}
+	if rs[2].Metrics.Extra != nil {
+		t.Errorf("extra %v", rs[2].Metrics.Extra)
+	}
+	if len(extra) != 1 {
+		t.Errorf("the case's extra was changed: %v", extra)
+	}
+}
+
 func TestMeasureBeginExcludesPreparation(t *testing.T) {
 	p := Params{Concurrency: 1, Duration: 200 * time.Millisecond, Seed: 1}
 	rc, results := newContext(t, p)

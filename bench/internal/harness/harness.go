@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"sort"
 	"strings"
 	"sync"
@@ -149,6 +150,9 @@ type Case struct {
 	Init func(w *Worker)
 	// Info is text that goes into the result as it is, like the plan that a query ran with.
 	Info map[string]string
+	// Extra is numbers that go into the result as they are (metrics.extra), like the recall of a
+	// search, which was found before the case was timed.
+	Extra map[string]float64
 }
 
 // RunContext is what a variant runs with.
@@ -182,6 +186,14 @@ func (rc *RunContext) retries() int64 {
 func (rc *RunContext) emit(ctx context.Context, c Case, conc int, start, end time.Time, m metrics.Metrics) error {
 	if len(c.Info) > 0 {
 		m.Info = c.Info
+	}
+	if len(c.Extra) > 0 {
+		// The extras that the case measured itself (Report) are kept, and the case's are added.
+		m.Extra = maps.Clone(m.Extra)
+		if m.Extra == nil {
+			m.Extra = map[string]float64{}
+		}
+		maps.Copy(m.Extra, c.Extra)
 	}
 	if rc.SizeFn != nil {
 		if sz, err := rc.SizeFn(ctx); err == nil {

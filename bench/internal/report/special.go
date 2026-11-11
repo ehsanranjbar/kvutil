@@ -17,6 +17,7 @@ var specials = map[string]func(*wctx) []Block{
 	"agg-read":          pendingBlocks,
 	"concurrency":       concurrencyBlocks,
 	"storage":           storageBlocks,
+	"vector-search":     vectorBlocks,
 }
 
 // pnum and pstr read a parameter of the case of a result.
@@ -202,6 +203,55 @@ func sweepBlocks(w *wctx) []Block {
 		t.Rows = append(t.Rows, r)
 	}
 	return append(out, &Heading{4, "Plan per step"}, t)
+}
+
+// --- vector-search
+
+// vectorBlocks shows what a search by the nearest vector gives against what it finds: every query
+// case with its recall, and, for the settings of the sweeps, the throughput against the recall.
+// The summary leaves these cases out, as the best throughput of searches that find different shares
+// of the right answers is not a comparison.
+func vectorBlocks(w *wctx) []Block {
+	var rows, sweep []*row
+	for _, c := range w.cases() {
+		for _, conc := range c.concs {
+			for _, x := range c.byConc[conc] {
+				if _, ok := x.r.Metrics.Extra[recallKey]; !ok || x.r.Metrics.Latency == nil {
+					continue
+				}
+				rows = append(rows, x)
+				if x.pstr("knob") != "" {
+					sweep = append(sweep, x)
+				}
+			}
+		}
+	}
+	if len(rows) == 0 {
+		return nil
+	}
+
+	t := &Table{
+		Name:    w.chartName("recall"),
+		Caption: "Every case that searches, with the share of the exact 10 nearest documents that it found (recall@10), over the 256 queries of the pool, before it was timed",
+		Header:  []string{"case", "workers", "series", "recall@10", "queries/s", "p50", "p99"},
+	}
+	for _, x := range rows {
+		l := x.r.Metrics.Latency
+		t.Rows = append(t.Rows, cellRow(x.r.Case, x.conc, x.series,
+			N(x.extra(recallKey), fmtRecall), N(ops(x), fmtNum), N(l.P50Us, fmtUs), N(l.P99Us, fmtUs)))
+	}
+	out := []Block{&Heading{4, "Recall and throughput"}, t}
+
+	if len(sweep) > 0 {
+		recall := func(x *row) (float64, bool) { return x.extra(recallKey), true }
+		label := func(x *row) string { return x.series + ", " + x.pstr("knob") }
+		ch := &Charts{}
+		ch.Items = append(ch.Items, LineChart(w.chartName("recall-ops"),
+			buildLines(sweep, label, recall, ops),
+			LineOpts{Title: "queries/s against recall@10, 1 worker (a point for each setting of the knob)", XLabel: "recall@10", YLabel: "queries/s", LogY: true}))
+		out = append(out, ch)
+	}
+	return out
 }
 
 // --- key-order-fetch

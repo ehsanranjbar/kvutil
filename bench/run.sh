@@ -27,7 +27,7 @@ usage() {
 usage: ./run.sh [options]
 
   -w, --workload LIST     workloads, groups (kv, load, records, index, query, agg, relations,
-                          lifecycle, concurrency, storage) or all                 (all)
+                          lifecycle, concurrency, storage, vector) or all         (all)
   -s, --scale N           records (events, for the aggregations)                 (100000)
   -V, --values SIZE       small (~200 B) or large (~4 KB)                        (small)
   -d, --durability MODE   durable, relaxed or both                               (durable)
@@ -287,7 +287,7 @@ for d in $DURABILITIES; do
   stop_stats
 done
 
-for image in postgres:18 timescale/timescaledb:2.31.0-pg18; do
+for image in pgvector/pgvector:0.8.1-pg18 timescale/timescaledb:2.31.0-pg18; do
   docker image inspect "$image" --format "$image {{index .RepoDigests 0}}" 2>/dev/null || true
 done > "$OUT/images.txt"
 

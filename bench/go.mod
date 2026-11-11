@@ -7,6 +7,8 @@ require (
 	github.com/dgraph-io/badger/v4 v4.9.6
 	github.com/ehsanranjbar/kvutil v0.0.0
 	github.com/jackc/pgx/v5 v5.11.0
+	github.com/pgvector/pgvector-go v0.4.1
+	github.com/pgvector/pgvector-go/pgx v0.4.1
 	github.com/vmihailenco/msgpack/v5 v5.4.1
 )
 
@@ -26,13 +28,14 @@ require (
 	github.com/mschoch/smat v0.2.0 // indirect
 	github.com/rqlite/sql v0.0.0-20261016220845-5c0832fea6e1 // indirect
 	github.com/vmihailenco/tagparser/v2 v2.0.0 // indirect
+	github.com/x448/float16 v0.8.4 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/otel v1.41.0 // indirect
 	go.opentelemetry.io/otel/metric v1.41.0 // indirect
 	go.opentelemetry.io/otel/trace v1.41.0 // indirect
-	golang.org/x/sync v0.17.0 // indirect
+	golang.org/x/sync v0.19.0 // indirect
 	golang.org/x/sys v0.41.0 // indirect
-	golang.org/x/text v0.29.0 // indirect
+	golang.org/x/text v0.34.0 // indirect
 	google.golang.org/protobuf v1.36.7 // indirect
 )
 

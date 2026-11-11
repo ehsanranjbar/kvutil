@@ -9,6 +9,7 @@
 //	Bitmap Heap Scan > BitmapOr > (Bitmap Index Scan[books_author] + Bitmap Index Scan[books_year])
 //	Limit > TopN > IndexLookup[by_author]
 //	Union > (IndexLookup[by_author] + IndexLookup[by_year])
+//	Limit > Nearest[by_embedding] > IndexLookup[by_lang]
 //
 // a node, then its child (">"), or its children in parentheses joined with "+".
 package plans
@@ -109,6 +110,10 @@ func kvName(line string) string {
 		// "IndexLookup by_year (reversed, in order of Year desc): 1 range"
 		name, _, _ = strings.Cut(name, " ")
 		return word + "[" + name + "]"
+	case "Nearest":
+		// "Nearest by_embedding (partitioned, quantized), then check [Year >= 2005]"
+		name, _, _ := strings.Cut(rest, " ")
+		return word + "[" + strings.TrimSpace(name) + "]"
 	}
 	return strings.TrimSuffix(word, ",")
 }

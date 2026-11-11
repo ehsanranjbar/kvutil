@@ -39,6 +39,7 @@ import (
 	_ "github.com/ehsanranjbar/kvutil/bench/internal/workloads/relations"
 	_ "github.com/ehsanranjbar/kvutil/bench/internal/workloads/storage"
 	_ "github.com/ehsanranjbar/kvutil/bench/internal/workloads/sweep"
+	_ "github.com/ehsanranjbar/kvutil/bench/internal/workloads/vectorsearch"
 )
 
 func main() {

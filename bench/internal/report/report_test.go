@@ -234,6 +234,51 @@ func TestNewWorkloadIsGeneric(t *testing.T) {
 	}
 }
 
+// A search that says its recall has it as a row of its tables and in a table of its own, with a
+// chart of the settings of a sweep, and is not compared by the summary, which is of throughput.
+func TestRecallOfASearch(t *testing.T) {
+	mk := func(system, variant, cs string, conc int, ops, recall float64, params map[string]any) *metrics.Result {
+		r := &metrics.Result{
+			Start: time.Unix(1000, 0), End: time.Unix(1010, 0), System: system, Workload: "vector-search", Variant: variant, Case: cs,
+			Params: metrics.Params{Scale: 100000, Values: "small", Durability: "durable", Concurrency: conc, DurationSec: 10, Case: params},
+			Metrics: metrics.Metrics{Ops: int64(ops) * 10, OpsPerSec: ops, ElapsedSec: 10,
+				Latency: &metrics.Latency{P50Us: 1000, P99Us: 2000}, Extra: map[string]float64{"recall_at_10": recall}},
+		}
+		return r
+	}
+	load := func(system, variant string, rps float64) *metrics.Result {
+		return &metrics.Result{
+			System: system, Workload: "vector-search", Variant: variant, Case: "load",
+			Params:  metrics.Params{Scale: 100000, Values: "small", Durability: "durable", Concurrency: 1},
+			Metrics: metrics.Metrics{Records: 1000, RecordsPerSec: rps, ElapsedSec: 1000 / rps},
+		}
+	}
+	run := &Run{Name: "v", Results: []*metrics.Result{
+		load("kvutil", "partitioned", 5000), load("postgres", "hnsw", 2500),
+		mk("kvutil", "partitioned", "knn", 4, 800, 0.9731, nil), mk("postgres", "hnsw", "knn", 4, 600, 0.95, nil),
+		mk("kvutil", "partitioned", "knn-sweep-probes-x1", 1, 300, 0.97, map[string]any{"knob": "probes", "value": 20.0}),
+		mk("kvutil", "partitioned", "knn-sweep-probes-x2", 1, 200, 0.99, map[string]any{"knob": "probes", "value": 40.0}),
+		mk("postgres", "hnsw", "knn-sweep-ef-search-40", 1, 250, 0.95, map[string]any{"knob": "ef_search", "value": 40.0}),
+		mk("postgres", "hnsw", "knn-sweep-ef-search-100", 1, 150, 0.985, map[string]any{"knob": "ef_search", "value": 100.0}),
+	}}
+	doc := Build([]*Run{run})
+	md := doc.Markdown()
+	mustContain(t, md,
+		// A row of the table of the case, with four digits.
+		"| recall_at_10 | 0.9731 | 0.9500 |",
+		"#### Recall and throughput",
+		"| knn | 4 | kvutil/partitioned | 0.9731 | 800 | 1.00 ms | 2.00 ms |",
+		"| knn-sweep-ef-search-100 | 1 | postgres/hnsw | 0.9850 | 150 | 1.00 ms | 2.00 ms |",
+	)
+	i, j := strings.Index(md, "## Summary"), strings.Index(md, "## Results")
+	sum := md[i:j]
+	mustContain(t, sum, "| load | 1 | records/s | 5,000 | partitioned | 2,500 | hnsw | 2.00x |")
+	if strings.Contains(sum, "| knn") {
+		t.Errorf("a search with a recall is in the summary:\n%s", sum)
+	}
+	mustContain(t, doc.HTML(), "queries/s against recall@10", "kvutil/partitioned, probes", "postgres/hnsw, ef_search")
+}
+
 func TestCharts(t *testing.T) {
 	bars := BarChart("b", "Throughput", "ops/s", []Bar{
 		{"kvutil/typed", "kvutil", 100, "100"}, {"postgres/bytea", "postgres", 50, "50"}, {"timescale/x", "timescale", math.NaN(), ""},

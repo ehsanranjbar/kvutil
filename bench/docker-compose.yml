@@ -66,8 +66,10 @@ x-postgres-healthcheck: &postgres-healthcheck
   retries: 60
 
 services:
+  # PostgreSQL 18 with the extension pgvector, which only the vector workload loads: the other
+  # workloads run on it as on postgres:18.
   postgres:
-    image: postgres:18
+    image: pgvector/pgvector:0.8.1-pg18
     container_name: kvbench-postgres
     command: *postgres-command
     <<: *limits

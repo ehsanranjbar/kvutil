@@ -168,6 +168,17 @@ func formatFor(name string) func(float64) string {
 		return fmtNs
 	case strings.HasSuffix(n, "_sec") || strings.Contains(n, "_sec_"):
 		return fmtSec
+	case strings.HasPrefix(n, "recall"):
+		return fmtRecall
 	}
 	return fmtNum
+}
+
+// fmtRecall is the share of the right answers that a search found, from 0 to 1, with the four
+// digits that tell 0.9990 from 0.9999.
+func fmtRecall(v float64) string {
+	if math.IsNaN(v) {
+		return na
+	}
+	return fmt.Sprintf("%.4f", v)
 }
