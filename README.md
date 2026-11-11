@@ -23,8 +23,9 @@ It needs Go 1.27.
 query/sql         the WHERE clause of a query  ->  cond, and a query on a store
 query             queries: conditions, order, offset and limit, planned with the indexes
 field, cond       fields of records, and conditions on them
-index  agg  relation
-                  secondary indexes, stored aggregations, relations between stores
+index  agg  relation  vector
+                  secondary indexes, stored aggregations, relations between stores, and the
+                  records whose vectors are nearest to a given one
 store/record      records that know their ids
 store/ext         a typed store that extensions are told of every write of
 store/typed       keys and values of Go types
@@ -180,6 +181,65 @@ err = pets.Instantiate(tx).Set(&Pet{Name: "kit"}, ownership.Under(ownerID))
 children, err := ownership.Instantiate(tx).Children(ownerID)
 ```
 
+## Vector search
+
+A vector index finds the records of a store by how near a vector of theirs, like an embedding of
+their text, is to a given one. It is kept up to date in the transactions that write the records,
+as the other indexes are, and `Migrate` builds it for the records that are there already.
+
+```go
+type Doc struct {
+    Title     string
+    Lang      string
+    Embedding []float32
+}
+
+docs := ext.New[int64, Doc]("docs")
+lang := field.Path[Doc, string]("Lang")
+byLang := index.On(docs, "by_lang", lang)
+
+// The dimensions and the metric of the vectors, and where the vector of a record is.
+// A record with no vector is not in the index.
+byEmbedding := vector.On(docs, "by_embedding", 384, vector.Cosine,
+    func(d *Doc) []float32 { return d.Embedding },
+    vector.Versioned("all-MiniLM-L6-v2")) // built again when the model is another one
+```
+
+```go
+ins := byEmbedding.Instantiate(tx)
+
+it, err := ins.Nearest(query, 10) // the 10 nearest records, nearest first
+for ; it.Valid(); it.Next() {
+    id, _ := it.Key()
+    doc, _ := it.Value() // the record, read when it is asked for
+    fmt.Println(id, doc.Title, it.Distance())
+}
+
+// With conditions on the records, and with no result farther than a distance.
+it, err = ins.Search(query).Where(lang.Eq("en")).Within(0.4).Limit(10).Run()
+
+// Among the records that something else has found, like another index.
+english, err := byLang.Instantiate(tx).Match("en")
+it, err = ins.Search(query).Among(english).Limit(10).Run()
+
+// More like a record: its own vector is the query.
+v, err := ins.Vector(id)
+it, err = ins.Nearest(v, 10)
+```
+
+The metrics are `vector.Cosine` (1 minus the cosine of the angle; the vectors are stored with
+length 1), `vector.Euclidean` and `vector.Dot` (the negative of the inner product, so the
+greatest product is the nearest). The less the distance, the nearer, and records at the same
+distance come by key. A record whose vector has other dimensions, a component that is not a
+finite number, or no direction under `Cosine`, is not left out: writing it fails.
+
+The search is exact: it compares the query with every vector of the index, or with the vectors
+of the records of `Among`, so its results are the true nearest ones and its time grows with the
+number of vectors. `Where` reads the records nearest first and stops when it has enough, so it
+suits conditions that many records satisfy; `Among` reads the vectors of the candidates only, so
+it suits the ones that few do. The results are a source like the lookup of an index, and can be
+combined with `index.Intersect` and the like.
+
 ## Versions and migrations
 
 The data of a store has a version, which the database records. When the records must be
@@ -235,7 +295,7 @@ report, err := migrate.Run(ctx, db, users, orders, memberships)
 | An older version | Runs the migrations, a version at a time. One that is missing is an error |
 | A newer version | Fails: the program is older than its data |
 | The same version and another definition | Fails for a store: something changed without a version |
-| No index or aggregation that is defined, or another definition of it | Builds it from the records |
+| No index (a vector index too) or aggregation that is defined, or another definition of it | Builds it from the records |
 | An index or aggregation that is not defined any more | Deletes it, as nothing keeps it up to date; it is built again if it comes back |
 | An extension that keeps data and is not defined any more | Fails, unless `store.RetireExtension("audit")`, with the name that it was added with, says that its data is to be deleted |
 
@@ -500,6 +560,8 @@ An engine that does not have a capability returns `kv.ErrUnsupported` for it.
 
 - A planner that combines indexes (a query reads one, and checks the rest on the records) or
   keeps statistics; and queries as text beyond the WHERE clause.
+- Approximate vector search, which does not compare the query with every vector, and vector
+  search as the order of a query.
 - Building an index while the program writes to its store: `Migrate` is alone with the data.
 - A migration that changes the keys of the records, other than by hand in `migrate.Custom`.
 - Records that expire in stores with indexes or aggregations.
@@ -517,6 +579,7 @@ cd examples/petstore && go run .
 
 The examples of the packages, which are run as tests, show each of them in more detail:
 [index](index/example_test.go), [agg](agg/example_test.go), [relation](relation/example_test.go),
+[vector](vector/example_test.go),
 [store/record](store/record/example_test.go), [migrate](migrate/example_test.go),
 [query](query/example_test.go), [query/sql](query/sql/example_test.go).
 
