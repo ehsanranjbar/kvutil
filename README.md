@@ -262,6 +262,11 @@ is approximate is which records are found, and that depends on the vectors. Embe
 gather around subjects, are found well with few partitions read; vectors with no structure at
 all are not, and need many.
 
+The distances are summed with the vector instructions of the processor (NEON, AVX) when the
+program is built with `GOEXPERIMENT=simd`, which makes the Go 1.27 package `simd` available: they
+take a third of the time, and a search half to four fifths of it. Without the experiment, or
+where the package would only emulate the instructions, they are summed in plain Go.
+
 A record that is written goes to no partition: it is unplaced, and every search reads all the
 unplaced vectors. So a record is found as soon as it is written, writers of different records
 share no key of the index and never conflict, and writing a new record is one write, as without

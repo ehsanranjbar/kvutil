@@ -190,9 +190,13 @@ func component(b []byte) float32 {
 	return math.Float32frombits(binary.LittleEndian.Uint32(b))
 }
 
-// dotProduct returns the inner product of a vector and a stored one of the same dimensions. It
-// sums in four separate accumulators, which the processor can work on at once.
-func dotProduct(a []float32, stored []byte) float32 {
+// The kernels below are what a search spends its time in. dotProduct and squaredDistance are
+// them, or the ones of the simd package where a program is built with GOEXPERIMENT=simd and the
+// processor has the instructions (kernel_simd.go).
+
+// scalarDotProduct returns the inner product of a vector and a stored one of the same dimensions.
+// It sums in four separate accumulators, which the processor can work on at once.
+func scalarDotProduct(a []float32, stored []byte) float32 {
 	stored = stored[:4*len(a)]
 	var s0, s1, s2, s3 float32
 	i := 0
@@ -210,9 +214,9 @@ func dotProduct(a []float32, stored []byte) float32 {
 	return (s0 + s1) + (s2 + s3)
 }
 
-// squaredDistance returns the sum of the squares of the differences of a vector and a stored one
-// of the same dimensions, summed like dotProduct does.
-func squaredDistance(a []float32, stored []byte) float32 {
+// scalarSquaredDistance returns the sum of the squares of the differences of a vector and a
+// stored one of the same dimensions, summed like scalarDotProduct does.
+func scalarSquaredDistance(a []float32, stored []byte) float32 {
 	stored = stored[:4*len(a)]
 	var s0, s1, s2, s3 float32
 	i := 0
