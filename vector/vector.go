@@ -11,6 +11,10 @@
 // approximate is which records are found. The records that are written after the build are in
 // no group, and every search reads them, until a Maintainer places them: it keeps the groups
 // as records come and go, splitting the ones that grow and dissolving the ones that shrink.
+//
+// A partitioned index can also be quantized (see Quantized): it keeps a code of one bit per
+// dimension of each vector in a partition, which a search reads instead of the vector, and then reads the
+// vectors of the best candidates only to give their exact distances and put them in order.
 package vector
 
 import (

@@ -262,6 +262,25 @@ is approximate is which records are found, and that depends on the vectors. Embe
 gather around subjects, are found well with few partitions read; vectors with no structure at
 all are not, and need many.
 
+A partitioned index can also keep a **code** of every vector in a partition, of one bit per
+dimension (72 bytes for 384 dimensions instead of 1536). A search then reads the codes of the
+partitions instead of the vectors, ranks the vectors by the distances that the codes estimate,
+and reads the vectors of the best ones only, to give their exact distances:
+
+```go
+byEmbedding := vector.On(docs, "by_embedding", 384, vector.Cosine, embedding,
+    vector.Partitioned(0), vector.Quantized())
+
+it, err = ins.Nearest(query, 10)                          // re-ranks the best 100 by their vectors
+it, err = ins.Search(query).Rescore(300).Limit(10).Run()  // more of them: slower, misses less
+fmt.Println(it.Scanned(), it.Rescored())                  // codes compared, vectors read
+```
+
+A search is bound by reading the vectors, not by comparing them, so this makes it about 1.7
+times as fast at 100,000 vectors, and keeps 98 to 100% of the 10 nearest of the partitions that
+it reads. The vectors are rotated at random before they are coded, so that no dimension carries
+more than another, which the dimensions of embeddings do; that is the method of RaBitQ.
+
 The distances are summed with the vector instructions of the processor (NEON, AVX) when the
 program is built with `GOEXPERIMENT=simd`, which makes the Go 1.27 package `simd` available: they
 take a third of the time, and a search half to four fifths of it. Without the experiment, or
@@ -606,7 +625,7 @@ An engine that does not have a capability returns `kv.ErrUnsupported` for it.
 
 - A planner that combines indexes (a query reads one, and checks the rest on the records) or
   keeps statistics; and queries as text beyond the WHERE clause.
-- Vector search as the order of a query, and vectors that are stored in less than their size.
+- Vector search as the order of a query.
 - Building an index while the program writes to its store: `Migrate` is alone with the data.
 - A migration that changes the keys of the records, other than by hand in `migrate.Custom`.
 - Records that expire in stores with indexes or aggregations.

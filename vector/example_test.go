@@ -315,3 +315,102 @@ func Example_partitioned() {
 	// nearest: food 9 at 0.00
 	// maintained: {Partitions:6 Unplaced:0}
 }
+
+// Example_quantized defines a partitioned index that keeps a small code of every vector it has in
+// a partition. A search compares the query with the codes, which are a fraction of the size of the
+// vectors, and reads the vectors of the best candidates only to give their distances and put them
+// in order.
+func Example_quantized() {
+	docs := extstore.New[int64, Doc]("docs")
+
+	// Quantized needs the index to be partitioned, as the codes are of the vectors in partitions.
+	embeddings := vector.On(docs, "by_embedding", 3, vector.Cosine,
+		func(d *Doc) []float32 { return d.Embedding }, vector.Partitioned(8), vector.Quantized())
+
+	db := memkv.New()
+	if err := docs.Check(db); err != nil {
+		panic(err)
+	}
+
+	// Three subjects with eight docs each: the embeddings of a subject are about the same.
+	subjects := []struct {
+		name   string
+		centre [3]float32
+	}{
+		{"animals", [3]float32{1, 0.1, 0}},
+		{"food", [3]float32{0.1, 1, 0}},
+		{"space", [3]float32{0, 0.1, 1}},
+	}
+	err := db.Update(func(tx kv.Tx) error {
+		store := docs.Instantiate(tx)
+		for s, subject := range subjects {
+			for i := range 8 {
+				shift := float32(i) * 0.01
+				d := Doc{
+					Title: fmt.Sprintf("%s %d", subject.name, i+1),
+					Lang:  "en",
+					Embedding: []float32{
+						subject.centre[0] + shift, subject.centre[1] - shift, subject.centre[2] + shift,
+					},
+				}
+				if err := store.Set(int64(s*8+i+1), &d); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		panic(err)
+	}
+
+	// The codes are made when the vectors are placed in partitions, by the build or a maintainer.
+	if err := vector.Rebuild(context.Background(), db, embeddings); err != nil {
+		panic(err)
+	}
+	fmt.Println("quantized:", embeddings.Quantized())
+
+	err = db.View(func(tx kv.Tx) error {
+		ins := embeddings.Instantiate(tx)
+		query := []float32{0.05, 1, 0.02}
+
+		// show prints what a search found and how much it read.
+		show := func(label string, s vector.Search[int64, Doc]) error {
+			res, err := s.Run()
+			if err != nil {
+				return err
+			}
+			defer res.Close()
+			titles, err := iterutil.Of(res).Map(func(_ int64, d *Doc) (string, error) { return d.Title, nil }).Values()
+			if err != nil {
+				return err
+			}
+			fmt.Printf("%s: %v, compared with %d, re-ranked %d\n", label, titles, res.Scanned(), res.Rescored())
+			return nil
+		}
+
+		// The codes of the partitions that are read are compared with the query, and the vectors of
+		// the best 100 (or ten times the limit, if it is more) are read to re-rank them.
+		if err := show("nearest", ins.Search(query).Limit(3)); err != nil {
+			return err
+		}
+
+		// Fewer candidates are cheaper, as fewer vectors are read, and may miss one of the nearest
+		// when the codes rank it low. The distances of the ones that are found are exact either way.
+		if err := show("rescore 4", ins.Search(query).Limit(3).Rescore(4)); err != nil {
+			return err
+		}
+
+		// Reading every partition and re-ranking every candidate finds what an exact search does.
+		return show("everything", ins.Search(query).Limit(3).Probes(6).Rescore(24))
+	})
+	if err != nil {
+		panic(err)
+	}
+
+	// Output:
+	// quantized: true
+	// nearest: [food 1 food 2 food 3], compared with 12, re-ranked 12
+	// rescore 4: [food 1 food 2 food 3], compared with 12, re-ranked 4
+	// everything: [food 1 food 2 food 3], compared with 24, re-ranked 24
+}

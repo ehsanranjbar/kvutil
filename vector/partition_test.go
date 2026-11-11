@@ -29,6 +29,24 @@ const clusterDims = 16
 type clusters struct {
 	centres [][]float32
 	noise   float64
+	// scale, if it is not nil, is what each component of a noise draw is multiplied by. The
+	// centres are scaled by the same when it is set, with scaled.
+	scale []float64
+}
+
+// scaled makes component j of every centre and of every noise draw from now on j's scale times
+// what it was, which is how embeddings have a few dimensions that carry most of the variance.
+func (c *clusters) scaled(scale func(j int) float64) *clusters {
+	c.scale = make([]float64, len(c.centres[0]))
+	for j := range c.scale {
+		c.scale[j] = scale(j)
+	}
+	for _, centre := range c.centres {
+		for j := range centre {
+			centre[j] *= float32(c.scale[j])
+		}
+	}
+	return c
 }
 
 // newClusters draws k centres of dims components, whose spread is 1.
@@ -49,7 +67,11 @@ func (c *clusters) draw(rng *rand.Rand) []float32 {
 	centre := c.centres[rng.IntN(len(c.centres))]
 	v := make([]float32, len(centre))
 	for i := range v {
-		v[i] = centre[i] + float32(rng.NormFloat64()*c.noise)
+		noise := rng.NormFloat64() * c.noise
+		if c.scale != nil {
+			noise *= c.scale[i]
+		}
+		v[i] = centre[i] + float32(noise)
 	}
 	return v
 }

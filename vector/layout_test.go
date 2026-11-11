@@ -1,6 +1,7 @@
 package vector_test
 
 import (
+	"bytes"
 	"encoding/binary"
 	"math"
 	"testing"
@@ -47,6 +48,15 @@ func prepared(metric vector.Metric, v []float32) []float32 {
 	return out
 }
 
+// storedFloats reads a vector as the index stores it.
+func storedFloats(b []byte) []float32 {
+	v := make([]float32, len(b)/4)
+	for i := range v {
+		v[i] = math.Float32frombits(binary.LittleEndian.Uint32(b[4*i:]))
+	}
+	return v
+}
+
 // checkLayout checks every key under the prefix of an index against the records of the store:
 //
 //   - a record that has a vector has exactly one vector in the index, which is the prepared one,
@@ -54,6 +64,9 @@ func prepared(metric vector.Metric, v []float32) []float32 {
 //   - a record has a place iff its vector is in a partition, and the place names it;
 //   - every partition that has a vector has a centroid, of the right length;
 //   - the state is there iff there is a centroid;
+//   - if the index is quantized, every vector in a partition has exactly one code, under the same
+//     partition and key, which is what the vector and the centroid of the partition give, byte
+//     for byte, and there is no code of anything else;
 //   - there are no other keys.
 func checkLayout(t *testing.T, db kv.DB, x *vector.Index[int64, doc], docs *extstore.Store[int64, doc]) layout {
 	t.Helper()
@@ -76,7 +89,10 @@ func checkLayout(t *testing.T, db kv.DB, x *vector.Index[int64, doc], docs *exts
 		var (
 			vectors    = map[string]uint32{}
 			places     = map[string]uint32{}
-			centroids  = map[uint32]bool{}
+			centroids  = map[uint32][]float32{}
+			stored     = map[string][]float32{}
+			codes      = map[string]uint32{}
+			codeBytes  = map[string][]byte{}
 			counts     = map[uint32]uint32{}
 			hasState   bool
 			byteLength = 4 * x.Dims()
@@ -103,19 +119,25 @@ func checkLayout(t *testing.T, db kv.DB, x *vector.Index[int64, doc], docs *exts
 				vectors[rawKey] = pid
 
 				require.Len(t, value, byteLength)
-				stored := make([]float32, x.Dims())
-				for i := range stored {
-					stored[i] = math.Float32frombits(binary.LittleEndian.Uint32(value[4*i:]))
-				}
-				require.InDeltaSlice(t, expected, stored, 1e-6, "the vector of %x", rawKey)
+				vec := storedFloats(value)
+				require.InDeltaSlice(t, expected, vec, 1e-6, "the vector of %x", rawKey)
+				stored[rawKey] = vec
 				got.Sizes[pid]++
+			case 'q':
+				require.True(t, x.Quantized(), "a code in an index that is not quantized")
+				require.GreaterOrEqual(t, len(key), 5, "a code key %x", key)
+				pid, rawKey := binary.BigEndian.Uint32(key[1:5]), string(key[5:])
+				_, twice := codes[rawKey]
+				require.False(t, twice, "two codes of %x", rawKey)
+				codes[rawKey] = pid
+				codeBytes[rawKey] = bytes.Clone(value)
 			case 'k':
 				require.Len(t, value, 4, "the place of %x", key[1:])
 				places[string(key[1:])] = binary.BigEndian.Uint32(value)
 			case 'c':
 				require.Len(t, key, 5, "a centroid key %x", key)
 				require.Len(t, value, byteLength)
-				centroids[binary.BigEndian.Uint32(key[1:])] = true
+				centroids[binary.BigEndian.Uint32(key[1:])] = storedFloats(value)
 			case 'n':
 				require.Len(t, key, 5, "a count key %x", key)
 				require.Len(t, value, 4)
@@ -139,12 +161,23 @@ func checkLayout(t *testing.T, db kv.DB, x *vector.Index[int64, doc], docs *exts
 			}
 			require.True(t, placed, "%x is in the partition %d and has no place", rawKey, pid)
 			require.Equal(t, pid, place, "the place of %x", rawKey)
-			require.True(t, centroids[pid], "the partition %d has no centroid", pid)
+			require.Contains(t, centroids, pid, "the partition %d has no centroid", pid)
 			got.Placed++
+
+			if x.Quantized() {
+				codePid, coded := codes[rawKey]
+				require.True(t, coded, "%x is in the partition %d and has no code", rawKey, pid)
+				require.Equal(t, pid, codePid, "the partition of the code of %x", rawKey)
+				require.Equal(t, vector.CodeOf(x, stored[rawKey], centroids[pid]), codeBytes[rawKey],
+					"the code of %x", rawKey)
+			}
 		}
 		require.Len(t, places, got.Placed, "a place with no vector in a partition")
+		if x.Quantized() {
+			require.Len(t, codes, got.Placed, "a code of a vector that is not in a partition")
+		}
 		for pid, count := range counts {
-			require.True(t, centroids[pid], "the count of the partition %d, which has no centroid", pid)
+			require.Contains(t, centroids, pid, "the count of the partition %d, which has no centroid", pid)
 			require.GreaterOrEqual(t, int(count), got.Sizes[pid], "the count of the partition %d is an upper bound", pid)
 		}
 		require.Equal(t, len(centroids) > 0, hasState, "the state is there iff there are centroids")

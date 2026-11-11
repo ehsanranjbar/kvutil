@@ -262,11 +262,16 @@ func (x *Index[K, V]) placeBatch(db kv.DB, cursor []byte) (next []byte, done boo
 			return nil
 		}
 
-		pids := x.assignAll(parts, items)
+		pids, codes := x.assignAll(parts, items)
 		added := map[uint32]uint32{}
 		for i, it := range items {
 			if err := data.Set(vectorKey(pids[i], it.rawKey), it.stored); err != nil {
 				return err
+			}
+			if codes != nil {
+				if err := data.Set(codeKey(pids[i], it.rawKey), codes[i]); err != nil {
+					return err
+				}
 			}
 			if err := data.Set(placeKey(it.rawKey), binary.BigEndian.AppendUint32(nil, pids[i])); err != nil {
 				return err
@@ -394,6 +399,20 @@ func (x *Index[K, V]) split(db kv.DB, pid uint32) (did bool, err error) {
 		side, c0, c1 := bisectBalanced(x.metric, x.dims, vectors)
 
 		ids := [2]uint32{parts.next, parts.next + 1}
+
+		// The codes are of the vectors against the centroids of the partitions they move to.
+		var codes [][]byte
+		if x.rot != nil {
+			centroids := [2][]byte{encode(c0), encode(c1)}
+			codes = make([][]byte, len(items))
+			parallel(len(items), len(items)*x.codeCost(), func(from, to int) {
+				c := x.rot.newCoder()
+				for i := from; i < to; i++ {
+					codes[i] = c.encode(items[i].stored, centroids[side[i]])
+				}
+			})
+		}
+
 		var counts [2]uint32
 		for i, it := range items {
 			to := ids[side[i]]
@@ -403,6 +422,14 @@ func (x *Index[K, V]) split(db kv.DB, pid uint32) (did bool, err error) {
 			}
 			if err := data.Delete(vectorKey(pid, it.rawKey)); err != nil {
 				return err
+			}
+			if codes != nil {
+				if err := data.Set(codeKey(to, it.rawKey), codes[i]); err != nil {
+					return err
+				}
+				if err := data.Delete(codeKey(pid, it.rawKey)); err != nil {
+					return err
+				}
 			}
 			if err := data.Set(placeKey(it.rawKey), binary.BigEndian.AppendUint32(nil, to)); err != nil {
 				return err
@@ -438,6 +465,10 @@ func (x *Index[K, V]) split(db kv.DB, pid uint32) (did bool, err error) {
 		published.ids = append(published.ids, ids[0], ids[1])
 		published.centroids = append(published.centroids, encode(c0)...)
 		published.centroids = append(published.centroids, encode(c1)...)
+		if x.rot != nil {
+			published.rotated = x.appendRotated(published.rotated, encode(c0))
+			published.rotated = x.appendRotated(published.rotated, encode(c1))
+		}
 		did = true
 		return nil
 	})
@@ -481,6 +512,11 @@ func (x *Index[K, V]) dissolve(db kv.DB, pid uint32) (did bool, err error) {
 			}
 			if err := data.Delete(vectorKey(pid, it.rawKey)); err != nil {
 				return err
+			}
+			if x.rot != nil {
+				if err := data.Delete(codeKey(pid, it.rawKey)); err != nil {
+					return err
+				}
 			}
 			if err := data.Delete(placeKey(it.rawKey)); err != nil {
 				return err

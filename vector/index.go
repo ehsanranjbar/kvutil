@@ -21,6 +21,8 @@ import (
 // big-endian.
 //
 //	'p' <partition> <primary key>  the vector of a record, in the partition it is in.
+//	'q' <partition> <primary key>  the code of the vector of a record in a partition, if the
+//	                               index is quantized. The unplaced area has none.
 //	'k' <primary key>              the partition that a record is in, if it is in one.
 //	'c' <partition>                the centroid of a partition.
 //	'n' <partition>                the number of vectors of a partition, as an upper bound.
@@ -35,6 +37,7 @@ import (
 // the partition is counted again. A partition that has no count has an unknown one.
 const (
 	vectorsKey   = 'p'
+	codesKey     = 'q'
 	placesKey    = 'k'
 	centroidsKey = 'c'
 	countsKey    = 'n'
@@ -53,6 +56,7 @@ type options struct {
 	partitioned bool
 	size        int
 	probes      int
+	quantized   bool
 }
 
 // Option is an option of an index.
@@ -101,6 +105,21 @@ func Probes(n int) Option {
 	}
 }
 
+// Quantized makes a partitioned index keep a code of 1 bit per dimension (rounded up to a power of
+// two) of every vector in a partition, which a search reads instead of the vector, and re-ranks
+// the best candidates by their vectors (see Search.Rescore). The codes are a fraction of the size
+// of the vectors, so a search reads a fraction of the bytes, and the distances it returns are
+// still exact. What is approximate is which records are found, as it is with partitions.
+//
+// The codes are written wherever a vector is placed in a partition, and are made again when the
+// index is built, so an index that is made quantized or not is built again by migrate. It panics
+// unless the index is also Partitioned, whatever the order of the options is.
+func Quantized() Option {
+	return func(o *options) {
+		o.quantized = true
+	}
+}
+
 // defaultPartitionSize returns the size of a partition that is used when none is given: the
 // vectors of a partition are about a megabyte, within limits.
 func defaultPartitionSize(dims int) int {
@@ -120,6 +139,8 @@ type Index[K, V any] struct {
 	// the number of partitions that a search reads, if it is not 0.
 	size   int
 	probes int
+	// rot is the rotation that the codes are of, which is nil if the index is not quantized.
+	rot *rotation
 	// upkeep makes the passes of the Maintainers of a program over the index take turns, and
 	// recounted is the last partition that one counted, where the next goes on from.
 	upkeep    sync.Mutex
@@ -157,6 +178,9 @@ func On[K, V any](
 	for _, opt := range opts {
 		opt(&o)
 	}
+	if o.quantized && !o.partitioned {
+		panic(fmt.Sprintf("vector: the index %q is quantized, which needs it to be partitioned", name))
+	}
 	x := &Index[K, V]{
 		name:    name,
 		store:   store,
@@ -171,6 +195,9 @@ func On[K, V any](
 		if x.size == 0 {
 			x.size = defaultPartitionSize(dims)
 		}
+	}
+	if o.quantized {
+		x.rot = newRotation(dims)
 	}
 	store.AddExtension(name, extension[K, V]{x: x})
 	return x
@@ -194,6 +221,11 @@ func (x *Index[K, V]) Metric() Metric {
 // PartitionSize returns the size of the partitions of the index, or 0 if it is not partitioned.
 func (x *Index[K, V]) PartitionSize() int {
 	return x.size
+}
+
+// Quantized reports whether the index keeps codes of its vectors in partitions.
+func (x *Index[K, V]) Quantized() bool {
+	return x.rot != nil
 }
 
 // Prefix returns the prefix that the index keeps its entries under, which is given to it when it
@@ -226,6 +258,10 @@ func (x *Index[K, V]) attributes() map[string]string {
 	if x.size > 0 {
 		attrs["partitions"] = strconv.Itoa(x.size)
 	}
+	// The codes are stored data, so an index that turns them on or off is built again.
+	if x.rot != nil {
+		attrs["quantization"] = quantization
+	}
 	return attrs
 }
 
@@ -236,6 +272,14 @@ func vectorKey(pid uint32, rawKey []byte) []byte {
 	k = append(k, vectorsKey)
 	k = binary.BigEndian.AppendUint32(k, pid)
 	return append(k, rawKey...)
+}
+
+// codeKey returns the key of the code of the vector of a record in a partition. It is laid out as
+// the key of the vector is, so splitVectorKey splits it too.
+func codeKey(pid uint32, rawKey []byte) []byte {
+	k := vectorKey(pid, rawKey)
+	k[0] = codesKey
+	return k
 }
 
 // placeKey returns the key of the partition that a record is in.
@@ -370,7 +414,9 @@ func (m *maintenance[K, V]) remove(rawKey []byte) error {
 	return m.data.Delete(vectorKey(unplaced, rawKey))
 }
 
-// unplace deletes the vector of a record from the partition it is in, if it is in one.
+// unplace deletes the vector of a record from the partition it is in, if it is in one, and the
+// code of the vector. The code is deleted without being read, as it is there if the index is
+// quantized and the vector is in a partition.
 func (m *maintenance[K, V]) unplace(rawKey []byte) error {
 	pid, placed, err := readPlace(m.data, rawKey)
 	if err != nil || !placed {
@@ -378,6 +424,11 @@ func (m *maintenance[K, V]) unplace(rawKey []byte) error {
 	}
 	if err := m.data.Delete(vectorKey(pid, rawKey)); err != nil {
 		return err
+	}
+	if m.x.rot != nil {
+		if err := m.data.Delete(codeKey(pid, rawKey)); err != nil {
+			return err
+		}
 	}
 	return m.data.Delete(placeKey(rawKey))
 }

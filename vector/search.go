@@ -2,6 +2,7 @@ package vector
 
 import (
 	"bytes"
+	"cmp"
 	"container/heap"
 	"errors"
 	"fmt"
@@ -133,6 +134,8 @@ type Search[K, V any] struct {
 	nprobes   int
 	hasProbes bool
 	exact     bool
+	nrescore  int
+	rescoring bool
 }
 
 // Probes makes the search read the nearest n partitions, besides the vectors that are in none,
@@ -142,6 +145,29 @@ type Search[K, V any] struct {
 func (s Search[K, V]) Probes(n int) Search[K, V] {
 	s.nprobes, s.hasProbes = n, true
 	return s
+}
+
+// Rescore sets how many of the candidates that the codes rank best a search re-ranks by their
+// vectors, when the index is Quantized. The more it re-ranks, the nearer it is to finding the
+// records that are nearest and the more vectors it reads. It is max(100, 10·limit) by default; a
+// search without a limit and without Rescore needs the distance of every candidate, so it reads
+// the vectors and no codes. Run fails if n is not positive. It makes no difference to an index
+// that is not Quantized, to Exact and to Among.
+func (s Search[K, V]) Rescore(n int) Search[K, V] {
+	s.nrescore, s.rescoring = n, true
+	return s
+}
+
+// rescoreCount returns how many candidates are re-ranked, or false if the search has no use for
+// the codes because it re-ranks them all.
+func (s Search[K, V]) rescoreCount() (n int, ok bool) {
+	switch {
+	case s.rescoring:
+		return s.nrescore, true
+	case s.limited:
+		return max(100, 10*s.limit), true
+	}
+	return 0, false
 }
 
 // Exact makes the search compare the query with every vector, whatever the partitions are, so
@@ -205,6 +231,9 @@ func (s Search[K, V]) Run() (res *Results[K, V], err error) {
 	if s.hasProbes && s.nprobes <= 0 {
 		return nil, fmt.Errorf("vector: the number of partitions to read must be positive, not %d", s.nprobes)
 	}
+	if s.rescoring && s.nrescore <= 0 {
+		return nil, fmt.Errorf("vector: the number of candidates to re-rank must be positive, not %d", s.nrescore)
+	}
 	q, err := s.ins.x.prepare(s.query)
 	if err != nil {
 		return nil, fmt.Errorf("invalid query: %w", err)
@@ -214,18 +243,26 @@ func (s Search[K, V]) Run() (res *Results[K, V], err error) {
 	}
 
 	var (
-		hits    []hit[V]
-		scanned int
+		hits []hit[V]
+		n    counts
 	)
 	if len(s.conds) == 0 {
-		hits, scanned, err = s.nearest(q, src)
+		hits, n, err = s.nearest(q, src)
 	} else {
-		hits, scanned, err = s.filtered(q, src)
+		hits, n, err = s.filtered(q, src)
 	}
 	if err != nil {
 		return nil, err
 	}
-	return &Results[K, V]{ins: s.ins, hits: hits, scanned: scanned}, nil
+	return &Results[K, V]{ins: s.ins, hits: hits, scanned: n.scanned, rescored: n.rescored}, nil
+}
+
+// counts is how many entries a search read.
+type counts struct {
+	// scanned is the number of vectors and codes that the query was compared with.
+	scanned int
+	// rescored is the number of vectors that were read to re-rank the candidates of the codes.
+	rescored int
 }
 
 // hit is a record that a search found.
@@ -284,24 +321,24 @@ func (h *hitHeap[V]) Pop() any {
 
 // nearest finds the nearest candidates when there are no conditions to check on the records:
 // the first k of them, or all if there is no limit.
-func (s Search[K, V]) nearest(q []float32, src iterutil.Iterator[K, *V]) ([]hit[V], int, error) {
+func (s Search[K, V]) nearest(q []float32, src iterutil.Iterator[K, *V]) ([]hit[V], counts, error) {
 	if !s.limited {
 		var hits []hit[V]
-		scanned, err := s.scan(q, src, func(rawKey []byte, dist float32) {
+		n, err := s.scan(q, src, func(rawKey []byte, dist float32) {
 			hits = append(hits, hit[V]{rawKey: bytes.Clone(rawKey), dist: dist})
 		})
 		if err != nil {
-			return nil, 0, err
+			return nil, counts{}, err
 		}
 		slices.SortFunc(hits, compareHits[V])
-		return hits, scanned, nil
+		return hits, n, nil
 	}
 
 	// The furthest of the nearest k is at the root, and is replaced by a candidate that is nearer.
 	// The key of a candidate is only valid until the iterator moves, so it is copied only if the
 	// candidate gets in.
 	top := &hitHeap[V]{hits: make([]hit[V], 0, min(s.limit, 1024)), worst: true}
-	scanned, err := s.scan(q, src, func(rawKey []byte, dist float32) {
+	n, err := s.scan(q, src, func(rawKey []byte, dist float32) {
 		switch {
 		case len(top.hits) < s.limit:
 			heap.Push(top, hit[V]{rawKey: bytes.Clone(rawKey), dist: dist})
@@ -313,23 +350,23 @@ func (s Search[K, V]) nearest(q []float32, src iterutil.Iterator[K, *V]) ([]hit[
 		}
 	})
 	if err != nil {
-		return nil, 0, err
+		return nil, counts{}, err
 	}
 
 	slices.SortFunc(top.hits, compareHits[V])
-	return top.hits, scanned, nil
+	return top.hits, n, nil
 }
 
 // filtered finds the nearest candidates whose records satisfy the conditions. Which records do
 // is only known by reading them, so the candidates are gone through from the nearest, and the
 // records are read until there are enough.
-func (s Search[K, V]) filtered(q []float32, src iterutil.Iterator[K, *V]) ([]hit[V], int, error) {
+func (s Search[K, V]) filtered(q []float32, src iterutil.Iterator[K, *V]) ([]hit[V], counts, error) {
 	var all []hit[V]
-	scanned, err := s.scan(q, src, func(rawKey []byte, dist float32) {
+	n, err := s.scan(q, src, func(rawKey []byte, dist float32) {
 		all = append(all, hit[V]{rawKey: bytes.Clone(rawKey), dist: dist})
 	})
 	if err != nil {
-		return nil, 0, err
+		return nil, counts{}, err
 	}
 
 	candidates := &hitHeap[V]{hits: all}
@@ -341,17 +378,17 @@ func (s Search[K, V]) filtered(q []float32, src iterutil.Iterator[K, *V]) ([]hit
 
 		key, err := s.ins.x.store.KeyCodec().Decode(h.rawKey)
 		if err != nil {
-			return nil, 0, fmt.Errorf("failed to decode a key of the index: %w", err)
+			return nil, counts{}, fmt.Errorf("failed to decode a key of the index: %w", err)
 		}
 		record, err := s.ins.records().Get(key)
 		if err != nil {
-			return nil, 0, fmt.Errorf("failed to get the record %v: %w", key, err)
+			return nil, counts{}, fmt.Errorf("failed to get the record %v: %w", key, err)
 		}
 
 		match := true
 		for _, c := range s.conds {
 			if match, err = c.Match(record); err != nil {
-				return nil, 0, fmt.Errorf("failed to check the record %v: %w", key, err)
+				return nil, counts{}, fmt.Errorf("failed to check the record %v: %w", key, err)
 			}
 			if !match {
 				break
@@ -362,46 +399,54 @@ func (s Search[K, V]) filtered(q []float32, src iterutil.Iterator[K, *V]) ([]hit
 			hits = append(hits, h)
 		}
 	}
-	return hits, scanned, nil
+	return hits, n, nil
 }
 
 // scan calls found for every candidate whose distance from the query is not too much, in no
-// particular order, and returns the number of vectors that it measured the distance to. The key
-// is only valid until found returns.
+// particular order, and returns the number of vectors and codes that it compared the query with,
+// and of vectors that it read to re-rank. The key is only valid until found returns, and the
+// distance is the exact one.
 //
 // The candidates are the records of the source if there is one. Otherwise they are the unplaced
 // vectors and those of the nearest partitions, or all the vectors if the search is exact or the
-// index has no partitions.
+// index has no partitions. If the index is quantized the vectors of the partitions are compared
+// by their codes, and the best of them are the candidates.
 func (s Search[K, V]) scan(
 	q []float32,
 	src iterutil.Iterator[K, *V],
 	found func(rawKey []byte, dist float32),
-) (scanned int, err error) {
+) (n counts, err error) {
 	x := s.ins.x
+	emit := func(rawKey []byte, dist float32) {
+		if !s.hasWithin || dist <= s.within {
+			found(rawKey, dist)
+		}
+	}
 	consider := func(rawKey, stored []byte) error {
 		dist, err := distance(x.metric, q, stored)
 		if err != nil {
 			return fmt.Errorf("%w: the key %x", err, rawKey)
 		}
-		scanned++
-		if !s.hasWithin || dist <= s.within {
-			found(rawKey, dist)
-		}
+		n.scanned++
+		emit(rawKey, dist)
 		return nil
 	}
 
 	if src != nil {
-		return scanned, s.scanSource(src, consider)
+		return n, s.scanSource(src, consider)
 	}
 	parts, err := s.ins.partitions()
 	if err != nil {
-		return 0, err
+		return counts{}, err
+	}
+	if rescore, ok := s.rescoreCount(); ok && x.rot != nil && parts != nil && !s.exact {
+		return n, s.scanCodes(q, parts, rescore, &n, consider, emit)
 	}
 
 	// One iterator goes over the vectors, and is moved to the start of each partition to read.
 	it, err := s.ins.data.Iterator([]byte{vectorsKey}, []byte{vectorsKey + 1})
 	if err != nil {
-		return 0, err
+		return counts{}, err
 	}
 	defer it.Close()
 
@@ -423,7 +468,7 @@ func (s Search[K, V]) scan(
 	}
 
 	if parts == nil || s.exact {
-		return scanned, readPartition(nil)
+		return n, readPartition(nil)
 	}
 	for _, pid := range s.probes(parts, q) {
 		// What is left is past the partitions that were read, so there is nothing to seek to
@@ -434,10 +479,186 @@ func (s Search[K, V]) scan(
 		start := vectorKey(pid, nil)
 		it.Seek(start)
 		if err := readPartition(start); err != nil {
-			return scanned, err
+			return n, err
 		}
 	}
-	return scanned, nil
+	return n, nil
+}
+
+// candidate is a vector in a partition that is compared by its code.
+type candidate struct {
+	rawKey []byte
+	pid    uint32
+	// dist is the distance that the code estimates, or for the Euclidean distance the squared one.
+	dist float32
+}
+
+// candidateHeap is a heap of candidates whose root is the furthest of them, by the estimate and
+// by key for the same estimate.
+type candidateHeap []candidate
+
+func (h candidateHeap) Len() int { return len(h) }
+
+func (h candidateHeap) Less(i, j int) bool {
+	return before(h[j].dist, h[j].rawKey, h[i].dist, h[i].rawKey)
+}
+
+func (h candidateHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
+
+func (h *candidateHeap) Push(x any) { *h = append(*h, x.(candidate)) }
+
+func (h *candidateHeap) Pop() any {
+	old := *h
+	last := old[len(old)-1]
+	*h = old[:len(old)-1]
+	return last
+}
+
+// scanCodes is the scan of an index that is quantized, which finds the candidates in three steps.
+// The vectors that are unplaced are compared with the query as they are, as they have no codes.
+// The codes of the nearest partitions are compared with it by the distance that they estimate,
+// and the best rescore of them are kept. Last, the vectors of those are read, so that the
+// distances that are given to found are exact, which is what puts the right ones in order.
+//
+// The numbers of what was read are added to n as it goes. consider and emit are the scan's: the
+// first measures a vector and gives it to the second, which gives it to found if it is within
+// the distance that is asked for. The estimates are not checked against that distance, as they
+// are not exact.
+func (s Search[K, V]) scanCodes(
+	q []float32,
+	parts *partitions,
+	rescore int,
+	n *counts,
+	consider func(rawKey, stored []byte) error,
+	emit func(rawKey []byte, dist float32),
+) error {
+	x := s.ins.x
+
+	if err := s.scanUnplaced(consider); err != nil {
+		return err
+	}
+
+	kept, err := s.rankCodes(q, parts, rescore, &n.scanned)
+	if err != nil {
+		return err
+	}
+
+	// The vectors are read in the order of their keys, which is the order they are stored in, so
+	// that the reads of a partition follow each other.
+	slices.SortFunc(kept, func(a, b candidate) int {
+		return cmp.Or(cmp.Compare(a.pid, b.pid), bytes.Compare(a.rawKey, b.rawKey))
+	})
+	it, err := s.ins.data.Iterator([]byte{vectorsKey}, []byte{vectorsKey + 1})
+	if err != nil {
+		return err
+	}
+	defer it.Close()
+	for _, c := range kept {
+		want := vectorKey(c.pid, c.rawKey)
+		it.Seek(want)
+		// A vector is removed together with its code, in the same transaction.
+		if !it.Valid() || !bytes.Equal(it.Key(), want) {
+			return fmt.Errorf("%w: the key %x has a code in the partition %d, which has no vector of it", ErrCorrupt, c.rawKey, c.pid)
+		}
+		stored, err := it.Value()
+		if err != nil {
+			return err
+		}
+		dist, err := distance(x.metric, q, stored)
+		if err != nil {
+			return fmt.Errorf("%w: the key %x", err, c.rawKey)
+		}
+		n.rescored++
+		emit(c.rawKey, dist)
+	}
+	return nil
+}
+
+// scanUnplaced goes through the vectors that are unplaced, and considers each.
+func (s Search[K, V]) scanUnplaced(consider func(rawKey, stored []byte) error) error {
+	it, err := s.ins.data.Iterator(vectorKey(unplaced, nil), vectorKey(unplaced+1, nil))
+	if err != nil {
+		return err
+	}
+	defer it.Close()
+
+	for ; it.Valid(); it.Next() {
+		rawKey, _, err := splitVectorKey(it.Key())
+		if err != nil {
+			return err
+		}
+		stored, err := it.Value()
+		if err != nil {
+			return err
+		}
+		if err := consider(rawKey, stored); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// rankCodes compares the query with the codes of the partitions that the search reads, and returns
+// the rescore candidates that have the least estimated distances, in no order. It adds the number
+// of codes to scanned.
+func (s Search[K, V]) rankCodes(q []float32, parts *partitions, rescore int, scanned *int) ([]candidate, error) {
+	x := s.ins.x
+	qq := x.prepareQuant(q)
+
+	// One iterator goes over the codes, and is moved to the start of each partition to read, as the
+	// one that goes over the vectors does.
+	it, err := s.ins.data.Iterator([]byte{codesKey}, []byte{codesKey + 1})
+	if err != nil {
+		return nil, err
+	}
+	defer it.Close()
+
+	// The furthest of the best is at the root, and is replaced by a candidate that is nearer. The
+	// key of a candidate is only valid until the iterator moves, so it is copied only if the
+	// candidate gets in.
+	best := make(candidateHeap, 0, min(rescore, 1024))
+	for _, pid := range s.probes(parts, q) {
+		if pid == unplaced {
+			continue
+		}
+		if !it.Valid() {
+			break
+		}
+		j, ok := parts.index(pid)
+		if !ok {
+			return nil, fmt.Errorf("%w: the partition %d has no centroid", ErrCorrupt, pid)
+		}
+		term := centroidTerm(x.metric, q, parts.centroid(j, x.dims))
+		qq.point(parts.rotatedCentroid(j, x.rot.size))
+
+		start := codeKey(pid, nil)
+		for it.Seek(start); it.Valid() && bytes.HasPrefix(it.Key(), start); it.Next() {
+			rawKey, _, err := splitVectorKey(it.Key())
+			if err != nil {
+				return nil, err
+			}
+			code, err := it.Value()
+			if err != nil {
+				return nil, err
+			}
+			if err := x.checkCode(rawKey, code); err != nil {
+				return nil, err
+			}
+			*scanned++
+
+			dist := estimatedDistance(x.metric, term, qq.innerProduct(code), code)
+			switch {
+			case len(best) < rescore:
+				heap.Push(&best, candidate{rawKey: bytes.Clone(rawKey), pid: pid, dist: dist})
+			case before(dist, rawKey, best[0].dist, best[0].rawKey):
+				root := &best[0]
+				root.rawKey = append(root.rawKey[:0], rawKey...)
+				root.pid, root.dist = pid, dist
+				heap.Fix(&best, 0)
+			}
+		}
+	}
+	return best, nil
 }
 
 // scanSource goes through the records of a source, and considers the ones that have a vector.
@@ -487,11 +708,12 @@ func (s Search[K, V]) scanSource(src iterutil.Iterator[K, *V], consider func(raw
 // Results are the records that a search found, the nearest first. They are iterated over like
 // any other records, and they also tell the distance of each.
 type Results[K, V any] struct {
-	ins     *Instance[K, V]
-	hits    []hit[V]
-	scanned int
-	pos     int
-	closed  bool
+	ins      *Instance[K, V]
+	hits     []hit[V]
+	scanned  int
+	rescored int
+	pos      int
+	closed   bool
 	// set is the keys of the hits, which is made when it is first needed.
 	set map[string]struct{}
 }
@@ -581,11 +803,18 @@ func (r *Results[K, V]) Contains(rawKey []byte, _ *V) (bool, error) {
 	return ok, nil
 }
 
-// Scanned returns the number of vectors that the search compared the query with. It is what
-// the time of a search is spent on, and a search of a partitioned index is meant to keep it
-// well below the number of vectors that the index has.
+// Scanned returns the number of vectors that the search compared the query with, and of codes
+// if the index is quantized. It is what the time of a search is spent on, and a search of a
+// partitioned index is meant to keep it well below the number of vectors that the index has.
 func (r *Results[K, V]) Scanned() int {
 	return r.scanned
+}
+
+// Rescored returns the number of vectors that the search read to re-rank the candidates that the
+// codes of a quantized index chose. They are not in Scanned. It is 0 for a search that did not
+// use codes.
+func (r *Results[K, V]) Rescored() int {
+	return r.rescored
 }
 
 // Len returns the number of results in all, wherever the iterator is.

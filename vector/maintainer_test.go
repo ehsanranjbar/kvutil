@@ -536,6 +536,14 @@ func TestMaintainStopsWithItsContext(t *testing.T) {
 }
 
 func TestMaintainerConcurrently(t *testing.T) {
+	t.Run("vectors", func(t *testing.T) { maintainerConcurrently(t) })
+	// The codes are written and deleted with the vectors, by the writers and the maintainer.
+	t.Run("codes", func(t *testing.T) { maintainerConcurrently(t, vector.Quantized()) })
+}
+
+// maintainerConcurrently has a maintainer keep an index, with the options that are given besides
+// the partitions, while writers and searches go on.
+func maintainerConcurrently(t *testing.T, extra ...vector.Option) {
 	eachMetric(t, allMetrics, func(t *testing.T, db kv.DB, metric vector.Metric) {
 		const (
 			ids     = 600
@@ -544,7 +552,8 @@ func TestMaintainerConcurrently(t *testing.T) {
 			size    = 50
 		)
 		docs := extstore.New[int64, doc]("docs")
-		x := vector.On(docs, "by_embedding", 8, metric, embedding, vector.Partitioned(size))
+		x := vector.On(docs, "by_embedding", 8, metric, embedding,
+			append([]vector.Option{vector.Partitioned(size)}, extra...)...)
 		require.NoError(t, docs.Check(db))
 
 		seed := rand.New(rand.NewPCG(9, 9))
@@ -688,6 +697,10 @@ func TestMaintainerConcurrently(t *testing.T) {
 				f.query = cl.draw(seed)
 				f.verify(t, "exact", ins.Search(f.query).Exact(), keepAll, 10, math.NaN())
 				f.verify(t, "exact, no limit", ins.Search(f.query).Exact(), keepAll, -1, math.NaN())
+
+				// Reading every partition and re-ranking every candidate is exact too, with codes or not.
+				every := ins.Search(f.query).Probes(got.Partitions).Rescore(1 << 30)
+				f.verify(t, "every partition", every, keepAll, 10, math.NaN())
 			}
 			return nil
 		}))

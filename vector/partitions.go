@@ -27,19 +27,37 @@ type partitions struct {
 	// order, each as a stored vector.
 	ids       []uint32
 	centroids []byte
+	// rotated are the centroids after the rotation of a quantized index, in the same order and
+	// each as long as a rotated vector, or nil if the index is not quantized. A search compares the
+	// codes of a partition with the query less the centroid, which is the rotated query less these.
+	rotated []float32
 }
 
 // without returns the partitions as they are with some of them gone, in the state of another
 // nonce. The ids stay ascending.
 func (p *partitions) without(nonce [8]byte, gone uint32, dims int) *partitions {
 	q := &partitions{nonce: nonce, next: p.next}
+	size := 0
+	rotating := len(p.rotated) > 0
+	if rotating {
+		size = len(p.rotated) / len(p.ids)
+	}
 	for j, id := range p.ids {
 		if id != gone {
 			q.ids = append(q.ids, id)
 			q.centroids = append(q.centroids, p.centroid(j, dims)...)
+			if rotating {
+				q.rotated = append(q.rotated, p.rotatedCentroid(j, size)...)
+			}
 		}
 	}
 	return q
+}
+
+// rotatedCentroid returns the rotated centroid of the partition that is at an index in ids, where
+// size is the length of a rotated vector. The slice must not be modified.
+func (p *partitions) rotatedCentroid(j, size int) []float32 {
+	return p.rotated[j*size : (j+1)*size]
 }
 
 // index returns the position of a partition in ids, or false if there is no such partition.
@@ -110,6 +128,9 @@ func (x *Index[K, V]) loadPartitions(data *prefix.Tx) (*partitions, error) {
 		}
 		p.ids = append(p.ids, binary.BigEndian.Uint32(key[1:]))
 		p.centroids = append(p.centroids, value...)
+		if x.rot != nil {
+			p.rotated = x.appendRotated(p.rotated, value)
+		}
 	}
 	x.parts.Store(p)
 	return p, nil

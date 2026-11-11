@@ -70,9 +70,12 @@ func Rebuild[K, V any](ctx context.Context, db kv.DB, x *Index[K, V]) error {
 	)
 	err = x.walk(ctx, db, true, func(tx kv.Tx, items []item) error {
 		data := prefix.New(tx, x.prefix)
-		var pids []uint32
+		var (
+			pids  []uint32
+			codes [][]byte
+		)
 		if parts != nil {
-			pids = x.assignAll(parts, items)
+			pids, codes = x.assignAll(parts, items)
 		}
 		clear(pending)
 		for i, it := range items {
@@ -87,6 +90,11 @@ func Rebuild[K, V any](ctx context.Context, db kv.DB, x *Index[K, V]) error {
 			}
 			if err := data.Set(placeKey(it.rawKey), binary.BigEndian.AppendUint32(nil, pids[i])); err != nil {
 				return err
+			}
+			if codes != nil {
+				if err := data.Set(codeKey(pids[i], it.rawKey), codes[i]); err != nil {
+					return err
+				}
 			}
 			pending[pids[i]]++
 		}
@@ -348,12 +356,16 @@ func (x *Index[K, V]) writePartitions(ctx context.Context, db kv.DB, count int, 
 	for j, c := range centroids {
 		parts.ids = append(parts.ids, uint32(j+1))
 		parts.centroids = append(parts.centroids, encode(c)...)
+		if x.rot != nil {
+			parts.rotated = x.appendRotated(parts.rotated, encode(c))
+		}
 	}
 	return parts, nil
 }
 
-// clearUnfinished fails if the index has partitions, and otherwise deletes the centroids and the
-// counts that there are, which a build that did not get to write the state left behind.
+// clearUnfinished fails if the index has partitions, and otherwise deletes the centroids, the
+// counts and the codes that there are, which a build that did not get to write the state left
+// behind.
 func (x *Index[K, V]) clearUnfinished(data *prefix.Tx) error {
 	if _, err := data.Get([]byte{stateKey}); err == nil {
 		return fmt.Errorf("vector: the index %q has partitions already", x.name)
@@ -361,7 +373,7 @@ func (x *Index[K, V]) clearUnfinished(data *prefix.Tx) error {
 		return err
 	}
 
-	for _, key := range []byte{centroidsKey, countsKey} {
+	for _, key := range []byte{centroidsKey, countsKey, codesKey} {
 		it, err := data.Iterator([]byte{key}, []byte{key + 1})
 		if err != nil {
 			return err
@@ -382,33 +394,50 @@ func (x *Index[K, V]) clearUnfinished(data *prefix.Tx) error {
 	return nil
 }
 
-// assignAll returns the partition of each of the vectors. When there is enough to compute it is
-// split between the processors; only this runs on other goroutines, never the transaction.
-func (x *Index[K, V]) assignAll(parts *partitions, items []item) []uint32 {
-	pids := make([]uint32, len(items))
-	run := func(from, to int) {
+// assignAll returns the partition of each of the vectors, and their codes in those partitions if
+// the index is quantized (nil if it is not). When there is enough to compute it is split between
+// the processors; only this runs on other goroutines, never the transaction.
+func (x *Index[K, V]) assignAll(parts *partitions, items []item) (pids []uint32, codes [][]byte) {
+	pids = make([]uint32, len(items))
+	if x.rot != nil {
+		codes = make([][]byte, len(items))
+	}
+	parallel(len(items), len(items)*(len(parts.ids)+x.codeCost()), func(from, to int) {
 		v := make([]float32, x.dims)
+		var c *coder
+		if x.rot != nil {
+			c = x.rot.newCoder()
+		}
 		for i := from; i < to; i++ {
 			_ = decode(v, items[i].stored)
-			pids[i] = parts.ids[assignment(x.metric, x.dims, parts.centroids, v)]
+			j := assignment(x.metric, x.dims, parts.centroids, v)
+			pids[i] = parts.ids[j]
+			if c != nil {
+				codes[i] = c.encode(items[i].stored, parts.centroid(j, x.dims))
+			}
 		}
-	}
+	})
+	return pids, codes
+}
 
-	workers := min(runtime.GOMAXPROCS(0), len(items))
-	if workers < 2 || len(items)*len(parts.ids) < 4096 {
-		run(0, len(items))
-		return pids
+// parallel calls run for the n items in as many ranges as there are processors to work on, or
+// in one if the work, which is a rough measure of the comparisons it takes, is too little to be
+// worth the goroutines. Each range is run by one goroutine, and parallel returns once all are done.
+func parallel(n, work int, run func(from, to int)) {
+	workers := min(runtime.GOMAXPROCS(0), n)
+	if workers < 2 || work < 4096 {
+		run(0, n)
+		return
 	}
 
 	var wg sync.WaitGroup
-	chunk := (len(items) + workers - 1) / workers
-	for from := 0; from < len(items); from += chunk {
+	chunk := (n + workers - 1) / workers
+	for from := 0; from < n; from += chunk {
 		wg.Add(1)
 		go func(from, to int) {
 			defer wg.Done()
 			run(from, to)
-		}(from, min(from+chunk, len(items)))
+		}(from, min(from+chunk, n))
 	}
 	wg.Wait()
-	return pids
 }
