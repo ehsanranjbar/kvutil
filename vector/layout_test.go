@@ -77,6 +77,7 @@ func checkLayout(t *testing.T, db kv.DB, x *vector.Index[int64, doc], docs *exts
 			vectors    = map[string]uint32{}
 			places     = map[string]uint32{}
 			centroids  = map[uint32]bool{}
+			counts     = map[uint32]uint32{}
 			hasState   bool
 			byteLength = 4 * x.Dims()
 		)
@@ -115,6 +116,10 @@ func checkLayout(t *testing.T, db kv.DB, x *vector.Index[int64, doc], docs *exts
 				require.Len(t, key, 5, "a centroid key %x", key)
 				require.Len(t, value, byteLength)
 				centroids[binary.BigEndian.Uint32(key[1:])] = true
+			case 'n':
+				require.Len(t, key, 5, "a count key %x", key)
+				require.Len(t, value, 4)
+				counts[binary.BigEndian.Uint32(key[1:])] = binary.BigEndian.Uint32(value)
 			case 's':
 				require.Len(t, key, 1)
 				require.Len(t, value, 12)
@@ -138,6 +143,10 @@ func checkLayout(t *testing.T, db kv.DB, x *vector.Index[int64, doc], docs *exts
 			got.Placed++
 		}
 		require.Len(t, places, got.Placed, "a place with no vector in a partition")
+		for pid, count := range counts {
+			require.True(t, centroids[pid], "the count of the partition %d, which has no centroid", pid)
+			require.GreaterOrEqual(t, int(count), got.Sizes[pid], "the count of the partition %d is an upper bound", pid)
+		}
 		require.Equal(t, len(centroids) > 0, hasState, "the state is there iff there are centroids")
 		got.Partitions = len(centroids)
 		return nil

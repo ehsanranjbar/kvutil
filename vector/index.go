@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"slices"
 	"strconv"
+	"sync"
 	"sync/atomic"
 
 	"github.com/ehsanranjbar/kvutil/kv"
@@ -22,14 +23,21 @@ import (
 //	'p' <partition> <primary key>  the vector of a record, in the partition it is in.
 //	'k' <primary key>              the partition that a record is in, if it is in one.
 //	'c' <partition>                the centroid of a partition.
+//	'n' <partition>                the number of vectors of a partition, as an upper bound.
 //	's'                            the state: a nonce, and the next partition id.
 //
 // The partition 0 is the unplaced area, which is where a record is written. It is in no
-// partition until the index is built again, and every search reads it in full.
+// partition until the index is built again or a Maintainer places it, and every search reads
+// it in full.
+//
+// The count of a partition is written by the build and the maintainer only. A writer that
+// removes a vector from a partition does not touch it, so it counts vectors that are gone until
+// the partition is counted again. A partition that has no count has an unknown one.
 const (
 	vectorsKey   = 'p'
 	placesKey    = 'k'
 	centroidsKey = 'c'
+	countsKey    = 'n'
 	stateKey     = 's'
 )
 
@@ -67,8 +75,11 @@ func Versioned(version string) Option {
 // which a search reads the nearest ones of instead of all the vectors. size 0 is a default
 // that depends on the dimensions; it panics if size is negative.
 //
-// The partitions are formed when the index is built (see Rebuild), and the records that are
-// written after that are found by every search until it is built again.
+// The partitions are formed when the index is built (see Rebuild), or by a Maintainer once the
+// index has more vectors than a partition. The records that are written after that are found
+// by every search, and a Maintainer places them in the partitions, splits a partition that has
+// grown and dissolves one that has few vectors left. A partition is split and dissolved in one
+// transaction, so the vectors of a partition must fit in a transaction of the engine.
 func Partitioned(size int) Option {
 	if size < 0 {
 		panic(fmt.Sprintf("vector: the size of a partition must not be negative, not %d", size))
@@ -109,6 +120,10 @@ type Index[K, V any] struct {
 	// the number of partitions that a search reads, if it is not 0.
 	size   int
 	probes int
+	// upkeep makes the passes of the Maintainers of a program over the index take turns, and
+	// recounted is the last partition that one counted, where the next goes on from.
+	upkeep    sync.Mutex
+	recounted atomic.Uint32
 	// prefix is the prefix of the extension, which the keys of the index are under. It is set when
 	// the index is added to its store.
 	prefix []byte
@@ -157,7 +172,7 @@ func On[K, V any](
 			x.size = defaultPartitionSize(dims)
 		}
 	}
-	store.AddExtension(name, maintainer[K, V]{x: x})
+	store.AddExtension(name, extension[K, V]{x: x})
 	return x
 }
 
@@ -233,6 +248,11 @@ func centroidKey(pid uint32) []byte {
 	return binary.BigEndian.AppendUint32([]byte{centroidsKey}, pid)
 }
 
+// countKey returns the key of the number of vectors of a partition.
+func countKey(pid uint32) []byte {
+	return binary.BigEndian.AppendUint32([]byte{countsKey}, pid)
+}
+
 // splitVectorKey returns the primary key of a record and the partition of a vector from its key.
 func splitVectorKey(key []byte) (rawKey []byte, pid uint32, err error) {
 	if len(key) < 5 {
@@ -256,13 +276,19 @@ func readPlace(data *prefix.Tx, rawKey []byte) (pid uint32, placed bool, err err
 	return binary.BigEndian.Uint32(b), true, nil
 }
 
-// maintainer is the extension that keeps an index up to date.
-type maintainer[K, V any] struct {
+// extension is the extension that keeps an index up to date.
+type extension[K, V any] struct {
 	x *Index[K, V]
 }
 
+// upkeeper returns the index as what a Maintainer maintains. It is how a Maintainer finds the
+// indexes of a store by going through its extensions.
+func (m extension[K, V]) upkeeper() upkeeper {
+	return m.x
+}
+
 // Keep implements the extstore.Keeper interface.
-func (m maintainer[K, V]) Keep(prefix []byte) migrate.Part {
+func (m extension[K, V]) Keep(prefix []byte) migrate.Part {
 	x := m.x
 	x.prefix = bytes.Clone(prefix)
 	return migrate.Part{
@@ -277,7 +303,7 @@ func (m maintainer[K, V]) Keep(prefix []byte) migrate.Part {
 }
 
 // Instantiate implements the extstore.Extension interface.
-func (m maintainer[K, V]) Instantiate(tx kv.Tx) extstore.ExtensionInstance[K, V] {
+func (m extension[K, V]) Instantiate(tx kv.Tx) extstore.ExtensionInstance[K, V] {
 	return &maintenance[K, V]{
 		x:    m.x,
 		data: prefix.New(tx, m.x.prefix),
@@ -293,7 +319,7 @@ type maintenance[K, V any] struct {
 //
 // A vector is always written to the unplaced area, which every search reads, so that writers
 // share no key and the record is found at once. Which partition it belongs to is for the build
-// to say.
+// and the Maintainer to say.
 func (m *maintenance[K, V]) OnSet(_ K, rawKey []byte, old, new *V, _ ...any) error {
 	hadVector := old != nil && len(m.x.get(old)) > 0
 

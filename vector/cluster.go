@@ -1,7 +1,9 @@
 package vector
 
 import (
+	"cmp"
 	"math"
+	"slices"
 )
 
 // The functions here work on stored vectors, which are bytes, so that the clusters of a build
@@ -103,6 +105,47 @@ func bisect(metric Metric, dims int, vectors [][]byte) (side []uint8, c0, c1 []f
 		c1 = centroidOf(metric, dims, sides[1])
 	}
 	return side, c0, c1
+}
+
+// bisectBalanced is bisect, except that it splits at the median if the smaller of the two sides
+// has fewer than an eighth of the vectors. Otherwise an outlier would be split off from its
+// partition into a partition of its own, which is dissolved for having too few vectors, placed
+// back and split off again, for as long as the maintainer runs. The vectors are put in order by
+// how much nearer they are to the first centre than to the second, and the first half is the
+// side 0.
+func bisectBalanced(metric Metric, dims int, vectors [][]byte) (side []uint8, c0, c1 []float32) {
+	side, c0, c1 = bisect(metric, dims, vectors)
+
+	var sides [2]int
+	for _, s := range side {
+		sides[s]++
+	}
+	if min(sides[0], sides[1]) >= len(vectors)/8 {
+		return side, c0, c1
+	}
+
+	margin := make([]float32, len(vectors))
+	order := make([]int, len(vectors))
+	for i, v := range vectors {
+		margin[i] = assignScore(metric, c0, v) - assignScore(metric, c1, v)
+		order[i] = i
+	}
+	slices.SortFunc(order, func(a, b int) int {
+		return cmp.Or(cmp.Compare(margin[a], margin[b]), cmp.Compare(a, b))
+	})
+
+	half := max(1, len(vectors)/2)
+	var firsts, rests [][]byte
+	for rank, i := range order {
+		if rank < half {
+			side[i] = 0
+			firsts = append(firsts, vectors[i])
+		} else {
+			side[i] = 1
+			rests = append(rests, vectors[i])
+		}
+	}
+	return side, centroidOf(metric, dims, firsts), centroidOf(metric, dims, rests)
 }
 
 // halves splits vectors into the first half and the rest.

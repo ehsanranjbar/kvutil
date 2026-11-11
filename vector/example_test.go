@@ -270,7 +270,7 @@ func Example_partitioned() {
 	}
 
 	// A record that is written after the build is unplaced, so every search finds it at once,
-	// until the index is built again.
+	// until the index is built again or a maintainer places it.
 	err = db.Update(func(tx kv.Tx) error {
 		return docs.Instantiate(tx).Set(25, &Doc{Title: "food 9", Lang: "en", Embedding: []float32{0.05, 1, 0.02}})
 	})
@@ -295,6 +295,16 @@ func Example_partitioned() {
 		panic(err)
 	}
 
+	// A maintainer places the vectors that are unplaced in the partitions of the nearest
+	// centroids, and splits the partitions that grow and dissolves the ones that shrink. Spawn
+	// runs one in the background, for as long as the database is in use; Maintain does what there
+	// is to do now.
+	maintainer := vector.NewMaintainer(db, []vector.Source{docs})
+	if err := maintainer.Maintain(context.Background()); err != nil {
+		panic(err)
+	}
+	fmt.Printf("maintained: %+v\n", stats())
+
 	// Output:
 	// written: {Partitions:0 Unplaced:24}
 	// built: {Partitions:6 Unplaced:0}
@@ -303,4 +313,5 @@ func Example_partitioned() {
 	// exact: compared with 24
 	// written: {Partitions:6 Unplaced:1}
 	// nearest: food 9 at 0.00
+	// maintained: {Partitions:6 Unplaced:0}
 }

@@ -265,7 +265,21 @@ all are not, and need many.
 A record that is written goes to no partition: it is unplaced, and every search reads all the
 unplaced vectors. So a record is found as soon as it is written, writers of different records
 share no key of the index and never conflict, and writing a new record is one write, as without
-partitions.
+partitions. A maintainer does the rest in the background, like the collector of the
+aggregations:
+
+```go
+maintainer := vector.NewMaintainer(db, []vector.Source{docs}) // the stores whose indexes it keeps
+maintainer.Spawn(ctx)          // runs in the background
+defer maintainer.Shutdown(ctx) // stops after the transaction that it is in
+```
+
+It places the unplaced vectors in the partitions of the nearest centroids, splits a partition
+that has more vectors than its size, and dissolves one that has few left, a batch or a
+partition in a transaction, while the records are written. An index that was never built gets
+its first partitions from it, once it has more vectors than one holds. Without a maintainer the
+index is still right, and slower the more vectors are unplaced; `maintainer.Maintain(ctx)` does
+everything that there is to do now.
 
 ## Versions and migrations
 

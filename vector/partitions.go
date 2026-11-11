@@ -21,10 +21,33 @@ type partitions struct {
 	// transaction that changes a centroid, so a set that was read in a transaction that failed
 	// afterwards cannot be taken for the one of another.
 	nonce [8]byte
+	// next is the id that the next partition is given. Every id that was given is less.
+	next uint32
 	// ids are the ids of the partitions, ascending, and centroids their centroids in the same
 	// order, each as a stored vector.
 	ids       []uint32
 	centroids []byte
+}
+
+// without returns the partitions as they are with some of them gone, in the state of another
+// nonce. The ids stay ascending.
+func (p *partitions) without(nonce [8]byte, gone uint32, dims int) *partitions {
+	q := &partitions{nonce: nonce, next: p.next}
+	for j, id := range p.ids {
+		if id != gone {
+			q.ids = append(q.ids, id)
+			q.centroids = append(q.centroids, p.centroid(j, dims)...)
+		}
+	}
+	return q
+}
+
+// index returns the position of a partition in ids, or false if there is no such partition.
+func (p *partitions) index(pid uint32) (int, bool) {
+	if p == nil {
+		return 0, false
+	}
+	return slices.BinarySearch(p.ids, pid)
 }
 
 // count returns the number of partitions. There are none in a set that is nil.
@@ -72,7 +95,7 @@ func (x *Index[K, V]) loadPartitions(data *prefix.Tx) (*partitions, error) {
 	}
 	defer it.Close()
 
-	p := &partitions{nonce: nonce}
+	p := &partitions{nonce: nonce, next: binary.BigEndian.Uint32(b[8:])}
 	for ; it.Valid(); it.Next() {
 		key := it.Key()
 		if len(key) != 5 {

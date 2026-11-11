@@ -3,6 +3,7 @@ package vector
 import (
 	"math"
 	"math/rand/v2"
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -194,4 +195,77 @@ func TestBisectOfFewVectors(t *testing.T) {
 
 	side, _, _ = bisect(Euclidean, 2, stored([]float32{0, 0}, []float32{9, 9}))
 	require.Equal(t, []uint8{0, 1}, side)
+}
+
+// sides counts the vectors on each side.
+func sides(side []uint8) (n [2]int) {
+	for _, s := range side {
+		n[s]++
+	}
+	return n
+}
+
+func TestBisectBalancedDoesNotSplitOffAnOutlier(t *testing.T) {
+	rng := rand.New(rand.NewPCG(7, 8))
+	vectors := make([][]byte, 0, 100)
+	for range 99 {
+		vectors = append(vectors, encode([]float32{
+			1 + float32(rng.NormFloat64())*0.1, float32(rng.NormFloat64()) * 0.1, float32(rng.NormFloat64()) * 0.1,
+		}))
+	}
+	// The outlier is in the middle of the vectors, so that it is not the first or the last.
+	vectors = slices.Insert(vectors, 40, encode([]float32{-500, 800, 300}))
+
+	// Split in two as it is, the outlier has a side of its own.
+	side, _, _ := bisect(Euclidean, 3, vectors)
+	require.Equal(t, 1, min(sides(side)[0], sides(side)[1]))
+
+	// Not so when it is balanced: the halves have as many vectors as each other.
+	side, c0, c1 := bisectBalanced(Euclidean, 3, vectors)
+	require.Equal(t, [2]int{50, 50}, sides(side))
+
+	// The centres are those of the sides.
+	var first, rest [][]byte
+	for i, v := range vectors {
+		if side[i] == 0 {
+			first = append(first, v)
+		} else {
+			rest = append(rest, v)
+		}
+	}
+	require.InDeltaSlice(t, centroidOf(Euclidean, 3, first), c0, 1e-4)
+	require.InDeltaSlice(t, centroidOf(Euclidean, 3, rest), c1, 1e-4)
+
+	// The same every time.
+	again, d0, d1 := bisectBalanced(Euclidean, 3, vectors)
+	require.Equal(t, side, again)
+	require.Equal(t, c0, d0)
+	require.Equal(t, c1, d1)
+}
+
+func TestBisectBalancedKeepsBlobsApart(t *testing.T) {
+	for _, metric := range []Metric{Euclidean, Dot} {
+		vectors, first := blobs(50)
+		plain, p0, p1 := bisect(metric, 3, vectors)
+		side, c0, c1 := bisectBalanced(metric, 3, vectors)
+
+		// Blobs of the same size are a good split already, which is left as it is.
+		require.Equal(t, plain, side, metric)
+		require.Equal(t, p0, c0)
+		require.Equal(t, p1, c1)
+		for i := range side {
+			if i < first {
+				require.Equal(t, side[0], side[i], "%v: the first blob is on one side", metric)
+			} else {
+				require.NotEqual(t, side[0], side[i], "%v: the second blob is on the other", metric)
+			}
+		}
+	}
+}
+
+func TestBisectBalancedOfEqualVectors(t *testing.T) {
+	v := encode([]float32{0.6, 0.8})
+	vectors := [][]byte{v, v, v, v, v, v, v}
+	side, _, _ := bisectBalanced(Cosine, 2, vectors)
+	require.Equal(t, [2]int{3, 4}, sides(side))
 }

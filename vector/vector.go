@@ -9,7 +9,8 @@
 // vectors are grouped around centroids when it is built, and a search reads the vectors of the
 // nearest groups only. The distances are always exact, as the whole vectors are stored; what is
 // approximate is which records are found. The records that are written after the build are in
-// no group, and every search reads them, until the index is built again.
+// no group, and every search reads them, until a Maintainer places them: it keeps the groups
+// as records come and go, splitting the ones that grow and dissolving the ones that shrink.
 package vector
 
 import (

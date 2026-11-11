@@ -7,6 +7,7 @@ import (
 	"math/rand/v2"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/ehsanranjbar/kvutil/internal/testkv"
 	"github.com/ehsanranjbar/kvutil/kv"
@@ -52,7 +53,7 @@ func BenchmarkNearest(b *testing.B) {
 		for _, n := range benchSizes() {
 			b.Run(fmt.Sprintf("%s/%d", engine.name, n), func(b *testing.B) {
 				db := engine.open(b)
-				x, queries := benchLoaded(b, db, n)
+				_, x, queries := benchLoaded(b, db, n)
 				benchSearch(b, db, x, queries)
 			})
 		}
@@ -67,49 +68,91 @@ func BenchmarkNearestPartitioned(b *testing.B) {
 		for _, n := range benchSizes() {
 			b.Run(fmt.Sprintf("%s/%d", engine.name, n), func(b *testing.B) {
 				db := engine.open(b)
-				x, queries := benchLoaded(b, db, n, vector.Partitioned(0))
+				_, x, queries := benchLoaded(b, db, n, vector.Partitioned(0))
 				require.NoError(b, vector.Rebuild(context.Background(), db, x))
-
-				var recall float64
-				require.NoError(b, db.View(func(tx kv.Tx) error {
-					ins := x.Instantiate(tx)
-					for _, q := range queries {
-						exact, err := ins.Search(q).Limit(10).Exact().Run()
-						if err != nil {
-							return err
-						}
-						approx, err := ins.Search(q).Limit(10).Run()
-						if err != nil {
-							return err
-						}
-						found := 0
-						for ; exact.Valid(); exact.Next() {
-							rawKey, err := exact.RawKey()
-							if err != nil {
-								return err
-							}
-							if ok, err := approx.Contains(rawKey, nil); err != nil {
-								return err
-							} else if ok {
-								found++
-							}
-						}
-						recall += float64(found) / float64(exact.Len())
-					}
-					return nil
-				}))
+				recall := benchRecall(b, db, x, queries)
 
 				benchSearch(b, db, x, queries)
 				// After the search, as resetting the timer clears the metrics.
-				b.ReportMetric(recall/float64(len(queries)), "recall@10")
+				b.ReportMetric(recall, "recall@10")
 			})
 		}
 	}
 }
 
+// BenchmarkMaintain measures a maintainer making the partitions of an index and placing its
+// vectors, which were written without any. Setting up is not measured. The recall of the last
+// index is what BenchmarkNearestPartitioned reports for an index that was built.
+func BenchmarkMaintain(b *testing.B) {
+	for _, n := range benchSizes() {
+		b.Run(fmt.Sprint(n), func(b *testing.B) {
+			var (
+				db      kv.DB
+				x       *vector.Index[int64, doc]
+				queries [][]float32
+			)
+			var elapsed time.Duration
+			for range b.N {
+				b.StopTimer()
+				db = testkv.NewMem(b)
+				var docs *extstore.Store[int64, doc]
+				docs, x, queries = benchLoaded(b, db, n, vector.Partitioned(0))
+				m := vector.NewMaintainer(db, []vector.Source{docs})
+
+				b.StartTimer()
+				start := time.Now()
+				require.NoError(b, m.Maintain(context.Background()))
+				elapsed += time.Since(start)
+			}
+			b.StopTimer()
+
+			b.ReportMetric(float64(n)*float64(b.N)/elapsed.Seconds(), "vectors/s")
+			b.ReportMetric(benchRecall(b, db, x, queries), "recall@10")
+		})
+	}
+}
+
+// benchRecall returns the fraction of the 10 nearest vectors of the queries that a search finds,
+// with the partitions that it reads by default, against an exact search of the same index.
+func benchRecall(b *testing.B, db kv.DB, x *vector.Index[int64, doc], queries [][]float32) float64 {
+	b.Helper()
+
+	var recall float64
+	require.NoError(b, db.View(func(tx kv.Tx) error {
+		ins := x.Instantiate(tx)
+		for _, q := range queries {
+			exact, err := ins.Search(q).Limit(10).Exact().Run()
+			if err != nil {
+				return err
+			}
+			approx, err := ins.Search(q).Limit(10).Run()
+			if err != nil {
+				return err
+			}
+			found := 0
+			for ; exact.Valid(); exact.Next() {
+				rawKey, err := exact.RawKey()
+				if err != nil {
+					return err
+				}
+				if ok, err := approx.Contains(rawKey, nil); err != nil {
+					return err
+				} else if ok {
+					found++
+				}
+			}
+			recall += float64(found) / float64(exact.Len())
+		}
+		return nil
+	}))
+	return recall / float64(len(queries))
+}
+
 // benchLoaded writes n docs with a vector of benchDims components around sqrt(n)/2 centres, and
 // returns the index and queries that are around the same centres.
-func benchLoaded(b *testing.B, db kv.DB, n int, opts ...vector.Option) (*vector.Index[int64, doc], [][]float32) {
+func benchLoaded(
+	b *testing.B, db kv.DB, n int, opts ...vector.Option,
+) (*extstore.Store[int64, doc], *vector.Index[int64, doc], [][]float32) {
 	b.Helper()
 
 	docs := extstore.New[int64, doc]("docs")
@@ -134,7 +177,7 @@ func benchLoaded(b *testing.B, db kv.DB, n int, opts ...vector.Option) (*vector.
 	for i := range queries {
 		queries[i] = cl.draw(rng)
 	}
-	return x, queries
+	return docs, x, queries
 }
 
 // benchSearch measures searches for the 10 nearest vectors, and reports the number of vectors

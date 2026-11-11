@@ -1,12 +1,16 @@
 package vector
 
 import (
+	"bytes"
 	"context"
 	crand "crypto/rand"
 	"encoding/binary"
+	"errors"
 	"fmt"
+	"maps"
 	"math/rand/v2"
 	"runtime"
+	"slices"
 	"sync"
 
 	"github.com/ehsanranjbar/kvutil"
@@ -41,7 +45,7 @@ func Rebuild[K, V any](ctx context.Context, db kv.DB, x *Index[K, V]) error {
 				}
 			}
 			return nil
-		})
+		}, nil)
 	}
 
 	// The records are gone through twice, so that every vector is written once, to its partition:
@@ -58,12 +62,19 @@ func Rebuild[K, V any](ctx context.Context, db kv.DB, x *Index[K, V]) error {
 		}
 	}
 
-	return x.walk(ctx, db, true, func(tx kv.Tx, items []item) error {
+	// How many vectors each partition has is known once the batches are written, and is only
+	// kept once a batch is committed, as the function of a transaction may run more than once.
+	var (
+		counts  = map[uint32]uint32{}
+		pending = map[uint32]uint32{}
+	)
+	err = x.walk(ctx, db, true, func(tx kv.Tx, items []item) error {
 		data := prefix.New(tx, x.prefix)
 		var pids []uint32
 		if parts != nil {
 			pids = x.assignAll(parts, items)
 		}
+		clear(pending)
 		for i, it := range items {
 			if pids == nil {
 				if err := data.Set(vectorKey(unplaced, it.rawKey), it.stored); err != nil {
@@ -77,9 +88,44 @@ func Rebuild[K, V any](ctx context.Context, db kv.DB, x *Index[K, V]) error {
 			if err := data.Set(placeKey(it.rawKey), binary.BigEndian.AppendUint32(nil, pids[i])); err != nil {
 				return err
 			}
+			pending[pids[i]]++
 		}
 		return nil
+	}, func() {
+		for pid, n := range pending {
+			counts[pid] += n
+		}
+		clear(pending)
 	})
+	if err != nil || parts == nil {
+		return err
+	}
+	return x.writeCounts(ctx, db, counts)
+}
+
+// writeCounts writes the numbers of vectors of the partitions, in as many transactions as it takes.
+func (x *Index[K, V]) writeCounts(ctx context.Context, db kv.DB, counts map[uint32]uint32) error {
+	pids := slices.Sorted(maps.Keys(counts))
+	const perTransaction = 4096
+	for from := 0; from < len(pids); from += perTransaction {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		to := min(from+perTransaction, len(pids))
+		err := db.Update(func(tx kv.Tx) error {
+			data := prefix.New(tx, x.prefix)
+			for _, pid := range pids[from:to] {
+				if err := data.Set(countKey(pid), binary.BigEndian.AppendUint32(nil, counts[pid])); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			return fmt.Errorf("failed to write the counts of the index %q: %w", x.name, err)
+		}
+	}
+	return nil
 }
 
 // item is the vector of a record, as it is stored.
@@ -93,8 +139,15 @@ type item struct {
 // one with a vector that is not valid fails the walk.
 //
 // visit runs in the transaction if the walk writes, which may run more than once, and after it if
-// not, when it is sure to run once.
-func (x *Index[K, V]) walk(ctx context.Context, db kv.DB, write bool, visit func(tx kv.Tx, items []item) error) error {
+// not, when it is sure to run once. committed, if it is not nil, is called after the transaction
+// of a batch that was written is committed, which is when what visit found is to be kept.
+func (x *Index[K, V]) walk(
+	ctx context.Context,
+	db kv.DB,
+	write bool,
+	visit func(tx kv.Tx, items []item) error,
+	committed func(),
+) error {
 	batch := x.batchSize()
 	var last *K
 	for more := true; more; {
@@ -157,6 +210,9 @@ func (x *Index[K, V]) walk(ctx context.Context, db kv.DB, write bool, visit func
 		if err != nil {
 			return fmt.Errorf("failed to build the index %q: %w", x.name, err)
 		}
+		if write && committed != nil {
+			committed()
+		}
 		last, more = batchLast, batchSize == batch
 	}
 	return nil
@@ -184,28 +240,51 @@ func (x *Index[K, V]) itemOf(key K, record *V) (item, bool, error) {
 // them to find the partitions from. The sample is picked the same way every time, so that a
 // build of the same records gives the same partitions.
 func (x *Index[K, V]) sample(ctx context.Context, db kv.DB) (count int, sample [][]byte, err error) {
-	// A sample of a few times the size of a partition is enough to place the centroids, and it is
-	// bounded by memory.
-	limit := max(4*x.size, (128<<20)/(4*x.dims))
-	rng := rand.New(rand.NewPCG(0x76656374, 0x6f72))
-
+	s := x.newSampler()
 	err = x.walk(ctx, db, false, func(_ kv.Tx, items []item) error {
 		for _, it := range items {
-			count++
-			// Reservoir sampling: every vector has the same chance to be in the sample.
-			if len(sample) < limit {
-				sample = append(sample, it.stored)
-			} else if j := rng.IntN(count); j < limit {
-				sample[j] = it.stored
-			}
+			s.add(it.stored)
 		}
 		return nil
-	})
-	return count, sample, err
+	}, nil)
+	return s.count, s.sample, err
+}
+
+// sampler picks a sample of the vectors that it is given, each as likely as another to be in it.
+type sampler struct {
+	limit  int
+	rng    *rand.Rand
+	count  int
+	sample [][]byte
+}
+
+// newSampler returns a sampler that picks the same vectors every time it is given the same ones.
+func (x *Index[K, V]) newSampler() *sampler {
+	return &sampler{
+		// A sample of a few times the size of a partition is enough to place the centroids, and it
+		// is bounded by memory.
+		limit: max(4*x.size, (128<<20)/(4*x.dims)),
+		rng:   rand.New(rand.NewPCG(0x76656374, 0x6f72)),
+	}
+}
+
+// add counts a vector, and keeps it if it is in the sample.
+func (s *sampler) add(stored []byte) {
+	s.count++
+	// Reservoir sampling: every vector has the same chance to be in the sample.
+	if len(s.sample) < s.limit {
+		s.sample = append(s.sample, stored)
+	} else if j := s.rng.IntN(s.count); j < s.limit {
+		s.sample[j] = stored
+	}
 }
 
 // writePartitions finds the partitions from a sample of count vectors and writes their
-// centroids and the state, and returns them.
+// centroids and the state, and returns them. Each partition is written with a count of 0, which
+// is right as it has no vector yet.
+//
+// It fails if the index has partitions already, and clears the centroids and counts that it
+// finds without them, which are what a build that did not finish left.
 func (x *Index[K, V]) writePartitions(ctx context.Context, db kv.DB, count int, sample [][]byte) (*partitions, error) {
 	// A cluster is split while the vectors that it is estimated to have are more than half of a
 	// partition, so that the vectors that are written after the build have room to grow.
@@ -241,8 +320,17 @@ func (x *Index[K, V]) writePartitions(ctx context.Context, db kv.DB, count int, 
 		to := min(from+per, len(centroids))
 		err := db.Update(func(tx kv.Tx) error {
 			data := prefix.New(tx, x.prefix)
+			if from == 0 {
+				if err := x.clearUnfinished(data); err != nil {
+					return err
+				}
+			}
 			for j := from; j < to; j++ {
-				if err := data.Set(centroidKey(uint32(j+1)), encode(centroids[j])); err != nil {
+				pid := uint32(j + 1)
+				if err := data.Set(centroidKey(pid), encode(centroids[j])); err != nil {
+					return err
+				}
+				if err := data.Set(countKey(pid), binary.BigEndian.AppendUint32(nil, 0)); err != nil {
 					return err
 				}
 			}
@@ -256,12 +344,42 @@ func (x *Index[K, V]) writePartitions(ctx context.Context, db kv.DB, count int, 
 		}
 	}
 
-	parts := &partitions{nonce: nonce}
+	parts := &partitions{nonce: nonce, next: uint32(len(centroids) + 1)}
 	for j, c := range centroids {
 		parts.ids = append(parts.ids, uint32(j+1))
 		parts.centroids = append(parts.centroids, encode(c)...)
 	}
 	return parts, nil
+}
+
+// clearUnfinished fails if the index has partitions, and otherwise deletes the centroids and the
+// counts that there are, which a build that did not get to write the state left behind.
+func (x *Index[K, V]) clearUnfinished(data *prefix.Tx) error {
+	if _, err := data.Get([]byte{stateKey}); err == nil {
+		return fmt.Errorf("vector: the index %q has partitions already", x.name)
+	} else if !errors.Is(err, kv.ErrNotFound) {
+		return err
+	}
+
+	for _, key := range []byte{centroidsKey, countsKey} {
+		it, err := data.Iterator([]byte{key}, []byte{key + 1})
+		if err != nil {
+			return err
+		}
+		var keys [][]byte
+		for ; it.Valid(); it.Next() {
+			keys = append(keys, bytes.Clone(it.Key()))
+		}
+		if err := it.Close(); err != nil {
+			return err
+		}
+		for _, k := range keys {
+			if err := data.Delete(k); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // assignAll returns the partition of each of the vectors. When there is enough to compute it is
