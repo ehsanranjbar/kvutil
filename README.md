@@ -26,6 +26,7 @@ field, cond       fields of records, and conditions on them
 index  agg  relation  vector
                   secondary indexes, stored aggregations, relations between stores, and the
                   records whose vectors are nearest to a given one
+upkeep            the background work of those extensions, run by one runner
 store/record      records that know their ids
 store/ext         a typed store that extensions are told of every write of
 store/typed       keys and values of Go types
@@ -152,15 +153,20 @@ fields and values to read without the records (`index.Including`, `index.Coverin
 checks the others on what it finds. The results of several indexes are combined with
 `index.Intersect`, `Union` and `Except`, or as bitmaps.
 
-**Aggregations** never make two writers conflict: a write leaves a small note, and a collector
+**Aggregations** never make two writers conflict: a write leaves a small note, and an upkeep runner
 folds the notes into the states in the background. Reads are exact all the same, as they take
 the notes into account.
 
 ```go
-collector := agg.NewCollector(db, []agg.Source{orders}) // the stores whose aggregations it collects
-collector.Spawn(ctx)          // runs in the background
-defer collector.Shutdown(ctx) // stops after the batch that it is in, so nothing is half written
+upkeeps := upkeep.New(db).Add(orders) // the stores whose extensions have background work
+upkeeps.Spawn(ctx)                    // runs in the background
+defer upkeeps.Shutdown(ctx)           // stops after the step that it is in, so nothing is half written
 ```
+
+One upkeep runner does the background work of all the extensions of a database: the
+collection of its aggregations, and the upkeep of its vector indexes (see
+[Vector search](#vector-search)). `upkeeps.Drain(ctx)` does everything that there is to do now
+and returns, and `upkeeps.Stats()` tells how the jobs are doing.
 
 There are two kinds: `agg.Delta`
 for what a record can be taken back out of (`Count`, `Sum`, `Avg`), and `agg.Recompute` for any
@@ -317,20 +323,20 @@ where the package would only emulate the instructions, they are summed in plain 
 A record that is written goes to no partition: it is unplaced, and every search reads all the
 unplaced vectors. So a record is found as soon as it is written, writers of different records
 share no key of the index and never conflict, and writing a new record is one write, as without
-partitions. A maintainer does the rest in the background, like the collector of the
-aggregations:
+partitions. The same upkeep runner that collects the aggregations does the rest in the
+background:
 
 ```go
-maintainer := vector.NewMaintainer(db, []vector.Source{docs}) // the stores whose indexes it keeps
-maintainer.Spawn(ctx)          // runs in the background
-defer maintainer.Shutdown(ctx) // stops after the transaction that it is in
+upkeeps := upkeep.New(db).Add(orders, docs) // the stores whose extensions it works for
+upkeeps.Spawn(ctx)                          // runs in the background
+defer upkeeps.Shutdown(ctx)                 // stops after the transaction that it is in
 ```
 
 It places the unplaced vectors in the partitions of the nearest centroids, splits a partition
 that has more vectors than its size, and dissolves one that has few left, a batch or a
 partition in a transaction, while the records are written. An index that was never built gets
-its first partitions from it, once it has more vectors than one holds. Without a maintainer the
-index is still right, and slower the more vectors are unplaced; `maintainer.Maintain(ctx)` does
+its first partitions from it, once it has more vectors than one holds. Without the runner the
+index is still right, and slower the more vectors are unplaced; `upkeeps.Drain(ctx)` does
 everything that there is to do now.
 
 ## Versions and migrations
@@ -661,7 +667,7 @@ An engine that does not have a capability returns `kv.ErrUnsupported` for it.
 ## Example
 
 [examples/petstore](examples/petstore) is a small HTTP server on Badger with record stores,
-relations that cascade, an index, two aggregations, a running collector, and a migration from
+relations that cascade, an index, two aggregations, a running upkeep runner, and a migration from
 the version of its pets before.
 
 ```sh

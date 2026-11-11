@@ -10,6 +10,7 @@ import (
 	"github.com/ehsanranjbar/kvutil/kv"
 	"github.com/ehsanranjbar/kvutil/kv/memkv"
 	extstore "github.com/ehsanranjbar/kvutil/store/ext"
+	"github.com/ehsanranjbar/kvutil/upkeep"
 	"github.com/ehsanranjbar/kvutil/vector"
 )
 
@@ -270,7 +271,7 @@ func Example_partitioned() {
 	}
 
 	// A record that is written after the build is unplaced, so every search finds it at once,
-	// until the index is built again or a maintainer places it.
+	// until the index is built again or an upkeep runner places it.
 	err = db.Update(func(tx kv.Tx) error {
 		return docs.Instantiate(tx).Set(25, &Doc{Title: "food 9", Lang: "en", Embedding: []float32{0.05, 1, 0.02}})
 	})
@@ -295,12 +296,12 @@ func Example_partitioned() {
 		panic(err)
 	}
 
-	// A maintainer places the vectors that are unplaced in the partitions of the nearest
+	// An upkeep runner places the vectors that are unplaced in the partitions of the nearest
 	// centroids, and splits the partitions that grow and dissolves the ones that shrink. Spawn
-	// runs one in the background, for as long as the database is in use; Maintain does what there
+	// runs one in the background, for as long as the database is in use; Drain does what there
 	// is to do now.
-	maintainer := vector.NewMaintainer(db, []vector.Source{docs})
-	if err := maintainer.Maintain(context.Background()); err != nil {
+	upkeeps := upkeep.New(db).Add(docs)
+	if err := upkeeps.Drain(context.Background()); err != nil {
 		panic(err)
 	}
 	fmt.Printf("maintained: %+v\n", stats())
@@ -364,7 +365,7 @@ func Example_quantized() {
 		panic(err)
 	}
 
-	// The codes are made when the vectors are placed in partitions, by the build or a maintainer.
+	// The codes are made when the vectors are placed in partitions, by the build or an upkeep runner.
 	if err := vector.Rebuild(context.Background(), db, embeddings); err != nil {
 		panic(err)
 	}

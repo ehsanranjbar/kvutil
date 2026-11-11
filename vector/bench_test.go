@@ -12,6 +12,7 @@ import (
 	"github.com/ehsanranjbar/kvutil/internal/testkv"
 	"github.com/ehsanranjbar/kvutil/kv"
 	extstore "github.com/ehsanranjbar/kvutil/store/ext"
+	"github.com/ehsanranjbar/kvutil/upkeep"
 	"github.com/ehsanranjbar/kvutil/vector"
 	"github.com/stretchr/testify/require"
 )
@@ -139,7 +140,7 @@ func benchPartitioned(b *testing.B, levels []benchLevel, opts ...vector.Option) 
 	}
 }
 
-// BenchmarkMaintain measures a maintainer making the partitions of an index and placing its
+// BenchmarkMaintain measures an upkeep runner making the partitions of an index and placing its
 // vectors, which were written without any. Setting up is not measured. The recall of the last
 // index is what BenchmarkNearestPartitioned reports for an index that was built.
 func BenchmarkMaintain(b *testing.B) {
@@ -156,11 +157,11 @@ func BenchmarkMaintain(b *testing.B) {
 				db = testkv.NewMem(b)
 				var docs *extstore.Store[int64, doc]
 				docs, x, queries = benchLoaded(b, db, n, nil, vector.Partitioned(0))
-				m := vector.NewMaintainer(db, []vector.Source{docs})
+				upkeeps := upkeep.New(db).Add(docs)
 
 				b.StartTimer()
 				start := time.Now()
-				require.NoError(b, m.Maintain(context.Background()))
+				require.NoError(b, upkeeps.Drain(context.Background()))
 				elapsed += time.Since(start)
 			}
 			b.StopTimer()

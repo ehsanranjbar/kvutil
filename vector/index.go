@@ -15,6 +15,7 @@ import (
 	"github.com/ehsanranjbar/kvutil/kv/prefix"
 	"github.com/ehsanranjbar/kvutil/migrate"
 	extstore "github.com/ehsanranjbar/kvutil/store/ext"
+	"github.com/ehsanranjbar/kvutil/upkeep"
 )
 
 // The keys of an index, under the prefix of its extension. All the integers are 4 bytes,
@@ -29,10 +30,10 @@ import (
 //	's'                            the state: a nonce, and the next partition id.
 //
 // The partition 0 is the unplaced area, which is where a record is written. It is in no
-// partition until the index is built again or a Maintainer places it, and every search reads
+// partition until the index is built again or an upkeep.Runner places it, and every search reads
 // it in full.
 //
-// The count of a partition is written by the build and the maintainer only. A writer that
+// The count of a partition is written by the build and the runner only. A writer that
 // removes a vector from a partition does not touch it, so it counts vectors that are gone until
 // the partition is counted again. A partition that has no count has an unknown one.
 const (
@@ -79,9 +80,9 @@ func Versioned(version string) Option {
 // which a search reads the nearest ones of instead of all the vectors. size 0 is a default
 // that depends on the dimensions; it panics if size is negative.
 //
-// The partitions are formed when the index is built (see Rebuild), or by a Maintainer once the
-// index has more vectors than a partition. The records that are written after that are found
-// by every search, and a Maintainer places them in the partitions, splits a partition that has
+// The partitions are formed when the index is built (see Rebuild), or by an upkeep.Runner once
+// the index has more vectors than a partition. The records that are written after that are found
+// by every search, and the runner places them in the partitions, splits a partition that has
 // grown and dissolves one that has few vectors left. A partition is split and dissolved in one
 // transaction, so the vectors of a partition must fit in a transaction of the engine.
 func Partitioned(size int) Option {
@@ -141,7 +142,7 @@ type Index[K, V any] struct {
 	probes int
 	// rot is the rotation that the codes are of, which is nil if the index is not quantized.
 	rot *rotation
-	// upkeep makes the passes of the Maintainers of a program over the index take turns, and
+	// upkeep makes the passes of the runners of a program over the index take turns, and
 	// recounted is the last partition that one counted, where the next goes on from.
 	upkeep    sync.Mutex
 	recounted atomic.Uint32
@@ -325,10 +326,13 @@ type extension[K, V any] struct {
 	x *Index[K, V]
 }
 
-// upkeeper returns the index as what a Maintainer maintains. It is how a Maintainer finds the
-// indexes of a store by going through its extensions.
-func (m extension[K, V]) upkeeper() upkeeper {
-	return m.x
+// Jobs implements the upkeep.Provider interface, which is how an upkeep.Runner finds the indexes
+// of a store by going through its extensions. An index without partitions has nothing to keep.
+func (m extension[K, V]) Jobs() []upkeep.Job {
+	if m.x.size == 0 {
+		return nil
+	}
+	return []upkeep.Job{job[K, V]{x: m.x}}
 }
 
 // Keep implements the extstore.Keeper interface.
@@ -363,7 +367,7 @@ type maintenance[K, V any] struct {
 //
 // A vector is always written to the unplaced area, which every search reads, so that writers
 // share no key and the record is found at once. Which partition it belongs to is for the build
-// and the Maintainer to say.
+// and the runner to say.
 func (m *maintenance[K, V]) OnSet(_ K, rawKey []byte, old, new *V, _ ...any) error {
 	hadVector := old != nil && len(m.x.get(old)) > 0
 

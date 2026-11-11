@@ -10,6 +10,7 @@ import (
 	"github.com/ehsanranjbar/kvutil/kv"
 	"github.com/ehsanranjbar/kvutil/kv/memkv"
 	extstore "github.com/ehsanranjbar/kvutil/store/ext"
+	"github.com/ehsanranjbar/kvutil/upkeep"
 )
 
 type Sale struct {
@@ -122,9 +123,10 @@ func Example() {
 	// What is read is right before anything is collected.
 	read("written")
 
-	// A collector usually runs in the background, with Run. Here it is asked to collect once.
-	collector := agg.NewCollector(db, []agg.Source{sales})
-	if err := collector.Collect(context.Background()); err != nil {
+	// An upkeep runner usually runs in the background, with Spawn. Here it is asked to
+	// collect once.
+	upkeeps := upkeep.New(db).Add(sales)
+	if err := upkeeps.Drain(context.Background()); err != nil {
 		panic(err)
 	}
 	read("collected")

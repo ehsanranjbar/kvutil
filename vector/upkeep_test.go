@@ -15,22 +15,23 @@ import (
 	"github.com/ehsanranjbar/kvutil/internal/testkv"
 	"github.com/ehsanranjbar/kvutil/kv"
 	extstore "github.com/ehsanranjbar/kvutil/store/ext"
+	"github.com/ehsanranjbar/kvutil/upkeep"
 	"github.com/ehsanranjbar/kvutil/vector"
 	"github.com/stretchr/testify/require"
 )
 
-// newMaintainer returns a maintainer of the index of a store of docs.
-func newMaintainer(db kv.DB, docs *extstore.Store[int64, doc], opts ...vector.MaintainerOption) *vector.Maintainer {
-	return vector.NewMaintainer(db, []vector.Source{docs}, opts...)
+// newUpkeeps returns an upkeep runner for the indexes of a store of docs.
+func newUpkeeps(db kv.DB, docs *extstore.Store[int64, doc], opts ...upkeep.Option) *upkeep.Runner {
+	return upkeep.New(db, opts...).Add(docs)
 }
 
-// maintain runs a maintainer until there is nothing left to do.
-func maintain(t *testing.T, m *vector.Maintainer) {
+// maintain has the upkeep runner do everything that there is to do for the indexes.
+func maintain(t *testing.T, r *upkeep.Runner) {
 	t.Helper()
-	require.NoError(t, m.Maintain(context.Background()))
+	require.NoError(t, r.Drain(context.Background()))
 }
 
-// settled checks what holds once a maintainer is done: the keys of the index are right, there
+// settled checks what holds once the upkeep runner is done: the keys of the index are right, there
 // is no vector that is unplaced, and no partition has more vectors than its size.
 func settled(t *testing.T, db kv.DB, f *fixture, size int) layout {
 	t.Helper()
@@ -131,7 +132,7 @@ func TestMaintainFromNothing(t *testing.T) {
 		vectors := f.withVector()
 		require.Equal(t, vector.Stats{Unplaced: vectors}, stats(t, db, f.x))
 
-		maintain(t, newMaintainer(db, f.docs))
+		maintain(t, newUpkeeps(db, f.docs))
 
 		got := settled(t, db, f, 100)
 		require.Equal(t, vectors, got.Placed)
@@ -148,7 +149,7 @@ func TestMaintainFromNothing(t *testing.T) {
 func TestMaintainLeavesFewVectorsUnplaced(t *testing.T) {
 	testkv.Each(t, func(t *testing.T, db kv.DB) {
 		f, _, _ := newClusteredFixture(t, db, vector.Cosine, 90, vector.Partitioned(100))
-		maintain(t, newMaintainer(db, f.docs))
+		maintain(t, newUpkeeps(db, f.docs))
 
 		vectors := f.withVector()
 		require.Equal(t, vector.Stats{Unplaced: vectors}, stats(t, db, f.x))
@@ -156,7 +157,7 @@ func TestMaintainLeavesFewVectorsUnplaced(t *testing.T) {
 
 		// And makes them once there are more.
 		f.add(t, db, newClusters(rand.New(rand.NewPCG(1, 1)), clusterDims, 5, 0.3), rand.New(rand.NewPCG(2, 2)), 10_000, 60)
-		maintain(t, newMaintainer(db, f.docs))
+		maintain(t, newUpkeeps(db, f.docs))
 		require.Positive(t, stats(t, db, f.x).Partitions)
 		settled(t, db, f, 100)
 	})
@@ -171,10 +172,10 @@ func TestMaintainAfterARebuild(t *testing.T) {
 			require.Equal(t, built.Sizes[pid], int(n), "the count of the partition %d after the build", pid)
 		}
 
-		// As many records again are written, and are unplaced until the maintainer places them.
+		// As many records again are written, and are unplaced until the upkeep runner places them.
 		f.add(t, db, cl, rng, 10_000, 2000)
 		require.Equal(t, 2000, stats(t, db, f.x).Unplaced)
-		maintain(t, newMaintainer(db, f.docs))
+		maintain(t, newUpkeeps(db, f.docs))
 
 		got := settled(t, db, f, 100)
 		require.Greater(t, got.Placed, built.Placed)
@@ -189,7 +190,7 @@ func TestMaintainAfterARebuild(t *testing.T) {
 func TestMaintainUpdatesAndDeletes(t *testing.T) {
 	eachMetric(t, allMetrics, func(t *testing.T, db kv.DB, metric vector.Metric) {
 		f, cl, rng := newClusteredFixture(t, db, metric, 2000, vector.Partitioned(100))
-		m := newMaintainer(db, f.docs)
+		m := newUpkeeps(db, f.docs)
 		maintain(t, m)
 		before := settled(t, db, f, 100).Partitions
 
@@ -258,7 +259,7 @@ func TestMaintainEqualVectors(t *testing.T) {
 		}
 		put(t, db, f.docs, f.byID)
 
-		maintain(t, newMaintainer(db, f.docs))
+		maintain(t, newUpkeeps(db, f.docs))
 		got := settled(t, db, f, 100)
 		require.GreaterOrEqual(t, got.Partitions, 5)
 
@@ -285,7 +286,7 @@ func TestMaintainSettlesWithOutliers(t *testing.T) {
 		}
 		put(t, db, f.docs, f.byID)
 
-		m := newMaintainer(db, f.docs)
+		m := newUpkeeps(db, f.docs)
 		maintain(t, m)
 		settled(t, db, f, 100)
 
@@ -354,7 +355,7 @@ func TestMaintainFixesACountThatIsTooLow(t *testing.T) {
 		require.Greater(t, have+len(added), 100)
 		put(t, db, f.docs, added)
 
-		maintain(t, newMaintainer(db, f.docs))
+		maintain(t, newUpkeeps(db, f.docs))
 		got := settled(t, db, f, 100)
 		require.NotContains(t, got.Sizes, pid, "the partition was split")
 	})
@@ -376,8 +377,15 @@ func TestMaintainLeavesPartitionlessIndexesAlone(t *testing.T) {
 		put(t, db, docs, byID)
 
 		before := dump(t, db, plain.Prefix())
-		maintain(t, newMaintainer(db, docs))
+		upkeeps := newUpkeeps(db, docs)
+		maintain(t, upkeeps)
 		require.Equal(t, before, dump(t, db, plain.Prefix()))
+
+		// Only the partitioned index has a job.
+		jobs := upkeeps.Stats()
+		require.Len(t, jobs, 1)
+		require.Equal(t, `vector index "by_partitioned"`, jobs[0].Name)
+		require.Zero(t, jobs[0].Failures)
 		checkLayout(t, db, plain, docs)
 
 		// The other index of the same store is maintained.
@@ -391,12 +399,12 @@ func TestMaintainLeavesPartitionlessIndexesAlone(t *testing.T) {
 		require.NoError(t, only.Check(db))
 		put(t, db, only, byID)
 		before = dump(t, db, x.Prefix())
-		maintain(t, newMaintainer(db, only))
+		maintain(t, newUpkeeps(db, only))
 		require.Equal(t, before, dump(t, db, x.Prefix()))
 
 		// Nor does it matter if there is no source.
-		require.NoError(t, vector.NewMaintainer(db, nil).Maintain(context.Background()))
-		require.NoError(t, vector.NewMaintainer(db, []vector.Source{nil}).Maintain(context.Background()))
+		require.NoError(t, upkeep.New(db).Drain(context.Background()))
+		require.NoError(t, upkeep.New(db).Add(nil).Drain(context.Background()))
 	})
 }
 
@@ -409,7 +417,9 @@ func unplacedNow(db kv.DB, x *vector.Index[int64, doc]) (stats vector.Stats, err
 	return stats, err
 }
 
-func TestMaintainerSpawn(t *testing.T) {
+// TestUpkeepSpawn checks what the indexes need of a runner that is spawned. That it is one
+// runner, and how it stops, is tested in the upkeep package.
+func TestUpkeepSpawn(t *testing.T) {
 	testkv.Each(t, func(t *testing.T, db kv.DB) {
 		f, cl, rng := newClusteredFixture(t, db, vector.Cosine, 500, vector.Partitioned(100))
 
@@ -417,9 +427,9 @@ func TestMaintainerSpawn(t *testing.T) {
 			mu   sync.Mutex
 			errs []error
 		)
-		m := newMaintainer(db, f.docs,
-			vector.WithInterval(5*time.Millisecond),
-			vector.WithErrorHandler(func(err error) {
+		m := newUpkeeps(db, f.docs,
+			upkeep.WithInterval(5*time.Millisecond),
+			upkeep.WithErrorHandler(func(err error) {
 				mu.Lock()
 				defer mu.Unlock()
 				errs = append(errs, err)
@@ -432,11 +442,7 @@ func TestMaintainerSpawn(t *testing.T) {
 			}
 		}
 
-		// Shutting down a maintainer that was never spawned does nothing.
-		require.NoError(t, m.Shutdown(ctx))
-
-		// A maintainer that is spawned places what is there, and spawning it again leaves it as it is.
-		m.Spawn(ctx)
+		// A runner that is spawned places what is there.
 		m.Spawn(ctx)
 		require.Eventually(t, unplaced(0), 5*time.Second, 5*time.Millisecond)
 		require.Positive(t, stats(t, db, f.x).Partitions)
@@ -445,24 +451,13 @@ func TestMaintainerSpawn(t *testing.T) {
 		f.add(t, db, cl, rng, 10_000, 200)
 		require.Eventually(t, unplaced(0), 5*time.Second, 5*time.Millisecond)
 
-		// Once it is shut down it does nothing more, however often it is shut down.
-		require.NoError(t, m.Shutdown(ctx))
+		// Once it is shut down it does nothing more.
 		require.NoError(t, m.Shutdown(ctx))
 		f.add(t, db, cl, rng, 20_000, 5)
 		time.Sleep(60 * time.Millisecond)
 		require.Equal(t, 5, stats(t, db, f.x).Unplaced)
 
-		// It can be spawned again, and it stops with its context too.
-		parent, cancel := context.WithCancel(ctx)
-		m.Spawn(parent)
-		require.Eventually(t, unplaced(0), 5*time.Second, 5*time.Millisecond)
-		cancel()
-		time.Sleep(20 * time.Millisecond)
-		f.add(t, db, cl, rng, 30_000, 5)
-		time.Sleep(60 * time.Millisecond)
-		require.Equal(t, 5, stats(t, db, f.x).Unplaced)
-		require.NoError(t, m.Shutdown(ctx))
-
+		// It can be spawned again, and places what was left.
 		m.Spawn(ctx)
 		require.Eventually(t, unplaced(0), 5*time.Second, 5*time.Millisecond)
 		require.NoError(t, m.Shutdown(ctx))
@@ -474,10 +469,10 @@ func TestMaintainerSpawn(t *testing.T) {
 	})
 }
 
-func TestMaintainerReportsErrors(t *testing.T) {
+func TestUpkeepReportsErrors(t *testing.T) {
 	testkv.Each(t, func(t *testing.T, db kv.DB) {
 		f, cl, rng := newClusteredFixture(t, db, vector.Cosine, 500, vector.Partitioned(100))
-		maintain(t, newMaintainer(db, f.docs))
+		maintain(t, newUpkeeps(db, f.docs))
 
 		// An entry of the unplaced area that is not a vector, which no partition can be chosen for.
 		rawKey, err := f.docs.KeyCodec().Encode(999_999)
@@ -490,9 +485,9 @@ func TestMaintainerReportsErrors(t *testing.T) {
 			mu   sync.Mutex
 			errs []error
 		)
-		m := newMaintainer(db, f.docs,
-			vector.WithInterval(2*time.Millisecond),
-			vector.WithErrorHandler(func(err error) {
+		m := newUpkeeps(db, f.docs,
+			upkeep.WithInterval(2*time.Millisecond),
+			upkeep.WithErrorHandler(func(err error) {
 				mu.Lock()
 				defer mu.Unlock()
 				errs = append(errs, err)
@@ -500,7 +495,8 @@ func TestMaintainerReportsErrors(t *testing.T) {
 		m.Spawn(context.Background())
 		defer m.Shutdown(context.Background())
 
-		// It is told of the error again and again, as the maintainer tries every round.
+		// It is told of the error again and again, as the runner tries every round, though
+		// less often the longer it fails.
 		require.Eventually(t, func() bool {
 			mu.Lock()
 			defer mu.Unlock()
@@ -519,31 +515,33 @@ func TestMaintainerReportsErrors(t *testing.T) {
 		require.NoError(t, m.Shutdown(context.Background()))
 		settled(t, db, f, 100)
 
-		// Maintain returns the error too.
+		// Drain returns the error too, with the name of the index.
 		require.NoError(t, db.Update(func(tx kv.Tx) error { return tx.Set(bad, []byte{1, 2, 3}) }))
-		require.ErrorIs(t, newMaintainer(db, f.docs).Maintain(context.Background()), vector.ErrCorrupt)
+		err = newUpkeeps(db, f.docs).Drain(context.Background())
+		require.ErrorIs(t, err, vector.ErrCorrupt)
+		require.ErrorContains(t, err, `vector index "by_embedding"`)
 	})
 }
 
-func TestMaintainStopsWithItsContext(t *testing.T) {
+func TestUpkeepStopsWithItsContext(t *testing.T) {
 	testkv.Each(t, func(t *testing.T, db kv.DB) {
 		f, _, _ := newClusteredFixture(t, db, vector.Cosine, 500, vector.Partitioned(100))
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
-		require.ErrorIs(t, newMaintainer(db, f.docs).Maintain(ctx), context.Canceled)
-		require.ErrorIs(t, newMaintainer(db, f.docs).Run(ctx), context.Canceled)
+		require.ErrorIs(t, newUpkeeps(db, f.docs).Drain(ctx), context.Canceled)
+		require.ErrorIs(t, newUpkeeps(db, f.docs).Run(ctx), context.Canceled)
 	})
 }
 
-func TestMaintainerConcurrently(t *testing.T) {
-	t.Run("vectors", func(t *testing.T) { maintainerConcurrently(t) })
-	// The codes are written and deleted with the vectors, by the writers and the maintainer.
-	t.Run("codes", func(t *testing.T) { maintainerConcurrently(t, vector.Quantized()) })
+func TestUpkeepConcurrently(t *testing.T) {
+	t.Run("vectors", func(t *testing.T) { upkeepConcurrently(t) })
+	// The codes are written and deleted with the vectors, by the writers and the upkeep runner.
+	t.Run("codes", func(t *testing.T) { upkeepConcurrently(t, vector.Quantized()) })
 }
 
-// maintainerConcurrently has a maintainer keep an index, with the options that are given besides
-// the partitions, while writers and searches go on.
-func maintainerConcurrently(t *testing.T, extra ...vector.Option) {
+// upkeepConcurrently has an upkeep runner keep an index, with the options that are given
+// besides the partitions, while writers and searches go on.
+func upkeepConcurrently(t *testing.T, extra ...vector.Option) {
 	eachMetric(t, allMetrics, func(t *testing.T, db kv.DB, metric vector.Metric) {
 		const (
 			ids     = 600
@@ -567,9 +565,9 @@ func maintainerConcurrently(t *testing.T, extra ...vector.Option) {
 			problems.CompareAndSwap(nil, &err)
 		}
 
-		m := newMaintainer(db, docs,
-			vector.WithInterval(time.Millisecond),
-			vector.WithErrorHandler(func(err error) {
+		m := newUpkeeps(db, docs,
+			upkeep.WithInterval(time.Millisecond),
+			upkeep.WithErrorHandler(func(err error) {
 				// Two transactions of a busy database can fail to get along, which the engine says by
 				// a conflict. Anything else is a mistake.
 				if !errors.Is(err, kv.ErrConflict) {
@@ -663,7 +661,7 @@ func maintainerConcurrently(t *testing.T, extra ...vector.Option) {
 			require.NoError(t, *p)
 		}
 
-		// Whatever the maintainer left undone is done now.
+		// Whatever the runner left undone is done now.
 		maintain(t, m)
 
 		// The store has the records that the writers put in it.

@@ -242,7 +242,7 @@ func TestPetStore(t *testing.T) {
 		t.Fatalf("added: got %d", n)
 	}
 
-	// The same after the collector has folded the writes into the states.
+	// The same after the upkeeps have folded the writes into the states.
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		var collected int64
@@ -258,7 +258,7 @@ func TestPetStore(t *testing.T) {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("the collector has not collected: got %d", collected)
+			t.Fatalf("the upkeeps have not collected: got %d", collected)
 		}
 		time.Sleep(50 * time.Millisecond)
 	}

@@ -16,6 +16,7 @@ import (
 	"github.com/ehsanranjbar/kvutil/kv"
 	"github.com/ehsanranjbar/kvutil/migrate"
 	"github.com/ehsanranjbar/kvutil/store/record"
+	"github.com/ehsanranjbar/kvutil/upkeep"
 )
 
 type event = dataset.Event
@@ -65,7 +66,7 @@ func bucket(u unit) agg.Calendar {
 	return agg.Daily
 }
 
-// countedDB counts the transactions that the collector had to run again: its conflicts with the
+// countedDB counts the transactions that the upkeep runner had to run again: its conflicts with the
 // writers, which the counter of the system (the writers' own) does not include.
 type countedDB struct {
 	kv.DB
@@ -91,7 +92,7 @@ type kvEnv struct {
 	a     *kvAggs
 	exact bool // reads take the notes that are not collected into account
 
-	coll     *agg.Collector
+	upkeeps  *upkeep.Runner
 	collErrs atomic.Int64
 	plain    bool
 }
@@ -108,17 +109,18 @@ func openKV(ctx context.Context, sys *kvsys.System, name string, s setup, schema
 		db.Destroy()
 		return nil, err
 	}
-	e.makeCollector()
+	e.makeUpkeeps()
 	return e, nil
 }
 
-func (e *kvEnv) makeCollector() {
+// makeUpkeeps makes the upkeep runner that collects the aggregations, if the store has any.
+func (e *kvEnv) makeUpkeeps() {
 	if e.a.sum == nil {
 		return
 	}
-	e.coll = agg.NewCollector(e.cdb, []agg.Source{e.a.store},
-		agg.WithInterval(e.s.interval),
-		agg.WithErrorHandler(func(error) { e.collErrs.Add(1) }))
+	e.upkeeps = upkeep.New(e.cdb,
+		upkeep.WithInterval(e.s.interval),
+		upkeep.WithErrorHandler(func(error) { e.collErrs.Add(1) })).Add(e.a.store)
 }
 
 func (e *kvEnv) Load(ctx context.Context, n int64) error {
@@ -178,7 +180,7 @@ func (e *kvEnv) Build(ctx context.Context, step func(name string, fn func(contex
 		return err
 	}
 	e.a, e.plain = st, false
-	e.makeCollector()
+	e.makeUpkeeps()
 	if err := step("rebuild-sum", func(ctx context.Context) error { return agg.Rebuild(ctx, e.db, st.sum) }); err != nil {
 		return err
 	}
@@ -189,21 +191,21 @@ func (e *kvEnv) Build(ctx context.Context, step func(name string, fn func(contex
 }
 
 func (e *kvEnv) CatchUp(ctx context.Context) error {
-	if e.coll == nil {
+	if e.upkeeps == nil {
 		return nil
 	}
-	return e.coll.Collect(ctx)
+	return e.upkeeps.Drain(ctx)
 }
 
 func (e *kvEnv) Background(ctx context.Context, on bool) error {
-	if e.coll == nil {
+	if e.upkeeps == nil {
 		return nil
 	}
 	if on {
-		e.coll.Spawn(context.Background())
+		e.upkeeps.Spawn(context.Background())
 		return nil
 	}
-	return e.coll.Shutdown(ctx)
+	return e.upkeeps.Shutdown(ctx)
 }
 
 func (e *kvEnv) write(es []*event, f func(st *eventStore, tx kv.Tx, ev *event) error) error {
@@ -288,7 +290,7 @@ func (e *kvEnv) series(tx kv.Tx, q query, exact bool) ([]row, error) {
 	}
 
 	// The three have the spans that have a record in them, and the collected ones may differ
-	// while the collector is between two of them.
+	// while the upkeep runner is between two of them.
 	byStart := map[int64]*row{}
 	at := func(t time.Time) *row {
 		r, ok := byStart[t.UnixNano()]
@@ -416,8 +418,8 @@ func (e *kvEnv) Stats() map[string]float64 {
 }
 
 func (e *kvEnv) Close(ctx context.Context) error {
-	if e.coll != nil {
-		e.coll.Shutdown(context.WithoutCancel(ctx))
+	if e.upkeeps != nil {
+		e.upkeeps.Shutdown(context.WithoutCancel(ctx))
 	}
 	return e.db.Destroy()
 }

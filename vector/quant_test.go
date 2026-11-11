@@ -418,10 +418,10 @@ func TestQuantizedMaintenance(t *testing.T) {
 		}
 		require.Equal(t, built.Placed-3, f.check(t, db).Placed)
 
-		// The maintainer places what is unplaced, and its codes are against the centroids.
+		// The upkeep runner places what is unplaced, and its codes are against the centroids.
 		f.add(t, db, cl, rng, 200_000, 50)
 		f.check(t, db)
-		m := newMaintainer(db, f.docs)
+		m := newUpkeeps(db, f.docs)
 		maintain(t, m)
 		settled(t, db, f, 100)
 		requireQuantizedRecall(t, db, f, cl.queries(rng, 40), 0.95)
@@ -513,7 +513,7 @@ func TestQuantizedMaintenanceFromNothing(t *testing.T) {
 		f, cl, rng := newClusteredFixture(t, db, metric, 3000, vector.Partitioned(100), vector.Quantized())
 		vectors := f.withVector()
 
-		maintain(t, newMaintainer(db, f.docs))
+		maintain(t, newUpkeeps(db, f.docs))
 		got := settled(t, db, f, 100)
 		require.Equal(t, vectors, got.Placed)
 		require.Greater(t, got.Partitions, 10)

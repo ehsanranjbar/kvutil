@@ -3,9 +3,9 @@
 //
 // An aggregation is kept in two stages, so that the transactions that write records do not
 // conflict with each other on it. A transaction that writes a record only notes the change,
-// under a key of its own. A Collector, which runs in the background, turns what was noted
+// under a key of its own. An upkeep.Runner, which runs in the background, turns what was noted
 // into the stored states. Reading an aggregation takes what is not collected yet into account,
-// so it is exact whether the collector has run or not.
+// so it is exact whether the runner has run or not.
 //
 // An aggregation is for reporting. A transaction that reads one and writes according to what
 // it read is not protected from the records that other transactions add at the same time,
@@ -27,6 +27,7 @@ import (
 	"github.com/ehsanranjbar/kvutil/kv/prefix"
 	"github.com/ehsanranjbar/kvutil/migrate"
 	extstore "github.com/ehsanranjbar/kvutil/store/ext"
+	"github.com/ehsanranjbar/kvutil/upkeep"
 )
 
 var (
@@ -413,16 +414,6 @@ func (a *Aggregation[K, V, G, X, S]) encodeGroup(group G) ([]byte, error) {
 	return gbz, nil
 }
 
-// collectName implements the collectable interface.
-func (a *Aggregation[K, V, G, X, S]) collectName() string {
-	return a.name
-}
-
-// collectBatch implements the collectable interface.
-func (a *Aggregation[K, V, G, X, S]) collectBatch(db kv.DB, cursor []byte, batch int, report func(error)) ([]byte, error) {
-	return a.kind.collect(db, cursor, batch, report)
-}
-
 // maintainer is the extension that notes the changes of the records for an aggregation.
 type maintainer[K, V, G, X, S any] struct {
 	a       *Aggregation[K, V, G, X, S]
@@ -454,10 +445,11 @@ func (m maintainer[K, V, G, X, S]) Keep(p []byte) migrate.Part {
 	}
 }
 
-// collection implements the collected interface, which is how a collector finds the
-// aggregations among the extensions of a store.
-func (m maintainer[K, V, G, X, S]) collection() collectable {
-	return m.a
+// Jobs implements the upkeep.Provider interface, which is how an upkeep.Runner finds the
+// aggregations among the extensions of a store. The job turns what the transactions noted for the
+// aggregation into its stored states.
+func (m maintainer[K, V, G, X, S]) Jobs() []upkeep.Job {
+	return []upkeep.Job{job[K, V, G, X, S]{a: m.a}}
 }
 
 // Instantiate implements the extstore.Extension interface.
@@ -509,12 +501,12 @@ type Instance[K, V, G, X, S any] struct {
 }
 
 // Get returns the state of a group for all of time, and whether the group has any record.
-// It is exact: it takes into account what the collector has not collected yet.
+// It is exact: it takes into account what the upkeep runner has not collected yet.
 func (i *Instance[K, V, G, X, S]) Get(group G) (S, bool, error) {
 	return i.At(AllTime, group, time.Time{})
 }
 
-// GetCollected is like Get but leaves out what the collector has not collected yet,
+// GetCollected is like Get but leaves out what the upkeep runner has not collected yet,
 // which makes it cheaper and possibly out of date.
 func (i *Instance[K, V, G, X, S]) GetCollected(group G) (S, bool, error) {
 	return i.AtCollected(AllTime, group, time.Time{})
@@ -522,12 +514,12 @@ func (i *Instance[K, V, G, X, S]) GetCollected(group G) (S, bool, error) {
 
 // At returns the state of a group for the span of a bucket that a time is in, and whether the
 // group has any record in that span.
-// It is exact: it takes into account what the collector has not collected yet.
+// It is exact: it takes into account what the upkeep runner has not collected yet.
 func (i *Instance[K, V, G, X, S]) At(b Bucket, group G, t time.Time) (S, bool, error) {
 	return i.at(b, group, t, false)
 }
 
-// AtCollected is like At but leaves out what the collector has not collected yet,
+// AtCollected is like At but leaves out what the upkeep runner has not collected yet,
 // which makes it cheaper and possibly out of date.
 func (i *Instance[K, V, G, X, S]) AtCollected(b Bucket, group G, t time.Time) (S, bool, error) {
 	return i.at(b, group, t, true)
@@ -567,12 +559,12 @@ func FillGaps() SeriesOption {
 // Series returns the states of a group for the spans of a bucket, from the span that the time
 // from is in up to the spans that start before the time to, in the order of time.
 // Only the spans that have records in them are returned, unless FillGaps is given.
-// It is exact: it takes into account what the collector has not collected yet.
+// It is exact: it takes into account what the upkeep runner has not collected yet.
 func (i *Instance[K, V, G, X, S]) Series(b Bucket, group G, from, to time.Time, opts ...SeriesOption) ([]Point[S], error) {
 	return i.series(b, group, from, to, false, opts)
 }
 
-// SeriesCollected is like Series but leaves out what the collector has not collected yet,
+// SeriesCollected is like Series but leaves out what the upkeep runner has not collected yet,
 // which makes it cheaper and possibly out of date.
 func (i *Instance[K, V, G, X, S]) SeriesCollected(b Bucket, group G, from, to time.Time, opts ...SeriesOption) ([]Point[S], error) {
 	return i.series(b, group, from, to, true, opts)

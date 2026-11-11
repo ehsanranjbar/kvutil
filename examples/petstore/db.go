@@ -21,6 +21,7 @@ import (
 	"github.com/ehsanranjbar/kvutil/migrate"
 	"github.com/ehsanranjbar/kvutil/relation"
 	"github.com/ehsanranjbar/kvutil/store/record"
+	"github.com/ehsanranjbar/kvutil/upkeep"
 )
 
 // File is an image with its metadata. It has no codec of its own, so it is stored in the
@@ -35,8 +36,8 @@ type DB struct {
 	// Migrated is what was done to the database when it was opened.
 	Migrated *migrate.Report
 
-	// The collector folds what the writes left for the aggregations into their states.
-	collector *agg.Collector
+	// The upkeeps fold what the writes left for the aggregations into their states.
+	upkeeps *upkeep.Runner
 
 	categories *record.Store[int64, types.Category]
 	pets       *record.Store[int64, types.PetRecord]
@@ -148,23 +149,23 @@ func define(base *badgerkv.DB) (*DB, error) {
 		log.Println("migrated the database:\n" + report)
 	}
 
-	// Reading an aggregation does not wait for the collector, which runs in the background.
-	db.collector = agg.NewCollector(base, []agg.Source{db.pets},
-		agg.WithInterval(time.Second),
-		agg.WithErrorHandler(func(err error) { log.Println("collector:", err) }))
-	db.collector.Spawn(context.Background())
+	// Reading an aggregation does not wait for the upkeeps, which run in the background.
+	db.upkeeps = upkeep.New(base,
+		upkeep.WithInterval(time.Second),
+		upkeep.WithErrorHandler(func(err error) { log.Println("upkeep:", err) })).Add(db.pets)
+	db.upkeeps.Spawn(context.Background())
 
 	return db, nil
 }
 
-// closeTimeout is how long Close waits for the collector to finish the batch that it is in.
+// closeTimeout is how long Close waits for the upkeeps to finish the step that they are in.
 const closeTimeout = 10 * time.Second
 
-// Close stops the collector, after the batch that it is in, and closes the database.
+// Close stops the upkeeps, after the step that they are in, and closes the database.
 func (db *DB) Close() error {
 	ctx, cancel := context.WithTimeout(context.Background(), closeTimeout)
 	defer cancel()
-	err := db.collector.Shutdown(ctx)
+	err := db.upkeeps.Shutdown(ctx)
 	return errors.Join(err, db.DB.Close())
 }
 

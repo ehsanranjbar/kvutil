@@ -12,33 +12,59 @@ import (
 
 	"github.com/ehsanranjbar/kvutil/kv"
 	"github.com/ehsanranjbar/kvutil/kv/prefix"
+	"github.com/ehsanranjbar/kvutil/upkeep"
 )
 
-// upkeeper is implemented by the indexes, whatever the types of their records are. It is what a
-// Maintainer keeps the partitions of an index with.
-type upkeeper interface {
-	// upkeepName names the index.
-	upkeepName() string
-	// upkeepPartitioned reports whether the index has partitions to keep.
-	upkeepPartitioned() bool
-	// upkeepPass does a round of what there is to do for the index, and reports whether it did
-	// anything. recount is the number of partitions that it counts, or all of them if it is
-	// negative.
-	upkeepPass(ctx context.Context, db kv.DB, recount int) (did bool, err error)
+// maxPasses is the number of passes that a drain gives up after. A pass that does something is
+// followed by another, which can only go on this long if there is a mistake in the upkeep.
+const maxPasses = 10000
+
+// runRecount is the number of partitions that a round of a running runner counts exactly.
+const runRecount = 16
+
+// job is the background work of a partitioned vector index: placing the vectors that were written
+// in the partitions of the nearest centroids, splitting a partition that has more vectors than
+// its size, and dissolving one that has few left. It is the job that the extension of the index
+// gives to an upkeep.Runner, which should have one running. The index is right without it, as
+// every search reads the unplaced vectors, but a search takes longer the more there are of them.
+//
+// It works in transactions of its own, a batch of vectors or a partition at a time, while the
+// records are written. It never changes a record. It holds only the pointer, so that it is
+// comparable, as a job has to be.
+type job[K, V any] struct {
+	x *Index[K, V]
 }
 
-// upkept is implemented by the extensions of the indexes, which is how a Maintainer finds the
-// indexes among the extensions of a store.
-type upkept interface {
-	upkeeper() upkeeper
+// Name implements the upkeep.Job interface.
+func (j job[K, V]) Name() string {
+	return fmt.Sprintf("vector index %q", j.x.name)
 }
 
-func (x *Index[K, V]) upkeepName() string {
-	return x.name
-}
+// Step implements the upkeep.Job interface. A step is a pass over the index.
+//
+// A pass of a running runner counts a few of the partitions, so that the counts, which only
+// grow while records are removed, are made right in turn, and it is the only one of its round.
+// A drain does passes until one does nothing: the vectors are placed, and the partitions have no
+// more vectors than their size and no fewer than an eighth of it. Its cursor is the number of
+// passes that were done, which is how it gives up on an index that never settles.
+func (j job[K, V]) Step(ctx context.Context, db kv.DB, pass upkeep.Pass) ([]byte, error) {
+	if !pass.Drain {
+		_, err := j.x.upkeepPass(ctx, db, runRecount)
+		return nil, err
+	}
 
-func (x *Index[K, V]) upkeepPartitioned() bool {
-	return x.size > 0
+	done := 0
+	if len(pass.Cursor) == 8 {
+		done = int(binary.BigEndian.Uint64(pass.Cursor))
+	}
+	did, err := j.x.upkeepPass(ctx, db, -1)
+	if err != nil || !did {
+		return nil, err
+	}
+	if done++; done >= maxPasses {
+		return nil, fmt.Errorf("the index is still not settled after %d passes", maxPasses)
+	}
+	return binary.BigEndian.AppendUint64(nil, uint64(done)), nil
 }
 
 // The operations of the upkeep below are each a transaction, or a few, and are safe to run
@@ -55,7 +81,7 @@ func (x *Index[K, V]) upkeepPartitioned() bool {
 // reads and writes. A writer never touches the counts or the centroids, so no writer conflicts
 // with them.
 //
-// The passes of the Maintainers of one program over an index take turns. A maintainer of another
+// The passes over an index of the runners of one program take turns. A runner of another
 // program is kept from leaving a vector in a partition that is gone by the count of the
 // partition: placing a vector in a partition writes its count, and splitting or dissolving the
 // partition reads it, so the two conflict.
@@ -65,7 +91,7 @@ func (x *Index[K, V]) upkeepPartitioned() bool {
 // partitions that have too many vectors, and counts some partitions exactly, splitting the ones
 // that turn out to be too big and dissolving the ones that turn out to have few.
 func (x *Index[K, V]) upkeepPass(ctx context.Context, db kv.DB, recount int) (did bool, err error) {
-	// One pass at a time, whichever Maintainer it is of.
+	// One pass at a time, whichever runner it is of.
 	x.upkeep.Lock()
 	defer x.upkeep.Unlock()
 

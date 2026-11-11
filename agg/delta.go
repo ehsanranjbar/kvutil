@@ -30,7 +30,7 @@ type Fold[X, S any] struct {
 // into its states.
 //
 // Writing a record notes what it adds and what it removes in a temporary record of its own,
-// and the collector folds the temporary records into the states. That costs the same however
+// and the upkeep runner folds the temporary records into the states. That costs the same however
 // many records a span has, so it suits the aggregations with large spans, like a total for all
 // of time. The fold must be able to remove what it has added, and must not depend on the order.
 func Delta[K, V, G, X, S any](
@@ -134,7 +134,7 @@ func (d *deltaKind[X, S]) encodeTally(t tally[S]) ([]byte, error) {
 
 // apply folds a temporary record into a tally.
 func (d *deltaKind[X, S]) apply(t tally[S], sign byte, x X) (_ tally[S], err error) {
-	// A function of the user that panics must not take the collector down with it.
+	// A function of the user that panics must not take the upkeep runner down with it.
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("agg %q: the fold panicked: %v", d.name, r)

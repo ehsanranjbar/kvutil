@@ -24,6 +24,7 @@ import (
 	"github.com/ehsanranjbar/kvutil/kv/prefix"
 	"github.com/ehsanranjbar/kvutil/migrate"
 	extstore "github.com/ehsanranjbar/kvutil/store/ext"
+	"github.com/ehsanranjbar/kvutil/upkeep"
 	"github.com/stretchr/testify/require"
 )
 
@@ -214,9 +215,9 @@ func TestAggregationsEqualRecomputation(t *testing.T) {
 	run := func(t *testing.T, db kv.DB, ops int) {
 		f := newFixture()
 		require.NoError(t, f.orders.Check(db))
-		collector := agg.NewCollector(db, []agg.Source{f.orders}, agg.WithBatchSize(7), agg.WithErrorHandler(func(err error) {
-			t.Errorf("collector: %v", err)
-		}))
+		upkeeps := upkeep.New(db, upkeep.WithBatchSize(7), upkeep.WithErrorHandler(func(err error) {
+			t.Errorf("upkeep: %v", err)
+		})).Add(f.orders)
 
 		rng := rand.New(rand.NewPCG(21, 22))
 		orders := map[int64]order{}
@@ -246,7 +247,7 @@ func TestAggregationsEqualRecomputation(t *testing.T) {
 			require.NoError(t, err)
 
 			if rng.IntN(15) == 0 {
-				require.NoError(t, collector.Collect(context.Background()))
+				require.NoError(t, upkeeps.Drain(context.Background()))
 			}
 			if op%20 == 0 || op == ops {
 				f.verify(t, db, orders, false)
@@ -254,7 +255,7 @@ func TestAggregationsEqualRecomputation(t *testing.T) {
 		}
 
 		// With everything collected, the stored states alone are right too.
-		require.NoError(t, collector.Collect(context.Background()))
+		require.NoError(t, upkeeps.Drain(context.Background()))
 		f.verify(t, db, orders, false)
 		f.verify(t, db, orders, true)
 		require.NotEmpty(t, orders)
@@ -269,7 +270,7 @@ func TestAggregationsEqualRecomputation(t *testing.T) {
 			return nil
 		}))
 		f.verify(t, db, nil, false)
-		require.NoError(t, collector.Collect(context.Background()))
+		require.NoError(t, upkeeps.Drain(context.Background()))
 		f.verify(t, db, nil, true)
 
 		require.NoError(t, db.View(func(tx kv.Tx) error {
@@ -621,7 +622,7 @@ func TestRebuild(t *testing.T) {
 	})
 }
 
-func TestCollectorPutsFailuresAside(t *testing.T) {
+func TestUpkeepPutsFailuresAside(t *testing.T) {
 	db := memkv.New()
 	orders := extstore.New[int64, order]("orders")
 
@@ -652,10 +653,10 @@ func TestCollectorPutsFailuresAside(t *testing.T) {
 	require.NoError(t, set(t, db, orders, 3, order{Customer: "ann", Amount: 7, At: day(3)}))
 
 	var reported []string
-	collector := agg.NewCollector(db, []agg.Source{orders}, agg.WithBatchSize(1), agg.WithErrorHandler(func(err error) {
+	upkeeps := upkeep.New(db, upkeep.WithBatchSize(1), upkeep.WithErrorHandler(func(err error) {
 		reported = append(reported, err.Error())
-	}))
-	require.NoError(t, collector.Collect(context.Background()))
+	})).Add(orders)
+	require.NoError(t, upkeeps.Drain(context.Background()))
 	require.Len(t, reported, 2)
 	require.Contains(t, reported[0]+reported[1], `agg "unlucky"`)
 	require.Contains(t, reported[0]+reported[1], `agg "failing"`)
@@ -691,14 +692,14 @@ func TestCollectorPutsFailuresAside(t *testing.T) {
 	// A round later the record that was put aside does not come up again, and the span that
 	// could not be computed is tried again.
 	reported = nil
-	require.NoError(t, collector.Collect(context.Background()))
+	require.NoError(t, upkeeps.Drain(context.Background()))
 	require.Len(t, reported, 1)
 	require.Contains(t, reported[0], `agg "failing"`)
 
 	// Once the order is changed, the span can be computed.
 	require.NoError(t, set(t, db, orders, 2, order{Customer: "ann", Amount: 14, At: day(2)}))
 	reported = nil
-	require.NoError(t, collector.Collect(context.Background()))
+	require.NoError(t, upkeeps.Drain(context.Background()))
 	require.Empty(t, reported)
 	require.NoError(t, db.View(func(tx kv.Tx) error {
 		got, ok, err := failing.Instantiate(tx).AtCollected(agg.Daily, "ann", day(2))
@@ -709,7 +710,7 @@ func TestCollectorPutsFailuresAside(t *testing.T) {
 	}))
 }
 
-func TestCollectorRun(t *testing.T) {
+func TestUpkeepRun(t *testing.T) {
 	db := memkv.New()
 	orders := extstore.New[int64, order]("orders")
 	total := agg.Sum(orders, "total", amount)
@@ -717,7 +718,7 @@ func TestCollectorRun(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- agg.NewCollector(db, []agg.Source{orders}, agg.WithInterval(5*time.Millisecond)).Run(ctx)
+		done <- upkeep.New(db, upkeep.WithInterval(5*time.Millisecond)).Add(orders).Run(ctx)
 	}()
 
 	require.NoError(t, set(t, db, orders, 1, order{Customer: "ann", Amount: 5}))
@@ -734,9 +735,9 @@ func TestCollectorRun(t *testing.T) {
 	cancel()
 	require.ErrorIs(t, <-done, context.Canceled)
 
-	// A collector that is asked to collect with a context that is done does not go on.
+	// A runner that is asked to drain with a context that is done does not go on.
 	require.NoError(t, set(t, db, orders, 2, order{Customer: "ann", Amount: 5}))
-	require.ErrorIs(t, agg.NewCollector(db, []agg.Source{orders}).Collect(ctx), context.Canceled)
+	require.ErrorIs(t, upkeep.New(db).Add(orders).Drain(ctx), context.Canceled)
 }
 
 // slowDB is a database whose writing transactions take a while.
@@ -750,7 +751,9 @@ func (s slowDB) Update(fn func(kv.Tx) error) error {
 	return s.DB.Update(fn)
 }
 
-func TestCollectorSpawn(t *testing.T) {
+// TestUpkeepSpawn checks what the aggregations need of a runner that is spawned. That it is
+// one runner, and how it stops, is tested in the upkeep package.
+func TestUpkeepSpawn(t *testing.T) {
 	db := memkv.New()
 	orders := extstore.New[int64, order]("orders")
 	total := agg.Sum(orders, "total", amount)
@@ -770,46 +773,27 @@ func TestCollectorSpawn(t *testing.T) {
 	}
 	ctx := context.Background()
 
-	// Shutting down a collector that was never spawned does nothing.
-	c := agg.NewCollector(db, []agg.Source{orders}, agg.WithInterval(2*time.Millisecond))
-	require.NoError(t, c.Shutdown(ctx))
-
-	// A collector that is spawned collects, and spawning it again leaves it as it is.
-	c.Spawn(ctx)
-	c.Spawn(ctx)
+	// A runner that is spawned collects.
+	r := upkeep.New(db, upkeep.WithInterval(2*time.Millisecond)).Add(orders)
+	r.Spawn(ctx)
 	require.NoError(t, set(t, db, orders, 1, order{Customer: "ann", Amount: 5}))
 	collects(5)
 
-	// Once it is shut down it collects no more, however often it is shut down.
-	require.NoError(t, c.Shutdown(ctx))
-	require.NoError(t, c.Shutdown(ctx))
+	// Once it is shut down it collects no more.
+	require.NoError(t, r.Shutdown(ctx))
 	require.NoError(t, set(t, db, orders, 2, order{Customer: "ann", Amount: 7}))
 	time.Sleep(30 * time.Millisecond)
 	require.Equal(t, int64(5), collected())
 
-	// What was not collected is still noted, for the collector when it is spawned again.
-	c.Spawn(ctx)
+	// What was not collected is still noted, for the runner when it is spawned again.
+	r.Spawn(ctx)
 	collects(12)
-
-	// It stops with its context too, and can be spawned again after that.
-	parent, cancel := context.WithCancel(ctx)
-	require.NoError(t, c.Shutdown(ctx))
-	c.Spawn(parent)
-	require.NoError(t, set(t, db, orders, 3, order{Customer: "ann", Amount: 1}))
-	collects(13)
-	cancel()
-	time.Sleep(10 * time.Millisecond)
-	require.NoError(t, set(t, db, orders, 4, order{Customer: "ann", Amount: 1}))
-	time.Sleep(30 * time.Millisecond)
-	require.Equal(t, int64(13), collected())
-	c.Spawn(ctx)
-	collects(14)
-	require.NoError(t, c.Shutdown(ctx))
+	require.NoError(t, r.Shutdown(ctx))
 
 	t.Run("WhileCollecting", func(t *testing.T) {
-		// A collector that is in the middle of a batch finishes it. Whoever shuts it down
-		// can stop waiting for that, and the collector stops all the same.
-		slow := agg.NewCollector(slowDB{DB: db, delay: 150 * time.Millisecond}, []agg.Source{orders}, agg.WithInterval(time.Millisecond))
+		// A runner that is in the middle of a batch finishes it. Whoever shuts it down
+		// can stop waiting for that, and the runner stops all the same.
+		slow := upkeep.New(slowDB{DB: db, delay: 150 * time.Millisecond}, upkeep.WithInterval(time.Millisecond)).Add(orders)
 		for id := int64(10); id < 20; id++ {
 			require.NoError(t, set(t, db, orders, id, order{Customer: "ann", Amount: 1}))
 		}
@@ -825,11 +809,11 @@ func TestCollectorSpawn(t *testing.T) {
 		require.NoError(t, db.View(func(tx kv.Tx) error {
 			sum, _, err := total.Instantiate(tx).Get("ann")
 			require.NoError(t, err)
-			require.Equal(t, int64(24), sum)
+			require.Equal(t, int64(22), sum)
 			return nil
 		}))
-		require.NoError(t, agg.NewCollector(db, []agg.Source{orders}).Collect(ctx))
-		require.Equal(t, int64(24), collected())
+		require.NoError(t, upkeep.New(db).Add(orders).Drain(ctx))
+		require.Equal(t, int64(22), collected())
 	})
 }
 
@@ -838,7 +822,7 @@ func TestCollectorSpawn(t *testing.T) {
 func TestConcurrentWriters(t *testing.T) {
 	const writers, perWriter = 8, 40
 
-	run := func(t *testing.T, withCollector bool) {
+	run := func(t *testing.T, withUpkeep bool) {
 		raw, err := badger.Open(badger.DefaultOptions("").WithInMemory(true).WithLoggingLevel(badger.ERROR))
 		require.NoError(t, err)
 		defer raw.Close()
@@ -853,10 +837,10 @@ func TestConcurrentWriters(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		var background sync.WaitGroup
-		if withCollector {
-			collector := agg.NewCollector(db, []agg.Source{orders}, agg.WithInterval(time.Millisecond), agg.WithBatchSize(16),
-				agg.WithErrorHandler(func(err error) { t.Errorf("collector: %v", err) }))
-			background.Go(func() { collector.Run(ctx) })
+		if withUpkeep {
+			upkeeps := upkeep.New(db, upkeep.WithInterval(time.Millisecond), upkeep.WithBatchSize(16),
+				upkeep.WithErrorHandler(func(err error) { t.Errorf("upkeep: %v", err) })).Add(orders)
+			background.Go(func() { upkeeps.Run(ctx) })
 
 			// What is read is exact all along: it never goes down, and never past what was written.
 			background.Go(func() {
@@ -925,20 +909,20 @@ func TestConcurrentWriters(t *testing.T) {
 			}))
 		}
 		check(false)
-		require.NoError(t, agg.NewCollector(db, []agg.Source{orders}).Collect(context.Background()))
+		require.NoError(t, upkeep.New(db).Add(orders).Drain(context.Background()))
 		check(true)
 	}
 
-	t.Run("WithoutCollector", func(t *testing.T) { run(t, false) })
-	t.Run("WithCollector", func(t *testing.T) { run(t, true) })
+	t.Run("WithoutUpkeep", func(t *testing.T) { run(t, false) })
+	t.Run("WithUpkeep", func(t *testing.T) { run(t, true) })
 }
 
 // BenchmarkWrites measures writing records into a store with aggregations of both kinds,
-// with and without a collector running, to show what the notes that are left to be read and
+// with and without an upkeep runner running, to show what the notes that are left to be read and
 // deleted cost.
 func BenchmarkWrites(b *testing.B) {
-	for _, withCollector := range []bool{false, true} {
-		b.Run(fmt.Sprintf("Collector=%v", withCollector), func(b *testing.B) {
+	for _, withUpkeep := range []bool{false, true} {
+		b.Run(fmt.Sprintf("Upkeep=%v", withUpkeep), func(b *testing.B) {
 			db := testkv.NewBadger(b)
 			orders := extstore.New[int64, order]("orders")
 			total := agg.Sum(orders, "total", amount, agg.ByTime(at, agg.Daily, agg.AllTime))
@@ -946,8 +930,8 @@ func BenchmarkWrites(b *testing.B) {
 
 			ctx, cancel := context.WithCancel(context.Background())
 			var wg sync.WaitGroup
-			if withCollector {
-				wg.Go(func() { agg.NewCollector(db, []agg.Source{orders}, agg.WithInterval(10*time.Millisecond)).Run(ctx) })
+			if withUpkeep {
+				wg.Go(func() { upkeep.New(db, upkeep.WithInterval(10*time.Millisecond)).Add(orders).Run(ctx) })
 			}
 
 			b.ResetTimer()
@@ -1060,7 +1044,7 @@ func TestTypedGroups(t *testing.T) {
 
 		write()
 		check(false)
-		require.NoError(t, agg.NewCollector(db, []agg.Source{purchases}, agg.WithBatchSize(2)).Collect(context.Background()))
+		require.NoError(t, upkeep.New(db, upkeep.WithBatchSize(2)).Add(purchases).Drain(context.Background()))
 		check(false)
 		check(true)
 	})

@@ -110,7 +110,7 @@ func bisect(metric Metric, dims int, vectors [][]byte) (side []uint8, c0, c1 []f
 // bisectBalanced is bisect, except that it splits at the median if the smaller of the two sides
 // has fewer than an eighth of the vectors. Otherwise an outlier would be split off from its
 // partition into a partition of its own, which is dissolved for having too few vectors, placed
-// back and split off again, for as long as the maintainer runs. The vectors are put in order by
+// back and split off again, for as long as the upkeep runner runs. The vectors are put in order by
 // how much nearer they are to the first centre than to the second, and the first half is the
 // side 0.
 func bisectBalanced(metric Metric, dims int, vectors [][]byte) (side []uint8, c0, c1 []float32) {

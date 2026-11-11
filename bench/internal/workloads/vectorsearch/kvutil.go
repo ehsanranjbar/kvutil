@@ -17,6 +17,7 @@ import (
 	"github.com/ehsanranjbar/kvutil/migrate"
 	"github.com/ehsanranjbar/kvutil/query"
 	extstore "github.com/ehsanranjbar/kvutil/store/ext"
+	"github.com/ehsanranjbar/kvutil/upkeep"
 	"github.com/ehsanranjbar/kvutil/vector"
 )
 
@@ -170,8 +171,8 @@ func (t *kvTarget) insert(_ context.Context, d *doc) error {
 	return t.db.Update(func(tx kv.Tx) error { return t.docs.Instantiate(tx).Set(d.ID, d) })
 }
 
-// maintain runs a maintainer of the partitions while documents are inserted, as a program that has
-// a partitioned index would.
+// maintain runs an upkeep runner that keeps the partitions while documents are inserted, as a program
+// that has a partitioned index would.
 func (t *kvTarget) maintain(ctx context.Context) (func() error, error) {
 	if t.kind == "exact" {
 		return func() error { return nil }, nil
@@ -180,13 +181,13 @@ func (t *kvTarget) maintain(ctx context.Context) (func() error, error) {
 		mu    sync.Mutex
 		first error
 	)
-	m := vector.NewMaintainer(t.db, []vector.Source{t.docs}, vector.WithErrorHandler(func(err error) {
+	m := upkeep.New(t.db, upkeep.WithErrorHandler(func(err error) {
 		mu.Lock()
 		defer mu.Unlock()
 		if first == nil {
 			first = err
 		}
-	}))
+	})).Add(t.docs)
 	m.Spawn(ctx)
 	return func() error {
 		if err := m.Shutdown(context.WithoutCancel(ctx)); err != nil {
@@ -195,7 +196,7 @@ func (t *kvTarget) maintain(ctx context.Context) (func() error, error) {
 		mu.Lock()
 		defer mu.Unlock()
 		if first != nil {
-			return fmt.Errorf("the maintainer: %w", first)
+			return fmt.Errorf("the upkeep runner: %w", first)
 		}
 		return nil
 	}, nil

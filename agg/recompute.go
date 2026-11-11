@@ -17,7 +17,7 @@ import (
 // Recompute defines an aggregation on a store that is kept by computing the state of a span
 // again from what the records in it contribute, whenever one of them changes.
 //
-// Writing a record stores what it contributes and marks its span as changed, and the collector
+// Writing a record stores what it contributes and marks its span as changed, and the upkeep runner
 // computes the states of the marked spans. The function can be any function, as it is given
 // all the contributions of a span, in the order of their times. The cost of a change is that
 // its whole span is computed again, so the spans should not be large: WithMerge keeps them
@@ -148,7 +148,7 @@ func (r *recomputeKind[X, S]) computeSpan(tx *prefix.Tx, b Bucket, group []byte,
 		return state, false, nil
 	}
 
-	// A function of the user that panics must not take the collector down with it.
+	// A function of the user that panics must not take the upkeep runner down with it.
 	defer func() {
 		if p := recover(); p != nil {
 			err = fmt.Errorf("agg %q: the function panicked: %v", r.name, p)

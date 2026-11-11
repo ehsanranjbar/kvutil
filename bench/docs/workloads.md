@@ -276,7 +276,7 @@ sums and maxima are exact on every system and cannot drift), `at` has the resolu
 
 | System | Variant | What it keeps | What a read does |
 | --- | --- | --- | --- |
-| kvutil | `collector` (writes, rebuild), `exact`, `collected` (reads, freshness) | Three aggregations on a record store of the events (below). The collector runs with `agg.WithInterval(KVB_AGG_INTERVAL)` (1 s), `Spawn`ed while writes go on | `exact`: `Series`, `At`, `Get`, which fold the notes that are not collected yet; `collected`: `SeriesCollected`, `AtCollected`, `GetCollected`, the stored states only |
+| kvutil | `collector` (writes, rebuild), `exact`, `collected` (reads, freshness) | Three aggregations on a record store of the events (below). The collector (an `upkeep.Runner`) runs with `upkeep.WithInterval(KVB_AGG_INTERVAL)` (1 s), `Spawn`ed while writes go on | `exact`: `Series`, `At`, `Get`, which fold the notes that are not collected yet; `collected`: `SeriesCollected`, `AtCollected`, `GetCollected`, the stored states only |
 | PostgreSQL | `computed` | Nothing: `events` with an index on `(customer, at)` | `GROUP BY date_trunc(…, 'UTC')` at read time |
 | | `trigger` | `daily_summary(customer, day, sum_amount, cnt, max_amount)` kept by a row trigger for every insert, update and delete | The summary (`date_trunc` over its days for weeks and months) |
 | TimescaleDB | `realtime` | Hypertable `events` and the continuous aggregates `daily`, `weekly` and `monthly`, with `materialized_only = false`; the policies refresh up to an hour ago | The aggregate: its materialization up to the watermark, and the hypertable after it |
@@ -292,10 +292,10 @@ sum   := agg.Sum(events, "amount_sum", amount, agg.ByTime(at, agg.Daily, agg.Wee
 count := agg.Count(events, "event_count", func(e *Event) (string, bool) { return e.Customer, true },
                    agg.ByTime(at, agg.Daily, agg.Weekly, agg.Monthly, agg.AllTime))
 max   := agg.Max(events, "amount_max", amount, agg.ByTime(at, agg.Daily, agg.Weekly, agg.Monthly))
-collector := agg.NewCollector(db, []agg.Source{events}, agg.WithInterval(interval))
+upkeeps := upkeep.New(db, upkeep.WithInterval(interval)).Add(events)
 ```
 
-`Sum` and `Count` are delta aggregations (a note for each write, folded by the collector into the
+`Sum` and `Count` are delta aggregations (a note for each write, folded by the upkeep runner into the
 four states of the customer). `Max` is a recomputed one: `agg.Max` gives it `WithMerge`, so only the
 days are stored and the weeks and months are put together from them when they are read. The
 workload asks for the days and the months; the weeks cost nothing more (they are merged), and give
@@ -735,7 +735,7 @@ are in the results with the size on disk after them.
 
 All have `index.On` of `Lang` and of `Year` in kvutil, and B-trees on `lang` and `year` in
 PostgreSQL, built in the same phase. The table is `docs(id bigint PRIMARY KEY, lang text, year int,
-embedding vector(384))`. The `partitioned` and `quantized` variants run a `vector.Maintainer`
+embedding vector(384))`. The `partitioned` and `quantized` variants run an `upkeep.Runner`
 (`Spawn`ed, default interval) during the `insert` case, and shut it down after: it places the new
 vectors in the partitions as they come.
 
@@ -810,7 +810,7 @@ queries per second against recall for the sweeps.
   parallel workers; the build time of `hnsw` is the one of those settings. IVFFlat is built after
   the load, as its documentation says, so its centroids are from the documents.
 * The recall of a case is of the state of the database before the case; the `insert` case, the
-  last, adds to it, and the partitions of kvutil are kept by the maintainer, whose state at the end is
+  last, adds to it, and the partitions of kvutil are kept by the upkeep runner, whose state at the end is
   not measured.
 * The workload needs pgvector, so it runs on the `postgres` service and not on `--pg-service timescaledb`.
 
