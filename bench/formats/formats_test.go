@@ -1,6 +1,8 @@
 package formats
 
 import (
+	"reflect"
+	"sync"
 	"testing"
 	"time"
 
@@ -280,4 +282,170 @@ func TestCorruptFlatBuffer(t *testing.T) {
 	bz := EncodeOrderFB(flatbuffers.NewBuilder(0), testOrders(dataset.Small, 1)[0])
 	_, err := DecodeOrderFB(bz[:6])
 	require.Error(t, err)
+}
+
+// ---------------------------------------------------------------------------------------------
+// The record types of the codec.Binary codecs, and their partial decoding.
+
+// recordPaths are the names of the fields of a record that are in its encoding (all but the ID).
+func recordPaths[V any]() []string {
+	t := reflect.TypeFor[V]()
+	var ps []string
+	for i := range t.NumField() {
+		if n := t.Field(i).Name; n != "ID" {
+			ps = append(ps, n)
+		}
+	}
+	return ps
+}
+
+func convertAll[V, S any](srcs []S, conv func(S) V) []V {
+	out := make([]V, len(srcs))
+	for i, s := range srcs {
+		out[i] = conv(s)
+	}
+	return out
+}
+
+// testBinaryRecord checks a record type through codec.Binary: the round trip, and the partial
+// decoding of each field alone (the field equals the one of the full decode and the others are
+// zero), of all the fields at once, of a path that is not known (everything is decoded), and that
+// the result does not refer to the input.
+func testBinaryRecord[V any](t *testing.T, c codec.ValueCodec[V], srcs []V) {
+	paths := recordPaths[V]()
+	for _, src := range srcs {
+		bz, err := c.Encode(src)
+		require.NoError(t, err)
+		full, err := c.Decode(bz)
+		require.NoError(t, err)
+		require.Equal(t, src, full, "round trip")
+
+		for _, path := range paths {
+			dec, ok := codec.PartialOf(c, []string{path})
+			require.True(t, ok, path)
+			var got V
+			require.NoError(t, dec(bz, &got), path)
+			gv, fv := reflect.ValueOf(&got).Elem(), reflect.ValueOf(&full).Elem()
+			for i := range gv.NumField() {
+				name := gv.Type().Field(i).Name
+				if name == path {
+					require.Equal(t, fv.Field(i).Interface(), gv.Field(i).Interface(), path)
+				} else {
+					require.True(t, gv.Field(i).IsZero(), "%s decoded when only %s is asked for", name, path)
+				}
+			}
+		}
+
+		dec, ok := codec.PartialOf(c, paths)
+		require.True(t, ok)
+		var got V
+		require.NoError(t, dec(bz, &got))
+		require.Equal(t, full, got, "all the paths")
+
+		dec, ok = codec.PartialOf(c, []string{"Bogus"})
+		require.True(t, ok)
+		got = *new(V)
+		require.NoError(t, dec(bz, &got))
+		require.Equal(t, full, got, "an unknown path decodes everything")
+
+		dec, ok = codec.PartialOf(c, []string{paths[len(paths)-1], "Bogus"})
+		require.True(t, ok)
+		got = *new(V)
+		require.NoError(t, dec(bz, &got))
+		require.Equal(t, full, got, "an unknown path after a known one")
+
+		// The result does not refer to the input.
+		// (full was decoded before, and a decode copies.)
+		dec, _ = codec.PartialOf(c, paths)
+		got = *new(V)
+		require.NoError(t, dec(bz, &got))
+		clear(bz)
+		require.Equal(t, full, got, "the input is overwritten")
+	}
+}
+
+func TestPartialOrder(t *testing.T) {
+	for _, size := range []dataset.ValueSize{dataset.Small, dataset.Large} {
+		srcs := convertAll(testOrders(size, 20), func(o *dataset.Order) dataset.Order { return order(o) })
+		testBinaryRecord(t, codec.Binary[OrderBin](), convertAll(srcs, func(o dataset.Order) OrderBin { return OrderBin(o) }))
+		testBinaryRecord(t, codec.Binary[OrderFB](), convertAll(srcs, func(o dataset.Order) OrderFB { return OrderFB(o) }))
+		testBinaryRecord(t, codec.Binary[OrderCapnp](), convertAll(srcs, func(o dataset.Order) OrderCapnp { return OrderCapnp(o) }))
+		testBinaryRecord(t, codec.Binary[OrderCapnpReuse](), convertAll(srcs, func(o dataset.Order) OrderCapnpReuse { return OrderCapnpReuse(o) }))
+	}
+}
+
+func TestPartialBook(t *testing.T) {
+	for _, size := range []dataset.ValueSize{dataset.Small, dataset.Large} {
+		srcs := convertAll(testBooks(size, 20), func(b *dataset.Book) dataset.Book { return book(b) })
+		testBinaryRecord(t, codec.Binary[BookFB](), convertAll(srcs, func(b dataset.Book) BookFB { return BookFB(b) }))
+		testBinaryRecord(t, codec.Binary[BookCapnp](), convertAll(srcs, func(b dataset.Book) BookCapnp { return BookCapnp(b) }))
+		testBinaryRecord(t, codec.Binary[BookCapnpReuse](), convertAll(srcs, func(b dataset.Book) BookCapnpReuse { return BookCapnpReuse(b) }))
+	}
+}
+
+func TestPartialDoc(t *testing.T) {
+	srcs := convertAll(testDocs(20), func(d *dataset.Doc) dataset.Doc { return doc(d) })
+	testBinaryRecord(t, codec.Binary[DocFB](), convertAll(srcs, func(d dataset.Doc) DocFB { return DocFB(d) }))
+	testBinaryRecord(t, codec.Binary[DocCapnp](), convertAll(srcs, func(d dataset.Doc) DocCapnp { return DocCapnp(d) }))
+	testBinaryRecord(t, codec.Binary[DocCapnpReuse](), convertAll(srcs, func(d dataset.Doc) DocCapnpReuse { return DocCapnpReuse(d) }))
+}
+
+// A truncated or corrupt encoding is an error and not a panic, in a partial decode too.
+func TestPartialCorrupt(t *testing.T) {
+	src := OrderFB(order(testOrders(dataset.Small, 1)[0]))
+	cf := codec.Binary[OrderFB]()
+	bz, err := cf.Encode(src)
+	require.NoError(t, err)
+	decF, _ := codec.PartialOf(cf, []string{"Total"})
+	var gotF OrderFB
+	require.Error(t, decF(bz[:6], &gotF))
+
+	cc := codec.Binary[OrderCapnp]()
+	bz, err = cc.Encode(OrderCapnp(src))
+	require.NoError(t, err)
+	dec, _ := codec.PartialOf(cc, []string{"Total"})
+	var gotC OrderCapnp
+	require.Error(t, dec(bz[:5], &gotC))
+
+	cb := codec.Binary[OrderBin]()
+	bz, err = cb.Encode(OrderBin(src))
+	require.NoError(t, err)
+	dec2, _ := codec.PartialOf(cb, []string{"Payload"})
+	var gotB OrderBin
+	require.Error(t, dec2(bz[:len(bz)-1], &gotB))
+}
+
+// The pooled readers of the Reuse types are safe for concurrent use, and one decode does not
+// disturb another.
+func TestPartialReuseConcurrent(t *testing.T) {
+	c := codec.Binary[OrderCapnpReuse]()
+	srcs := convertAll(testOrders(dataset.Small, 16), func(o *dataset.Order) OrderCapnpReuse { return OrderCapnpReuse(order(o)) })
+	var bzs [][]byte
+	for _, s := range srcs {
+		bz, err := c.Encode(s)
+		require.NoError(t, err)
+		bzs = append(bzs, bz)
+	}
+	dec, ok := codec.PartialOf(c, []string{"Customer", "Total"})
+	require.True(t, ok)
+
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Go(func() {
+			for round := range 200 {
+				i := round % len(bzs)
+				var got OrderCapnpReuse
+				if err := dec(bzs[i], &got); err != nil || got.Total != srcs[i].Total || got.Customer != srcs[i].Customer {
+					t.Errorf("record %d: %v %v", i, err, got)
+					return
+				}
+				full, err := c.Decode(bzs[i])
+				if err != nil || !reflect.DeepEqual(full, srcs[i]) {
+					t.Errorf("record %d: full decode differs: %v", i, err)
+					return
+				}
+			}
+		})
+	}
+	wg.Wait()
 }

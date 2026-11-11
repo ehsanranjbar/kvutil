@@ -6,8 +6,8 @@ package formats
 //
 // Run them with
 //
-//	go test -run '^$' -bench . -benchmem -count 10 | tee formats.txt
-//	benchstat -col /format formats.txt
+//	go test -run '^$' -bench . -benchmem -count 10 -timeout 60m | tee out.txt
+//	benchstat -col /format -row /type,/op,/how out.txt
 //
 // The names are BenchmarkFormats/type=T/op=O/how=H/format=F, so that benchstat can pivot on any of
 // them. The types are order-small, order-large (the order with a payload of 4096 bytes), book and
@@ -23,8 +23,22 @@ package formats
 //
 // and how is "full" for what builds the record of Go (every encode, and a read that decodes the
 // record and then reads the field), and "native" for what reads the bytes with the accessors of
-// the format and builds nothing. Msgpack and binary have only "full". (A later stage adds
-// how=partial, which is kvutil's partial decoding: add a value of how to the table of a group.)
+// the format and builds nothing. Msgpack and binary have only "full" and "partial".
+//
+// "partial" is kvutil's partial decoding, which is what a query does per record that it rejects
+// on a field: the decoder is prepared once, codec.PartialOf(c, []string{"Total"}), and then each
+// record is a zeroed scratch value, dec(bz, &v) and the read of the field. The codecs are the
+// ones that a store is given: codec.Formatted[T](codec.Msgpack) (a narrower struct that skips the
+// other fields of the map), codec.Binary[OrderBin] (walks and skips the fields before the one it
+// wants), and codec.Binary[OrderFB], codec.Binary[OrderCapnp] and codec.Binary[OrderCapnpReuse]
+// (partial.go: the accessor of the format straight from the bytes, and a copy). capnp does
+// capnp.Unmarshal per record, as a store has to; capnp-reuse gets its message from a sync.Pool.
+// A setup fails the benchmark if PartialOf has no decoder, or if a decoded field differs from the
+// source, so that a row cannot silently be a full decode.
+//
+// The full rows of flatbuffers and capnp call the decoders of convert.go. They are not repeated
+// through codec.Binary: its Decode is those decoders (capnp.Unmarshal for capnp) and one copy of
+// the struct, which is the same work.
 //
 // The rules that keep it fair:
 //
@@ -47,6 +61,7 @@ package formats
 // Every benchmark calls b.ReportAllocs.
 
 import (
+	"fmt"
 	"testing"
 
 	capnp "capnproto.org/go/capnp/v3"
@@ -86,6 +101,24 @@ type benchCase struct {
 	setup           func() (step func(i int) int)
 }
 
+// setupFailure is what a setup panics with (see failSetup) to fail its benchmark.
+type setupFailure string
+
+func failSetup(format string, args ...any) { panic(setupFailure(fmt.Sprintf(format, args...))) }
+
+// start runs the setup, and fails the benchmark if the setup says so.
+func (c benchCase) start(b *testing.B) func(int) int {
+	defer func() {
+		if r := recover(); r != nil {
+			if f, ok := r.(setupFailure); ok {
+				b.Fatal(string(f))
+			}
+			panic(r)
+		}
+	}()
+	return c.setup()
+}
+
 // The ops.
 const (
 	opEncode     = "encode"
@@ -98,8 +131,9 @@ const (
 
 // The values of how.
 const (
-	howFull   = "full"
-	howNative = "native"
+	howFull    = "full"
+	howNative  = "native"
+	howPartial = "partial"
 )
 
 // fullFormat is a format with the functions that make and read the record of Go. newEnc and
@@ -119,6 +153,29 @@ type reads[T any] struct {
 	scalar    func(*T) int
 	str       func(*T) string  // nil if the type has no string to read
 	embedding func(*T) float32 // nil if the type has no embedding
+	// The Go struct fields that the reads read, which are what a partial decoding is asked for.
+	scalarField, strField, embField string
+}
+
+// partialFormat is a codec that a store is given and that can decode some fields: the rows of
+// how=partial. T is the record of the dataset and the codec is of a type with its underlying type.
+type partialFormat[T any] struct {
+	format string
+	// from is the format whose encoding the codec reads (the format of group.formats).
+	from string
+	// prepare returns the decoder of the fields, or false if the codec has none.
+	prepare func(fields []string) (func(bz []byte, v *T) error, bool)
+}
+
+// partialOf is the row of a codec of V, where conv views a *T as a *V.
+func partialOf[T, V any](format, from string, c codec.ValueCodec[V], conv func(*T) *V) partialFormat[T] {
+	return partialFormat[T]{format, from, func(fields []string) (func([]byte, *T) error, bool) {
+		dec, ok := codec.PartialOf(c, fields)
+		if !ok {
+			return nil, false
+		}
+		return func(bz []byte, v *T) error { return dec(bz, conv(v)) }, true
+	}}
 }
 
 // native is how to read a field from the bytes of FlatBuffers and of Cap'n Proto.
@@ -140,6 +197,8 @@ type group[T any] struct {
 	native  native
 	// capnpReaders are the rows that read natively from a message, by the format that opens it.
 	capnpReaders []capnpReader
+	// partials are the rows of how=partial.
+	partials []partialFormat[T]
 
 	encoded map[string][][]byte
 }
@@ -290,6 +349,57 @@ func (g *group[T]) cases() []benchCase {
 			}})
 		}
 	}
+	return append(cs, g.partialCases()...)
+}
+
+// partialCases are the rows of how=partial: for each codec and each read, the decoder of the
+// field is prepared once, and a record is a zeroed scratch value, a partial decode and the read.
+func (g *group[T]) partialCases() []benchCase {
+	r := g.reads
+	type fieldRead struct {
+		op, field string
+		read      func(*T) int
+		same      func(a, b *T) bool
+	}
+	ops := []fieldRead{{r.scalarOp, r.scalarField,
+		r.scalar,
+		func(a, b *T) bool { return r.scalar(a) == r.scalar(b) }}}
+	if r.str != nil {
+		ops = append(ops, fieldRead{opString, r.strField,
+			func(v *T) int { sinkStr = r.str(v); return len(sinkStr) },
+			func(a, b *T) bool { return r.str(a) == r.str(b) }})
+	}
+	if r.embedding != nil {
+		ops = append(ops, fieldRead{opEmbedding, r.embField,
+			func(v *T) int { sinkF = r.embedding(v); return 0 },
+			func(a, b *T) bool { return r.embedding(a) == r.embedding(b) }})
+	}
+
+	var cs []benchCase
+	for _, p := range g.partials {
+		for _, o := range ops {
+			cs = append(cs, benchCase{o.op, howPartial, p.format, func() func(int) int {
+				dec, ok := p.prepare([]string{o.field})
+				if !ok {
+					failSetup("codec.PartialOf has no decoder of %s for %s: the row would not be a partial decode", o.field, p.format)
+				}
+				bzs := g.encodedNative(p.from)
+				for i, bz := range bzs { // the decoder reads the field that the row says it does
+					var got T
+					must(dec(bz, &got))
+					if !o.same(&got, &g.vals[i]) {
+						failSetup("%s of %s: the partial decode of record %d differs from the source", o.field, p.format, i)
+					}
+				}
+				var v, zero T
+				return func(i int) int {
+					v = zero
+					must(dec(bzs[i], &v))
+					return o.read(&v)
+				}
+			}})
+		}
+	}
 	return cs
 }
 
@@ -317,7 +427,7 @@ func BenchmarkFormats(b *testing.B) {
 		b.Run("type="+g.name(), func(b *testing.B) {
 			for _, c := range g.cases() {
 				b.Run("op="+c.op+"/how="+c.how+"/format="+c.format, func(b *testing.B) {
-					step := c.setup()
+					step := c.start(b)
 					b.ReportAllocs()
 					if c.op == opEncode {
 						total := 0
@@ -442,6 +552,8 @@ func orderGroup(name string, size dataset.ValueSize) runner {
 			scalarOp: opScalar,
 			scalar:   func(o *dataset.Order) int { return int(o.Total) },
 			str:      func(o *dataset.Order) string { return o.Customer },
+
+			scalarField: "Total", strField: "Customer",
 		},
 		native: native{
 			fbScalar: func(bz []byte) int { return int(fbgen.GetRootAsOrder(bz, 0).Total()) },
@@ -478,6 +590,13 @@ func orderGroup(name string, size dataset.ValueSize) runner {
 	})
 	g.formats = append(g.formats, fbFormats(BuildOrderFB, EncodeOrderFB, DecodeOrderFB)...)
 	g.formats = append(g.formats, capnpFormats((*CapnpWriter).EncodeOrder, DecodeOrderCapnp)...)
+	g.partials = []partialFormat[dataset.Order]{
+		partialOf("msgpack", "msgpack", codec.Formatted[dataset.Order](codec.Msgpack), func(o *dataset.Order) *dataset.Order { return o }),
+		partialOf("binary", "binary", bin, func(o *dataset.Order) *OrderBin { return (*OrderBin)(o) }),
+		partialOf("flatbuffers", "flatbuffers", codec.Binary[OrderFB](), func(o *dataset.Order) *OrderFB { return (*OrderFB)(o) }),
+		partialOf("capnp", "capnp", codec.Binary[OrderCapnp](), func(o *dataset.Order) *OrderCapnp { return (*OrderCapnp)(o) }),
+		partialOf("capnp-reuse", "capnp", codec.Binary[OrderCapnpReuse](), func(o *dataset.Order) *OrderCapnpReuse { return (*OrderCapnpReuse)(o) }),
+	}
 	return namedGroup{name, g.cases}
 }
 
@@ -496,6 +615,8 @@ func bookGroup() runner {
 			scalarOp: opScalar,
 			scalar:   func(b *dataset.Book) int { return int(b.Year) },
 			str:      func(b *dataset.Book) string { return b.Title },
+
+			scalarField: "Year", strField: "Title",
 		},
 		native: native{
 			fbScalar: func(bz []byte) int { return int(fbgen.GetRootAsBook(bz, 0).Year()) },
@@ -518,6 +639,12 @@ func bookGroup() runner {
 	g.formats = append(g.formats, msgpackFormat[dataset.Book]())
 	g.formats = append(g.formats, fbFormats(BuildBookFB, EncodeBookFB, DecodeBookFB)...)
 	g.formats = append(g.formats, capnpFormats((*CapnpWriter).EncodeBook, DecodeBookCapnp)...)
+	g.partials = []partialFormat[dataset.Book]{
+		partialOf("msgpack", "msgpack", codec.Formatted[dataset.Book](codec.Msgpack), func(b *dataset.Book) *dataset.Book { return b }),
+		partialOf("flatbuffers", "flatbuffers", codec.Binary[BookFB](), func(b *dataset.Book) *BookFB { return (*BookFB)(b) }),
+		partialOf("capnp", "capnp", codec.Binary[BookCapnp](), func(b *dataset.Book) *BookCapnp { return (*BookCapnp)(b) }),
+		partialOf("capnp-reuse", "capnp", codec.Binary[BookCapnpReuse](), func(b *dataset.Book) *BookCapnpReuse { return (*BookCapnpReuse)(b) }),
+	}
 	return namedGroup{"book", g.cases}
 }
 
@@ -542,6 +669,8 @@ func docGroup() runner {
 			scalarOp:  opNearEmb,
 			scalar:    func(d *dataset.Doc) int { return d.Year },
 			embedding: sum,
+
+			scalarField: "Year", embField: "Embedding",
 		},
 		native: native{
 			fbScalar: func(bz []byte) int { return int(fbgen.GetRootAsDoc(bz, 0).Year()) },
@@ -573,5 +702,11 @@ func docGroup() runner {
 	g.formats = append(g.formats, msgpackFormat[dataset.Doc]())
 	g.formats = append(g.formats, fbFormats(BuildDocFB, EncodeDocFB, DecodeDocFB)...)
 	g.formats = append(g.formats, capnpFormats((*CapnpWriter).EncodeDoc, DecodeDocCapnp)...)
+	g.partials = []partialFormat[dataset.Doc]{
+		partialOf("msgpack", "msgpack", codec.Formatted[dataset.Doc](codec.Msgpack), func(d *dataset.Doc) *dataset.Doc { return d }),
+		partialOf("flatbuffers", "flatbuffers", codec.Binary[DocFB](), func(d *dataset.Doc) *DocFB { return (*DocFB)(d) }),
+		partialOf("capnp", "capnp", codec.Binary[DocCapnp](), func(d *dataset.Doc) *DocCapnp { return (*DocCapnp)(d) }),
+		partialOf("capnp-reuse", "capnp", codec.Binary[DocCapnpReuse](), func(d *dataset.Doc) *DocCapnpReuse { return (*DocCapnpReuse)(d) }),
+	}
 	return namedGroup{"doc", g.cases}
 }
