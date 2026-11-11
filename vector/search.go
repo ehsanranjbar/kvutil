@@ -610,23 +610,18 @@ func (s Search[K, V]) scanCodes(
 	}
 
 	// The vectors are read in the order of their keys, which is the order they are stored in, so
-	// that the reads of a partition follow each other.
+	// that the reads of a partition follow each other. Each is a point read: an engine of LSM
+	// trees, like Badger, skips the tables that do not have a key by their bloom filters, which
+	// the seek of an iterator cannot, and a seek in a database of many tables cost 25 µs a vector.
 	slices.SortFunc(kept, func(a, b candidate) int {
 		return cmp.Or(cmp.Compare(a.pid, b.pid), bytes.Compare(a.rawKey, b.rawKey))
 	})
-	it, err := s.ins.data.Iterator([]byte{vectorsKey}, []byte{vectorsKey + 1})
-	if err != nil {
-		return err
-	}
-	defer it.Close()
 	for _, c := range kept {
-		want := vectorKey(c.pid, c.rawKey)
-		it.Seek(want)
+		stored, err := s.ins.data.Get(vectorKey(c.pid, c.rawKey))
 		// A vector is removed together with its code, in the same transaction.
-		if !it.Valid() || !bytes.Equal(it.Key(), want) {
+		if errors.Is(err, kv.ErrNotFound) {
 			return fmt.Errorf("%w: the key %x has a code in the partition %d, which has no vector of it", ErrCorrupt, c.rawKey, c.pid)
 		}
-		stored, err := it.Value()
 		if err != nil {
 			return err
 		}
