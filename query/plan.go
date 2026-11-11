@@ -35,6 +35,15 @@ const (
 	// conditions that are checked on them. It is what a limit is divided by to know how many
 	// records are read for it.
 	residualPass = 0.5
+
+	// prefilterRows is the most records that an index, or a combination of indexes, is estimated
+	// to find for the conditions of a query with Nearest, for the search to rank them instead of
+	// checking the conditions on the records itself. A vector search reads in the order of the
+	// square root of the vectors and stops at its limit, while every record that an access path
+	// finds is ranked, one point read each. So an index is read first when it finds few records:
+	// with the assumed store of 1,000,000 records, an equality on an indexed field (1%) is 10,000
+	// and is pre-filtered, and a one-sided range (30%) is not.
+	prefilterRows = 10_000
 )
 
 // delivery is whether, and how, the records of an access path come in the order that is asked for.
@@ -68,6 +77,13 @@ type plan[K, V any] struct {
 	// combo is set instead of index and ranges if the records are those of several indexes
 	// together: their intersection or their union.
 	combo *combo[K, V]
+
+	// near is set if the records are in the order of their distance, which the search of an index
+	// gives. The records are then ordered. If prefilter is set the search ranks what the access
+	// path (index, combo or the store) finds with all the conditions of the query checked; if not,
+	// check are the conditions that the search checks on the records.
+	near      Nearness[K, V]
+	prefilter bool
 
 	// indexOnly is set if the rows are made from the entries of the index, without getting the
 	// records: the index holds what is selected, what the check needs, and what the order needs
@@ -161,6 +177,10 @@ func (q *Query[K, V]) plan(sel *selection[V]) (*plan[K, V], error) {
 
 	if q.maxKeys < 0 {
 		return nil, fmt.Errorf("%w: the number of keys is %d", ErrNegative, q.maxKeys)
+	}
+	if q.near != nil {
+		// The rows are made from the records, which the search gives.
+		return q.planNearest()
 	}
 	order, err := q.orderFields()
 	if err != nil {

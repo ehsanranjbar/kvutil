@@ -15,6 +15,10 @@
 // A partitioned index can also be quantized (see Quantized): it keeps a code of one bit per
 // dimension of each vector in a partition, which a search reads instead of the vector, and then reads the
 // vectors of the best candidates only to give their exact distances and put them in order.
+//
+// The index is also an order of the records for a query of package query (see Index.To), which
+// does not depend on this package, nor this one on it: the order implements the interface that
+// the query asks for.
 package vector
 
 import (

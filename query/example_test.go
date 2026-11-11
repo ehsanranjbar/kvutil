@@ -10,6 +10,7 @@ import (
 	"github.com/ehsanranjbar/kvutil/kv/memkv"
 	"github.com/ehsanranjbar/kvutil/query"
 	extstore "github.com/ehsanranjbar/kvutil/store/ext"
+	"github.com/ehsanranjbar/kvutil/vector"
 )
 
 type Book struct {
@@ -114,4 +115,84 @@ func Example() {
 	// nothing
 	// Empty
 	// []
+}
+
+type Post struct {
+	Title     string
+	Lang      string
+	Embedding []float32
+}
+
+// ExampleQuery_Nearest orders the records by the distance of their vectors from a vector, which a
+// vector index measures. The conditions are read with an index, and the nearest of what it finds
+// are the results.
+func ExampleQuery_Nearest() {
+	posts := extstore.New[int64, Post]("posts")
+
+	lang := field.Path[Post, string]("Lang")
+	index.On(posts, "by_lang", lang)
+	byEmbedding := vector.On(posts, "by_embedding", 2, vector.Euclidean, func(p *Post) []float32 { return p.Embedding })
+
+	db := memkv.New()
+	if err := posts.Check(db); err != nil {
+		panic(err)
+	}
+	err := db.Update(func(tx kv.Tx) error {
+		store := posts.Instantiate(tx)
+		for id, post := range []Post{
+			{Title: "Tides", Lang: "en", Embedding: []float32{1, 2}},
+			{Title: "Moon", Lang: "en", Embedding: []float32{4, 5}},
+			{Title: "Marées", Lang: "fr", Embedding: []float32{1, 1.5}},
+			{Title: "Waves", Lang: "en", Embedding: []float32{2, 3}},
+			{Title: "Surf", Lang: "en", Embedding: []float32{1, 1}},
+			{Title: "Untitled", Lang: "en"},
+		} {
+			if err := store.Set(int64(id+1), &post); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		panic(err)
+	}
+
+	// The vector index is no index that the query reads for its conditions: the index of the
+	// language is, and the vectors of what it finds are compared with the query. A post without
+	// a vector is not among the results.
+	q := query.From(posts).
+		Where(lang.Eq("en")).
+		Nearest(byEmbedding.To([]float32{1, 1})).
+		Limit(3)
+
+	plan, err := q.Explain()
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(plan)
+
+	err = db.View(func(tx kv.Tx) error {
+		it := q.Run(tx)
+		defer it.Close()
+		for ; it.Valid(); it.Next() {
+			post, err := it.Value()
+			if err != nil {
+				return err
+			}
+			distance, _ := query.Distance(it)
+			fmt.Printf("%.2f %s\n", distance, post.Title)
+		}
+		return it.Err()
+	})
+	if err != nil {
+		panic(err)
+	}
+
+	// Output:
+	// Limit 3
+	// └─ Nearest by_embedding (exact)
+	//    └─ IndexLookup by_lang: 1 range
+	// 0.00 Surf
+	// 1.00 Tides
+	// 2.24 Waves
 }

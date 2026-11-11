@@ -142,6 +142,9 @@ type Row[K, V any] struct {
 	record *V
 	// sort are the keys that the row is sorted by, when it is made from an index and sorted.
 	sort []sortKey
+	// dist is the distance of the record, if the query is ordered by one (see Query.Nearest).
+	dist    float32
+	hasDist bool
 }
 
 // Key returns the key of the record of the row.
@@ -258,6 +261,9 @@ func (r *recordRows[K, V]) Value() (*Row[K, V], error) {
 	row := &Row[K, V]{key: key, run: r.run, record: record, values: make([][]any, len(r.run.proj.items))}
 	for i, item := range r.run.proj.items {
 		row.values[i] = item.AnyValues(record)
+	}
+	if d, ok := r.base.(distancer); ok {
+		row.dist, row.hasDist = d.distance()
 	}
 	r.row = row
 	return row, nil

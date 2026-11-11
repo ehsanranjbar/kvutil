@@ -169,21 +169,26 @@ func assignment(metric Metric, dims int, centroids []byte, v []float32) int {
 	return best
 }
 
+// probeCount returns how many of k partitions a search reads besides the unplaced area: what the
+// search says, or the index, or the square root of k rounded up. It is never more than k.
+func (s Search[K, V]) probeCount(k int) int {
+	n := s.nprobes
+	if !s.hasProbes {
+		n = s.ins.x.probes
+	}
+	if n == 0 {
+		n = int(math.Ceil(math.Sqrt(float64(k))))
+	}
+	return min(n, k)
+}
+
 // probes returns the partitions that a search reads, ascending: the unplaced area, and the
 // nearest n of the partitions to the query, where n is what the search says, or the index, or
 // the square root of their number rounded up. It is never more than the number of partitions.
 func (s Search[K, V]) probes(parts *partitions, q []float32) []uint32 {
 	x := s.ins.x
 	k := len(parts.ids)
-
-	n := s.nprobes
-	if !s.hasProbes {
-		n = x.probes
-	}
-	if n == 0 {
-		n = int(math.Ceil(math.Sqrt(float64(k))))
-	}
-	n = min(n, k)
+	n := s.probeCount(k)
 
 	type scored struct {
 		score float32

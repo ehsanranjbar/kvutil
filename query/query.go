@@ -87,6 +87,34 @@
 // the values it covers (index.Covering), so it can give a row without the record, if it holds
 // all that the rows need: that is an IndexOnlyScan in the plan, which costs no fetch of records.
 // A row can still give its record (Row.Record), which is read when it is asked for.
+//
+// # Nearest
+//
+// A query can order its records by their distance from something that an index of the store
+// measures, the nearest first (Nearest), like a vector index of package vector:
+//
+//	q := query.From(docs).
+//		Where(lang.Eq("en")).
+//		Nearest(byEmbedding.To(vector)).
+//		Limit(10)
+//
+// The search is done one of two ways. The search can check the conditions on the records,
+// nearest first, until it has the records that the limit and the offset ask for; or it can rank
+// the records that an access path of the conditions finds, the way the planner would read them
+// for a query without an order, with every condition checked. The second is exact, as every
+// record that satisfies the conditions is ranked, and it reads as many records as the access
+// path finds. So it is done when the access path is an index, or several, that is estimated to
+// find 10,000 records at most (an equality on an indexed field, with the assumed number of
+// records), and otherwise the search checks the conditions. A query without conditions is
+// searched, and Using the index of the Nearness gives the first way too, while any other index
+// or FullScan gives the second. UsingAll is an error.
+//
+// How near the records found are to the nearest depends on the index: a vector index that is
+// partitioned reads the nearest partitions only, so the first way finds the records that are
+// nearly the nearest, and the second the nearest of what the access path finds. The order is the
+// same in both: by distance, and by key at the same distance. The distance of each record is
+// given by Distance and Row.Distance. A record that the index has no distance for is not among
+// the records of the query.
 package query
 
 import (
@@ -147,9 +175,11 @@ type hint struct {
 // Query is a query on the records of a store. It is a definition, which every method leaves as
 // it is, returning another one.
 type Query[K, V any] struct {
-	store   Store[K, V]
-	conds   []cond.Cond[V]
-	order   []field.Component[V]
+	store Store[K, V]
+	conds []cond.Cond[V]
+	order []field.Component[V]
+	// near is what the records are ordered by instead of the order, if it is set.
+	near    Nearness[K, V]
 	offset  int
 	limit   int
 	limited bool
@@ -204,10 +234,12 @@ func (q *Query[K, V]) Where(conds ...cond.Cond[V]) *Query[K, V] {
 // the query had. A field that is Desc sorts from the greatest value to the least. The records
 // that are equal in all the fields are in the order of their keys. A field may have one value
 // for a record at most, and a record that has none comes before the others (after them, for a
-// field that is Desc); a field of several values is an error when the query is run.
+// field that is Desc); a field of several values is an error when the query is run. It also
+// replaces the order of distance that Nearest gave.
 func (q *Query[K, V]) OrderBy(fields ...field.Component[V]) *Query[K, V] {
 	c := q.derive()
 	c.order = slices.Clone(fields)
+	c.near = nil
 	return c
 }
 
@@ -231,7 +263,9 @@ func (q *Query[K, V]) Limit(n int) *Query[K, V] {
 // query is run or explained, if the store has no such index or if the index cannot serve the
 // query: it has some of the records only and the conditions of the query do not imply that
 // they are among them, or it may not have an entry for a record that the query asks for (see the
-// package documentation). It replaces the hint that the query had: FullScan or UsingAll.
+// package documentation). It replaces the hint that the query had: FullScan or UsingAll. The
+// name of the index of a Nearness is the hint to have its search check the conditions; see
+// Nearest.
 func (q *Query[K, V]) Using(index string) *Query[K, V] {
 	c := q.derive()
 	c.hint = hint{kind: hintIndex, index: index}
@@ -243,7 +277,8 @@ func (q *Query[K, V]) Using(index string) *Query[K, V] {
 // them if a disjunction of the query has branches that each is served by one of them, and all of
 // them are used. It is an error, when the query is run or explained, if the store lacks one of
 // the indexes or if neither can be done with exactly these indexes, or if the plan would hold
-// more keys than MaxKeys allows. The last of Using, UsingAll and FullScan is the hint.
+// more keys than MaxKeys allows. The last of Using, UsingAll and FullScan is the hint. It is an
+// error for a query with Nearest.
 func (q *Query[K, V]) UsingAll(indexes ...string) *Query[K, V] {
 	c := q.derive()
 	c.hint = hint{kind: hintAll, indexes: slices.Clone(indexes)}
@@ -315,6 +350,10 @@ func (q *Query[K, V]) Run(tx kv.Tx) iterutil.AdvancedIterator[K, *V] {
 //     is an IndexLookup, which is streamed, and the conditions that are checked on the records
 //     are shown there; the others are IndexKeys name, the primary keys of the entries of ranges
 //     of an index that are remembered, shown "(hashed)" if they are kept as hashes.
+//   - Nearest name (how): the records in the order of their distance, as the index name measures
+//     it, which the search of the index describes in brackets. Under it is the access path whose
+//     records it ranks. Without one it checks the conditions on the records, which are shown
+//     after it as for an access path.
 //   - StoreScan: all the records of the store, with the conditions that they are checked against.
 //   - Empty: nothing is read, as no record can satisfy the conditions or none is asked for.
 //
@@ -332,30 +371,13 @@ func (pl *plan[K, V]) open(tx kv.Tx, store Store[K, V]) node[K, *V] {
 	if pl.empty {
 		return none[K, *V]{}
 	}
-
-	var n node[K, *V]
-	if pl.combo != nil {
-		combined, err := pl.combo.open(tx, pl.reversed)
-		if err != nil {
-			return &failed[K, *V]{err: err}
-		}
-		n = &source[K, *V]{Iterator: combined}
-	} else if pl.index != nil {
-		it, err := pl.index.Instantiate(tx).ScanAll(pl.ranges, pl.reversed)
-		if err != nil {
-			return &failed[K, *V]{err: fmt.Errorf("index %q: %w", pl.index.Name(), err)}
-		}
-		n = &source[K, *V]{Iterator: it}
-	} else {
-		records, err := store.Records(tx, kvutil.All[K]())
-		if err != nil {
-			return &failed[K, *V]{err: err}
-		}
-		n = &source[K, *V]{Iterator: records}
+	if pl.near != nil {
+		return pl.openNearest(tx, store)
 	}
 
-	if len(pl.check) > 0 {
-		n = newFilter(n, pl.check)
+	n, err := pl.openAccess(tx, store)
+	if err != nil {
+		return &failed[K, *V]{err: err}
 	}
 	if !pl.ordered {
 		n = newSorter(n, descendings(pl.order), recordSortKeys(pl.order), store.KeyCodec().Encode, pl.keep())
@@ -364,6 +386,36 @@ func (pl *plan[K, V]) open(tx kv.Tx, store Store[K, V]) node[K, *V] {
 		n = newPage(n, pl.offset, pl.limit, pl.limited)
 	}
 	return n
+}
+
+// openAccess starts the access path of the plan in a transaction, which is an index, several
+// indexes or the store, and returns the records that it finds and that satisfy the check.
+func (pl *plan[K, V]) openAccess(tx kv.Tx, store Store[K, V]) (node[K, *V], error) {
+	var n node[K, *V]
+	if pl.combo != nil {
+		combined, err := pl.combo.open(tx, pl.reversed)
+		if err != nil {
+			return nil, err
+		}
+		n = &source[K, *V]{Iterator: combined}
+	} else if pl.index != nil {
+		it, err := pl.index.Instantiate(tx).ScanAll(pl.ranges, pl.reversed)
+		if err != nil {
+			return nil, fmt.Errorf("index %q: %w", pl.index.Name(), err)
+		}
+		n = &source[K, *V]{Iterator: it}
+	} else {
+		records, err := store.Records(tx, kvutil.All[K]())
+		if err != nil {
+			return nil, err
+		}
+		n = &source[K, *V]{Iterator: records}
+	}
+
+	if len(pl.check) > 0 {
+		n = newFilter(n, pl.check)
+	}
+	return n, nil
 }
 
 // keep returns the number of the items that a sort keeps, which is 0 for all of them.
@@ -403,6 +455,9 @@ func (pl *plan[K, V]) String() string {
 
 	leaf := &treeNode{}
 	switch {
+	case pl.near != nil && !pl.prefilter:
+		// The search checks the conditions, and there is no access path under it.
+		leaf.text = pl.nearestText()
 	case pl.combo != nil:
 		leaf = pl.combo.tree(pl)
 	case pl.index != nil:
@@ -416,6 +471,10 @@ func (pl *plan[K, V]) String() string {
 	}
 	if pl.combo == nil && len(pl.check) > 0 {
 		leaf.text += checkText(pl.check)
+	}
+	if pl.prefilter {
+		// The search ranks what the access path finds.
+		leaf = &treeNode{text: pl.nearestText(), children: []*treeNode{leaf}}
 	}
 
 	// The operators on top of each other, and the access under them.

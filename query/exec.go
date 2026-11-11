@@ -396,5 +396,13 @@ func (p *page[K, T]) Value() (T, error) { return p.base.Value() }
 // Err implements the node interface.
 func (p *page[K, T]) Err() error { return p.base.Err() }
 
+// distance implements the distancer interface.
+func (p *page[K, T]) distance() (float32, bool) {
+	if d, ok := p.base.(distancer); ok && p.Valid() {
+		return d.distance()
+	}
+	return 0, false
+}
+
 // Close implements the iterutil.Iterator interface.
 func (p *page[K, T]) Close() error { return p.base.Close() }

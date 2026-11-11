@@ -6,6 +6,7 @@ import (
 	"container/heap"
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 
 	"github.com/ehsanranjbar/kvutil/cond"
@@ -142,6 +143,12 @@ type Search[K, V any] struct {
 // when the index is partitioned. The more it reads, the nearer it is to finding all the nearest
 // records and the longer it takes. Run fails if n is not positive. It makes no difference to a
 // search with a source (Among), which is of the records of the source.
+//
+// A search that is limited, has conditions (Where), has no source and is not Exact, and that
+// finds fewer records than its limit, is run again with four times as many partitions, and four
+// times as many candidates to re-rank if the index is Quantized, until it finds enough or has
+// read every partition (and re-ranked every candidate): conditions that few records satisfy
+// would otherwise leave it with fewer results than there are. So n is where the search starts.
 func (s Search[K, V]) Probes(n int) Search[K, V] {
 	s.nprobes, s.hasProbes = n, true
 	return s
@@ -193,6 +200,12 @@ func (s Search[K, V]) Within(distance float32) Search[K, V] {
 // Where makes the search return only the records that satisfy the conditions, as well as the
 // ones that were given before. The conditions are checked on the records, which are only read
 // as far as the nearest ones that the search needs.
+//
+// The partitions that a search reads are the nearest ones to the query, which need not have
+// enough records that satisfy the conditions. So a search that is limited and has no source
+// (Among) reads more partitions, and runs again, until it finds as many records as its limit or
+// has read them all; see Probes. Scanned and Rescored count all the runs. A search that is
+// Exact reads everything the first time.
 func (s Search[K, V]) Where(conds ...cond.Cond[V]) Search[K, V] {
 	// A copy, so that two searches derived from one do not write to the same array.
 	s.conds = slices.Concat(s.conds, conds)
@@ -249,7 +262,7 @@ func (s Search[K, V]) Run() (res *Results[K, V], err error) {
 	if len(s.conds) == 0 {
 		hits, n, err = s.nearest(q, src)
 	} else {
-		hits, n, err = s.filtered(q, src)
+		hits, n, err = s.widening(q, src)
 	}
 	if err != nil {
 		return nil, err
@@ -355,6 +368,59 @@ func (s Search[K, V]) nearest(q []float32, src iterutil.Iterator[K, *V]) ([]hit[
 
 	slices.SortFunc(top.hits, compareHits[V])
 	return top.hits, n, nil
+}
+
+// widening is filtered, run again with more partitions while it finds fewer records than the
+// limit and there are more to read. It returns the numbers of all the runs.
+func (s Search[K, V]) widening(q []float32, src iterutil.Iterator[K, *V]) ([]hit[V], counts, error) {
+	var total counts
+	for {
+		hits, n, err := s.filtered(q, src)
+		if err != nil {
+			return nil, counts{}, err
+		}
+		total.scanned += n.scanned
+		total.rescored += n.rescored
+
+		next, again, err := s.widened(len(hits), n)
+		if err != nil {
+			return nil, counts{}, err
+		}
+		if !again {
+			return hits, total, nil
+		}
+		s = next
+	}
+}
+
+// widened returns the search to run again after this one found a number of records with the
+// counts n, or false if running it again would not find more: it found enough, or it is not one
+// that is widened (see Where), or it has read every partition and re-ranked every candidate that
+// the codes ranked.
+func (s Search[K, V]) widened(found int, n counts) (Search[K, V], bool, error) {
+	if !s.limited || found >= s.limit || s.among != nil || s.exact {
+		return s, false, nil
+	}
+	parts, err := s.ins.partitions()
+	if err != nil || parts.count() == 0 {
+		return s, false, err
+	}
+
+	k := parts.count()
+	probes := s.probeCount(k)
+	rescore, coded := s.rescoreCount()
+	coded = coded && s.ins.x.rot != nil
+	// With every partition read, the candidates that the codes rank are what is left to widen. There
+	// are no more of them if the ones that were re-ranked were fewer than were asked for.
+	if probes >= k && (!coded || n.rescored < rescore || rescore > math.MaxInt/4) {
+		return s, false, nil
+	}
+
+	s.nprobes, s.hasProbes = min(4*probes, k), true
+	if coded {
+		s.nrescore, s.rescoring = min(4*rescore, math.MaxInt/4), true
+	}
+	return s, true, nil
 }
 
 // filtered finds the nearest candidates whose records satisfy the conditions. Which records do

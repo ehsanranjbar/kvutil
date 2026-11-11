@@ -227,6 +227,34 @@ v, err := ins.Vector(id)
 it, err = ins.Nearest(v, 10)
 ```
 
+A query (see [Queries](#queries)) can be ordered by the distance, and plans the rest:
+
+```go
+q := query.From(docs).
+    Where(lang.Eq("en")).
+    Nearest(byEmbedding.To(query)). // instead of OrderBy; byEmbedding.To(q).Probes(32) and the like
+    Limit(10)
+
+fmt.Println(q.Explain())
+// Limit 10
+// └─ Nearest by_embedding (partitioned, quantized)
+//    └─ IndexLookup by_lang: 1 range
+
+it := q.Run(tx)
+defer it.Close()
+for ; it.Valid(); it.Next() {
+    doc, _ := it.Value()
+    d, _ := query.Distance(it) // the distance of the current record
+}
+```
+
+The planner chooses between two ways. When an index finds few records for the conditions (by
+its estimate, at most 10,000), the search ranks the records that the index finds, which is exact.
+Otherwise the search checks the conditions on the records itself, nearest first, and reads more
+partitions until it has the limit. `Using("by_lang")` and `FullScan()` force the first way, and
+`Using("by_embedding")` the second. A clause of `query/sql` is a query like any other:
+`p.Where("Year >= 2000")` and then `.Nearest(...)`.
+
 The metrics are `vector.Cosine` (1 minus the cosine of the angle; the vectors are stored with
 length 1), `vector.Euclidean` and `vector.Dot` (the negative of the inner product, so the
 greatest product is the nearest). The less the distance, the nearer, and records at the same
@@ -625,7 +653,6 @@ An engine that does not have a capability returns `kv.ErrUnsupported` for it.
 
 - A planner that combines indexes (a query reads one, and checks the rest on the records) or
   keeps statistics; and queries as text beyond the WHERE clause.
-- Vector search as the order of a query.
 - Building an index while the program writes to its store: `Migrate` is alone with the data.
 - A migration that changes the keys of the records, other than by hand in `migrate.Custom`.
 - Records that expire in stores with indexes or aggregations.
