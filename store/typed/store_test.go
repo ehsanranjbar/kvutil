@@ -435,3 +435,53 @@ func TestTTL(t *testing.T) {
 		require.NoError(t, err)
 	})
 }
+
+func TestIteratorValueTwiceReadsOnce(t *testing.T) {
+	testkv.Each(t, func(t *testing.T, base kv.DB) {
+		store := typed.New[int64, pet]("pets")
+		db, counts := testkv.Count(base)
+		pets := map[int64]*pet{1: {Name: "a", Age: 1}, 2: {Name: "b", Age: 2}, 3: {Name: "c", Age: 3}}
+		require.NoError(t, db.Update(func(tx kv.Tx) error {
+			for id, p := range pets {
+				if err := store.Instantiate(tx).Set(id, p); err != nil {
+					return err
+				}
+			}
+			return nil
+		}))
+
+		require.NoError(t, db.View(func(tx kv.Tx) error {
+			it, err := store.Instantiate(tx).All()
+			require.NoError(t, err)
+			defer it.Close()
+
+			counts.Reset()
+			check := func(id int64) {
+				t.Helper()
+				before := counts.Values.Load()
+				v, err := it.Value()
+				require.NoError(t, err)
+				raw, err := it.RawValue()
+				require.NoError(t, err)
+				again, err := it.Value()
+				require.NoError(t, err)
+
+				require.Equal(t, pets[id], v)
+				require.Equal(t, pets[id], again)
+				want, err := store.ValueCodec().Encode(*pets[id])
+				require.NoError(t, err)
+				require.Equal(t, want, raw)
+				require.EqualValues(t, 1, counts.Values.Load()-before, "the engine is read once at a position")
+			}
+
+			check(1)
+			it.Next()
+			check(2)
+			require.NoError(t, it.Seek(3))
+			check(3)
+			require.NoError(t, it.Seek(2))
+			check(2)
+			return nil
+		}))
+	})
+}

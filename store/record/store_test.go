@@ -626,3 +626,62 @@ func TestIDOf(t *testing.T) {
 	p.SetId(7)
 	require.Equal(t, int64(7), store.IDOf(p))
 }
+
+func TestRecordStoredSetsID(t *testing.T) {
+	testkv.Each(t, func(t *testing.T, db kv.DB) {
+		store := record.New[int64, pet]("pets")
+		require.NoError(t, db.Update(func(tx kv.Tx) error {
+			ins := store.Instantiate(tx)
+			for i, name := range []string{"a", "b"} {
+				if err := ins.Set(&pet{id: int64(i + 1), Name: name}); err != nil {
+					return err
+				}
+			}
+			return nil
+		}))
+
+		decode, ok := codec.PartialOf(store.ValueCodec(), []string{"Name"})
+		require.True(t, ok)
+
+		require.NoError(t, db.View(func(tx kv.Tx) error {
+			ins := store.Instantiate(tx)
+			var getter extstore.Getter[int64, pet] = ins
+			sg, ok := getter.(extstore.StoredGetter[int64, pet])
+			require.True(t, ok)
+
+			check := func(st extstore.Stored[int64, pet], id int64, name string) {
+				t.Helper()
+				part, err := st.Partial(decode, &pet{id: 99, Age: 9})
+				require.NoError(t, err)
+				require.Equal(t, &pet{id: id, Name: name}, part)
+
+				full, err := st.Record()
+				require.NoError(t, err)
+				require.Equal(t, id, full.GetId())
+				require.Equal(t, name, full.Name)
+			}
+
+			st, err := sg.GetStored(2)
+			require.NoError(t, err)
+			check(st, 2, "b")
+
+			it, err := ins.All()
+			require.NoError(t, err)
+			defer it.Close()
+			for id, name := range []string{"a", "b"} {
+				st, err := it.Stored()
+				require.NoError(t, err)
+				check(st, int64(id+1), name)
+				it.Next()
+			}
+
+			records, err := store.Records(tx, kvutil.All[int64]())
+			require.NoError(t, err)
+			defer records.Close()
+			st, err = records.(extstore.StoredIterator[int64, pet]).Stored()
+			require.NoError(t, err)
+			check(st, 1, "a")
+			return nil
+		}))
+	})
+}

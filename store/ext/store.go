@@ -23,6 +23,13 @@ import (
 // extensions. A record that expires would not be reported to them as deleted.
 var ErrTTLWithExtensions = errors.New("ext: a store with extensions cannot have records that expire")
 
+var (
+	_ ValueCoded[struct{}]              = (*Store[int, struct{}])(nil)
+	_ StoredGetter[int, struct{}]       = (*Instance[int, struct{}])(nil)
+	_ StoredIterator[int, struct{}]     = (*records[int, struct{}])(nil)
+	_ iterutil.Iterator[int, *struct{}] = (*records[int, struct{}])(nil)
+)
+
 // extKey is what the prefix of the data of the extensions is made of, after the prefix of the
 // store. The data of an extension is under that and the name of the extension.
 const extKey = 'x'
@@ -145,7 +152,11 @@ func (s *Store[K, V]) Contains(tx kv.Tx, key K) (bool, error) {
 
 // Records implements the Extensible interface.
 func (s *Store[K, V]) Records(tx kv.Tx, r kvutil.Range[K]) (iterutil.Iterator[K, *V], error) {
-	return s.data.Instantiate(tx).Iterator(r)
+	it, err := s.data.Instantiate(tx).Iterator(r)
+	if err != nil {
+		return nil, err
+	}
+	return &records[K, V]{Iterator: it, codec: s.data.ValueCodec()}, nil
 }
 
 // AddDeleteHook implements the DeleteHooks interface. Delete hooks are called after the extensions.

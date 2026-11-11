@@ -1,16 +1,24 @@
 package record
 
 import (
+	"github.com/ehsanranjbar/kvutil/codec"
 	"github.com/ehsanranjbar/kvutil/iterutil"
+	"github.com/ehsanranjbar/kvutil/store/ext"
 	"github.com/ehsanranjbar/kvutil/store/typed"
 )
 
-var _ iterutil.Iterator[int64, *struct{}] = (*Iterator[int64, struct{}])(nil)
+var (
+	_ iterutil.Iterator[int64, *struct{}] = (*Iterator[int64, struct{}])(nil)
+	_ ext.StoredIterator[int64, struct{}] = (*Iterator[int64, struct{}])(nil)
+	_ ext.StoredGetter[int64, struct{}]   = (*Instance[int64, struct{}])(nil)
+	_ ext.ValueCoded[struct{}]            = (*Store[int64, struct{}])(nil)
+)
 
 // Iterator iterates over the records of a Store. The id is set on every record that it returns.
 type Iterator[I comparable, T any] struct {
 	base  *typed.Iterator[I, T]
 	setID func(*T, I)
+	codec codec.ValueCodec[T]
 }
 
 // Valid implements the iterutil.Iterator interface.
@@ -47,6 +55,21 @@ func (it *Iterator[I, T]) Value() (*T, error) {
 	}
 	it.setID(v, id)
 	return v, nil
+}
+
+// Stored implements the ext.StoredIterator interface. The id is set on the record when it is
+// decoded. It is valid until the iterator moves.
+func (it *Iterator[I, T]) Stored() (ext.Stored[I, T], error) {
+	id, err := it.base.Key()
+	if err != nil {
+		return ext.Stored[I, T]{}, err
+	}
+
+	bz, err := it.base.RawValue()
+	if err != nil {
+		return ext.Stored[I, T]{}, err
+	}
+	return ext.NewStored(id, bz, it.codec, it.setID), nil
 }
 
 // RawKey returns the current id as the store encodes it.

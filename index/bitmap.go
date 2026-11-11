@@ -77,6 +77,7 @@ type bitmapIterator[K, V any] struct {
 	size   int
 	it     roaring64.IntPeekable64
 	raw    []byte
+	pos    position[K, V] // the record of the current key, once it is read
 }
 
 // Valid implements the iterutil.Iterator interface.
@@ -86,6 +87,7 @@ func (it *bitmapIterator[K, V]) Valid() bool {
 
 // Next implements the iterutil.Iterator interface.
 func (it *bitmapIterator[K, V]) Next() {
+	it.pos = position[K, V]{}
 	if !it.it.HasNext() {
 		it.raw = nil
 		return
@@ -100,14 +102,32 @@ func (it *bitmapIterator[K, V]) Key() (K, error) {
 
 // Value implements the iterutil.Iterator interface.
 func (it *bitmapIterator[K, V]) Value() (*V, error) {
+	if it.pos.record != nil {
+		return it.pos.record, nil
+	}
+
 	key, err := it.Key()
 	if err != nil {
 		return nil, err
 	}
+	return it.pos.value(it.recordGetter(), key)
+}
+
+// Stored implements the extstore.StoredIterator interface. The store is asked for the record once
+// at a position, whether it is decoded in part, with this, or in full, with Value.
+func (it *bitmapIterator[K, V]) Stored() (extstore.Stored[K, V], error) {
+	key, err := it.Key()
+	if err != nil {
+		return extstore.Stored[K, V]{}, err
+	}
+	return it.pos.getStored(it.recordGetter(), key)
+}
+
+func (it *bitmapIterator[K, V]) recordGetter() extstore.Getter[K, V] {
 	if it.getter == nil {
 		it.getter = it.store.Getter(it.tx)
 	}
-	return it.getter.Get(key)
+	return it.getter
 }
 
 // RawKey implements the Keyed interface.
@@ -154,4 +174,9 @@ func inBitmap(bm *roaring64.Bitmap, exact bool, raw []byte) bool {
 	return bm.Contains(keyHash(raw))
 }
 
-var _ iterutil.Iterator[int, *int] = (*bitmapIterator[int, int])(nil)
+var (
+	_ iterutil.Iterator[int, *int]      = (*bitmapIterator[int, int])(nil)
+	_ extstore.StoredIterator[int, int] = (*bitmapIterator[int, int])(nil)
+	_ extstore.StoredIterator[int, int] = (*combined[int, int])(nil)
+	_ extstore.StoredIterator[int, int] = (*Iterator[int, int])(nil)
+)

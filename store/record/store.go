@@ -131,7 +131,7 @@ func (s *Store[I, T]) Records(tx kv.Tx, r kvutil.Range[I]) (iterutil.Iterator[I,
 	return it, nil
 }
 
-// ValueCodec returns the value codec of the store.
+// ValueCodec returns the value codec of the store. It implements the ext.ValueCoded interface.
 func (s *Store[I, T]) ValueCodec() codec.ValueCodec[T] {
 	return s.base.ValueCodec()
 }
@@ -222,6 +222,16 @@ func (s *Instance[I, T]) Get(id I) (*T, error) {
 	return v, nil
 }
 
+// GetStored returns the record of the id without decoding it, or kv.ErrNotFound if it does not
+// exist. The id is set on the record when it is decoded. It implements the ext.StoredGetter interface.
+func (s *Instance[I, T]) GetStored(id I) (ext.Stored[I, T], error) {
+	st, err := s.base.GetStored(id)
+	if err != nil {
+		return st, err
+	}
+	return st.Fixed(id, s.store.setID), nil
+}
+
 // Has reports whether the id exists.
 func (s *Instance[I, T]) Has(id I) (bool, error) {
 	return s.base.Has(id)
@@ -265,7 +275,7 @@ func (s *Instance[I, T]) Iterator(r kvutil.Range[I]) (*Iterator[I, T], error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Iterator[I, T]{base: it, setID: s.store.setID}, nil
+	return &Iterator[I, T]{base: it, setID: s.store.setID, codec: s.store.base.ValueCodec()}, nil
 }
 
 // All iterates over every record, in ascending order of the ids; it is Iterator of every id.
@@ -281,5 +291,5 @@ func (s *Instance[I, T]) ReverseIterator(r kvutil.Range[I]) (*Iterator[I, T], er
 	if err != nil {
 		return nil, err
 	}
-	return &Iterator[I, T]{base: it, setID: s.store.setID}, nil
+	return &Iterator[I, T]{base: it, setID: s.store.setID, codec: s.store.base.ValueCodec()}, nil
 }

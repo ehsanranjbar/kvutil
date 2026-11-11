@@ -136,7 +136,7 @@ type Iterator[K, V any] struct {
 	cur    *refstore.Iterator  // the iterator of the current range
 	seen   map[string]struct{} // the primary keys that were returned, if they have to be remembered
 	filter []cond.Cond[V]      // the conditions that the records are checked against
-	record *V                  // the record of the current entry, once it is read
+	pos    position[K, V]      // the record of the current entry, once it is read
 	viewed entryView           // what the current entry holds, once it is split
 	err    error
 }
@@ -166,7 +166,7 @@ func (it *Iterator[K, V]) settle() {
 			continue
 		}
 
-		it.record = nil
+		it.pos = position[K, V]{}
 		it.viewed = entryView{}
 		if !it.cur.Valid() {
 			it.err = it.cur.Close()
@@ -253,20 +253,35 @@ func (it *Iterator[K, V]) Key() (key K, err error) {
 
 // Value returns the record that the current entry belongs to, which it gets from the store.
 func (it *Iterator[K, V]) Value() (*V, error) {
-	if it.record != nil {
-		return it.record, nil
+	if it.pos.record != nil {
+		return it.pos.record, nil
 	}
 
 	key, err := it.Key()
 	if err != nil {
 		return nil, err
 	}
+	return it.pos.value(it.ins.recordGetter(), key)
+}
 
-	if it.ins.getter == nil {
-		it.ins.getter = it.ins.x.store.Getter(it.ins.tx)
+// Stored returns the record that the current entry belongs to as it is stored, which the store
+// is asked for once, whether it is decoded in part, with this, or in full, with Value. If the
+// store cannot give a record as stored, or the record is read in full already, it is decoded.
+// It implements the extstore.StoredIterator interface.
+func (it *Iterator[K, V]) Stored() (extstore.Stored[K, V], error) {
+	key, err := it.Key()
+	if err != nil {
+		return extstore.Stored[K, V]{}, err
 	}
-	it.record, err = it.ins.getter.Get(key)
-	return it.record, err
+	return it.pos.getStored(it.ins.recordGetter(), key)
+}
+
+// recordGetter returns what gets the records of the store, which is made once.
+func (i *Instance[K, V]) recordGetter() extstore.Getter[K, V] {
+	if i.getter == nil {
+		i.getter = i.x.store.Getter(i.tx)
+	}
+	return i.getter
 }
 
 // Contains reports whether a record is one of the records that the iterator returns: whether it
@@ -323,4 +338,63 @@ func (it *Iterator[K, V]) Close() error {
 	it.cur = nil
 	it.next = len(it.ranges)
 	return err
+}
+
+// position is the record of the position that an iterator is at, read from the store at most
+// once: as it was stored if the getter can give that, and decoded in full when it is asked for.
+type position[K, V any] struct {
+	stored extstore.Stored[K, V]
+	read   bool // whether stored is set
+	record *V   // the decoded record, once it is known
+}
+
+// value returns the whole record of the key, which a getter is asked for once.
+func (p *position[K, V]) value(getter extstore.Getter[K, V], key K) (*V, error) {
+	if p.record != nil {
+		return p.record, nil
+	}
+
+	if sg, ok := getter.(extstore.StoredGetter[K, V]); ok {
+		st, err := p.get(sg, key)
+		if err != nil {
+			return nil, err
+		}
+		if p.record, err = st.Record(); err != nil {
+			return nil, err
+		}
+		return p.record, nil
+	}
+
+	record, err := getter.Get(key)
+	if err != nil {
+		return nil, err
+	}
+	p.record = record
+	return record, nil
+}
+
+// get returns the stored record of the key, which a getter is asked for once.
+func (p *position[K, V]) get(sg extstore.StoredGetter[K, V], key K) (extstore.Stored[K, V], error) {
+	if !p.read {
+		st, err := sg.GetStored(key)
+		if err != nil {
+			return st, err
+		}
+		p.stored, p.read = st, true
+	}
+	return p.stored, nil
+}
+
+// getStored returns the record of the key as it is stored, or already decoded if the getter
+// cannot give it as stored or the record was read in full.
+func (p *position[K, V]) getStored(getter extstore.Getter[K, V], key K) (extstore.Stored[K, V], error) {
+	if p.record == nil {
+		if sg, ok := getter.(extstore.StoredGetter[K, V]); ok {
+			return p.get(sg, key)
+		}
+		if _, err := p.value(getter, key); err != nil {
+			return extstore.Stored[K, V]{}, err
+		}
+	}
+	return extstore.Decoded(key, p.record), nil
 }

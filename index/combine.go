@@ -7,6 +7,7 @@ import (
 	"github.com/RoaringBitmap/roaring/v2/roaring64"
 	"github.com/ehsanranjbar/kvutil/internal/keyhash"
 	"github.com/ehsanranjbar/kvutil/iterutil"
+	extstore "github.com/ehsanranjbar/kvutil/store/ext"
 )
 
 // Keyed is a source of records that are known by their primary keys: the iterator of a lookup
@@ -268,6 +269,30 @@ func (c *combined[K, V]) Key() (K, error) {
 // Value implements the iterutil.Iterator interface.
 func (c *combined[K, V]) Value() (*V, error) {
 	return c.sources[c.i].Value()
+}
+
+// Stored implements the extstore.StoredIterator interface. It is the stored record of the source
+// that the current record is of, if the source has one, and the record decoded otherwise.
+func (c *combined[K, V]) Stored() (extstore.Stored[K, V], error) {
+	return storedOf(c.sources[c.i])
+}
+
+// storedOf returns the current record of a source as it is stored, if the source can give it so,
+// and decoded otherwise.
+func storedOf[K, V any](src Keyed[K, V]) (extstore.Stored[K, V], error) {
+	if si, ok := src.(extstore.StoredIterator[K, V]); ok {
+		return si.Stored()
+	}
+
+	key, err := src.Key()
+	if err != nil {
+		return extstore.Stored[K, V]{}, err
+	}
+	record, err := src.Value()
+	if err != nil {
+		return extstore.Stored[K, V]{}, err
+	}
+	return extstore.Decoded(key, record), nil
 }
 
 // RawKey implements the Keyed interface.

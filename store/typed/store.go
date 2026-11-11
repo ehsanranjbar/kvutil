@@ -167,16 +167,21 @@ func (s *Instance[K, V]) EncodeKey(key K) ([]byte, error) {
 
 // Get returns the value of the key, or kv.ErrNotFound if it does not exist.
 func (s *Instance[K, V]) Get(key K) (*V, error) {
-	kbz, err := s.EncodeKey(key)
-	if err != nil {
-		return nil, err
-	}
-
-	vbz, err := s.tx.Get(kbz)
+	vbz, err := s.GetRaw(key)
 	if err != nil {
 		return nil, err
 	}
 	return s.decodeValue(vbz)
+}
+
+// GetRaw returns the value of the key as it is stored, or kv.ErrNotFound if it does not exist.
+// The slice is a copy that the caller owns.
+func (s *Instance[K, V]) GetRaw(key K) ([]byte, error) {
+	kbz, err := s.EncodeKey(key)
+	if err != nil {
+		return nil, err
+	}
+	return s.tx.Get(kbz)
 }
 
 func (s *Instance[K, V]) decodeValue(vbz []byte) (*V, error) {
@@ -310,6 +315,10 @@ func (s *Instance[K, V]) bounds(r kvutil.Range[K]) (start, end []byte, err error
 type Iterator[K, V any] struct {
 	base kv.Iterator
 	ins  *Instance[K, V]
+
+	// The value of the current position, once it is read. An engine may not give it twice.
+	raw     []byte
+	rawRead bool
 }
 
 // Valid implements the iterutil.Iterator interface.
@@ -319,6 +328,7 @@ func (it *Iterator[K, V]) Valid() bool {
 
 // Next implements the iterutil.Iterator interface.
 func (it *Iterator[K, V]) Next() {
+	it.raw, it.rawRead = nil, false
 	it.base.Next()
 }
 
@@ -330,6 +340,7 @@ func (it *Iterator[K, V]) Seek(key K) error {
 		return err
 	}
 
+	it.raw, it.rawRead = nil, false
 	it.base.Seek(kbz)
 	return nil
 }
@@ -345,7 +356,7 @@ func (it *Iterator[K, V]) Key() (K, error) {
 
 // Value implements the iterutil.Iterator interface.
 func (it *Iterator[K, V]) Value() (*V, error) {
-	vbz, err := it.base.Value()
+	vbz, err := it.RawValue()
 	if err != nil {
 		return nil, err
 	}
@@ -358,10 +369,20 @@ func (it *Iterator[K, V]) RawKey() []byte {
 	return it.base.Key()
 }
 
-// RawValue returns the current value as it is stored.
+// RawValue returns the current value as it is stored. The engine is asked for it once at a
+// position, however many times Value and RawValue are called.
 // The slice must not be modified and is valid until the iterator moves.
 func (it *Iterator[K, V]) RawValue() ([]byte, error) {
-	return it.base.Value()
+	if it.rawRead {
+		return it.raw, nil
+	}
+
+	bz, err := it.base.Value()
+	if err != nil {
+		return nil, err
+	}
+	it.raw, it.rawRead = bz, true
+	return bz, nil
 }
 
 // Close implements the iterutil.Iterator interface.
