@@ -145,7 +145,8 @@ func TestRowRecordIsGotWhenAskedFor(t *testing.T) {
 			return nil
 		}))
 
-		// A plan that reads the records gives them to the rows: no more are got.
+		// A plan that reads the records decodes the fields that the rows need only: a record is got
+		// from the store when a row is asked for it, once for each.
 		fetching := from().Where(extra.Lt(3)).OrderBy(code).FullScan()
 		text, err = fetching.Select(extra).Explain()
 		require.NoError(t, err)
@@ -168,7 +169,7 @@ func TestRowRecordIsGotWhenAskedFor(t *testing.T) {
 			}
 			require.NoError(t, it.Err())
 			require.Equal(t, len(plain), n)
-			require.Zero(t, gets.Load())
+			require.EqualValues(t, n, gets.Load())
 			return nil
 		}))
 

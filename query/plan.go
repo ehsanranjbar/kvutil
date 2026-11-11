@@ -80,6 +80,12 @@ type plan[K, V any] struct {
 	// nil if they are not known or the codec of the store cannot decode in part, and the records
 	// are then decoded in full to be checked. It is safe for concurrent use, like the plan.
 	checkDecode func(bz []byte, v *V) error
+	// rowDecode decodes the fields that the rows of a projection need and no other: the ones that
+	// check reads, the ones that the selected items read, and the ones that the order reads if the
+	// records are sorted. It is set for the plan of a projection that reads the records, which
+	// are then not decoded in full; it is nil if what is read is not known or the codec cannot
+	// decode in part. It decodes nothing if nothing is read. It is safe for concurrent use.
+	rowDecode func(bz []byte, v *V) error
 	// combo is set instead of index and ranges if the records are those of several indexes
 	// together: their intersection or their union.
 	combo *combo[K, V]
@@ -204,7 +210,56 @@ func (q *Query[K, V]) plan(sel *selection[V]) (*plan[K, V], error) {
 	}
 	e.fill(pl, best)
 	pl.prepareDecode(q.store)
+	if sel != nil && !pl.indexOnly {
+		pl.prepareRowDecode(q.store, sel)
+	}
 	return pl, nil
+}
+
+// prepareRowDecode sets the partial decoder of the rows of a projection, if the store tells its
+// codec, everything that reads the records is known to read the fields that it says, and the
+// codec can decode them without the rest. The records of the rows are then partial, and the
+// whole record is got from the store when a row is asked for it.
+func (pl *plan[K, V]) prepareRowDecode(store Store[K, V], sel *selection[V]) {
+	coded, ok := store.(ext.ValueCoded[V])
+	if !ok {
+		return
+	}
+	reads, ok := cond.Reads(pl.check...)
+	if !ok {
+		return
+	}
+
+	var readers []cond.Reader
+	for _, item := range sel.items {
+		r, ok := item.(cond.Reader)
+		if !ok {
+			return
+		}
+		readers = append(readers, r)
+	}
+	if !pl.ordered {
+		for _, f := range pl.order {
+			r, ok := f.(cond.Reader)
+			if !ok {
+				return
+			}
+			readers = append(readers, r)
+		}
+	}
+	for _, r := range readers {
+		read, ok := r.Reads()
+		if !ok {
+			return
+		}
+		reads = append(reads, read...)
+	}
+	slices.Sort(reads)
+	reads = slices.Compact(reads)
+
+	if decode, ok := codec.PartialOf(coded.ValueCodec(), reads); ok {
+		pl.rowDecode = decode
+	}
 }
 
 // prepareDecode sets the partial decoder of the check, if the store tells its codec, the fields

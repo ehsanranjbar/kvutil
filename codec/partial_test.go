@@ -459,12 +459,12 @@ func TestWithoutPartialKeepsName(t *testing.T) {
 }
 
 type capRecord struct {
-	F0, F1, F2, F3, F4, F5, F6, F7 int
+	F0, F1, F2, F3, F4, F5, F6, F7, F8, F9, F10 int
 }
 
 func TestPartialCap(t *testing.T) {
 	c := codec.Formatted[capRecord](codec.Msgpack)
-	names := []string{"F0", "F1", "F2", "F3", "F4", "F5", "F6", "F7"}
+	names := []string{"F0", "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10"}
 
 	var first []string
 	oks := 0
@@ -482,7 +482,7 @@ func TestPartialCap(t *testing.T) {
 			}
 		}
 	}
-	require.Equal(t, 64, oks)
+	require.Equal(t, 1024, oks)
 
 	// What is made stays available, in either format of the type that has no shadows yet.
 	_, ok := codec.PartialOf(c, first)

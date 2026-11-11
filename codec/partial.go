@@ -121,9 +121,11 @@ const (
 	shadowJSON
 )
 
-// maxShadows is the number of the shadow types that are made for one type. The types made by
-// reflect.StructOf are never freed.
-const maxShadows = 64
+// maxShadows is the number of the shadow types that are made for one type: one for each set of
+// fields that is asked for, which are as many as the shapes of the queries of a program. The
+// types made by reflect.StructOf are never freed, and the same set gets the same type, so the
+// limit only bounds the memory of a program that asks for ever new sets.
+const maxShadows = 1024
 
 var (
 	shadowMu    sync.Mutex

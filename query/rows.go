@@ -33,8 +33,11 @@ type Projection[K, V any] struct {
 // has one value at most for a record, as a field that it includes with index.Including, or as a
 // cover), every condition that it does not serve with its ranges (a comparison of a field that the
 // index holds, or conjunctions, disjunctions and negations of such), and, when the rows are sorted,
-// every field of the order. Anything else is read from the record, which is got for the plan.
-// Explain shows an IndexOnlyScan for the first. The values of a row do not depend on the plan:
+// every field of the order. Anything else is read from the record, which is got for the plan: of
+// it, the fields that the items, the conditions and the order read are decoded, and no more, if
+// the store's codec can decode in part and those fields are known (see field.Field.Reading); the
+// record of a row is then got from the store if it is asked for. Explain shows an IndexOnlyScan
+// for the first. The values of a row do not depend on the plan:
 // they are the same as those that the items have for the record.
 func (q *Query[K, V]) Select(items ...field.Item[V]) *Projection[K, V] {
 	p := &Projection[K, V]{q: q, pos: map[string]int{}, planned: &planned[K, V]{}}
@@ -133,8 +136,8 @@ func (r *rowRun[K, V]) get(key K) (*V, error) {
 }
 
 // Row is a row of a projection: the key of a record, the values of the items that were selected,
-// and the record, which is only read if it is asked for and the plan did not need it. A row stays
-// valid while the transaction it was made in is.
+// and the record, which is only read if it is asked for and the plan did not read it in full. A
+// row stays valid while the transaction it was made in is.
 type Row[K, V any] struct {
 	key    K
 	run    *rowRun[K, V]
@@ -206,7 +209,8 @@ func (pl *plan[K, V]) openRows(tx kv.Tx, p *Projection[K, V]) node[K, *Row[K, V]
 	}
 	run := &rowRun[K, V]{proj: p, store: store, tx: tx}
 	if !pl.indexOnly {
-		return &recordRows[K, V]{base: pl.open(tx, store), run: run}
+		base, partial := pl.openRecords(tx, store, true)
+		return &recordRows[K, V]{base: base, run: run, partial: partial}
 	}
 
 	it, err := pl.index.Instantiate(tx).ScanAll(pl.ranges, pl.reversed)
@@ -225,11 +229,14 @@ func (pl *plan[K, V]) openRows(tx kv.Tx, p *Projection[K, V]) node[K, *Row[K, V]
 	return n
 }
 
-// recordRows is the node of the rows of records that another node finds.
+// recordRows is the node of the rows of records that another node finds. The records are partial
+// if only the fields that the rows need are decoded: the rows then do not hold them, as the
+// record of a row is got from the store when it is asked for.
 type recordRows[K, V any] struct {
-	base node[K, *V]
-	run  *rowRun[K, V]
-	row  *Row[K, V]
+	base    node[K, *V]
+	run     *rowRun[K, V]
+	row     *Row[K, V]
+	partial bool
 }
 
 // Valid implements the iterutil.Iterator interface.
@@ -258,7 +265,10 @@ func (r *recordRows[K, V]) Value() (*Row[K, V], error) {
 		return nil, err
 	}
 
-	row := &Row[K, V]{key: key, run: r.run, record: record, values: make([][]any, len(r.run.proj.items))}
+	row := &Row[K, V]{key: key, run: r.run, values: make([][]any, len(r.run.proj.items))}
+	if !r.partial {
+		row.record = record
+	}
 	for i, item := range r.run.proj.items {
 		row.values[i] = item.AnyValues(record)
 	}

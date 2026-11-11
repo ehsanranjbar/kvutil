@@ -105,7 +105,7 @@ func (pl *plan[K, V]) openNearest(tx kv.Tx, store Store[K, V]) node[K, *V] {
 		conds []cond.Cond[V]
 	)
 	if pl.prefilter {
-		access, err := pl.openAccess(tx, store)
+		access, _, err := pl.openAccess(tx, store, false)
 		if err != nil {
 			return &failed[K, *V]{err: err}
 		}

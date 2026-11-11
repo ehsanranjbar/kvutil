@@ -77,6 +77,10 @@ func (s *source[K, T]) iterator() any { return s.Iterator }
 // If it is given a partial decoder and the iterator under its base gives the records without
 // decoding them, it decodes the fields that the conditions read only, into a value that it reuses,
 // and decodes in full the records that satisfy the conditions only, from the bytes it read.
+//
+// A filter can instead hand out the partial records, for a projection whose rows need some of the
+// fields only: the decoder then decodes all of those fields, and each record that satisfies the
+// conditions is a value of its own, with the rest of the fields zero.
 type filter[K, V any] struct {
 	base  node[K, *V]
 	conds []cond.Cond[V]
@@ -84,9 +88,12 @@ type filter[K, V any] struct {
 	// decode is the partial decoder of the conditions, and is nil to decode the records in full.
 	decode func([]byte, *V) error
 	// stored is the iterator of the records without decoding them, if the base has one and there
-	// is a decoder. The scratch is what the fields are decoded into, which is never handed out.
+	// is a decoder. The scratch is what the fields are decoded into, which is never handed out,
+	// unless the filter yields the partial records: it is then replaced by a new one each time one
+	// is handed out, as whatever holds on to the records, like a sorter, must not see one change.
 	stored  ext.StoredIterator[K, V]
 	scratch *V
+	yield   bool
 
 	// record is the current record, once it is decoded in full. st is the current one before that,
 	// valid as the base has not moved.
@@ -97,19 +104,25 @@ type filter[K, V any] struct {
 }
 
 // newFilter returns the node of the records of the base that satisfy the conditions. decode, if
-// it is not nil, is the partial decoder of the fields that the conditions read.
-func newFilter[K, V any](base node[K, *V], conds []cond.Cond[V], decode func([]byte, *V) error) *filter[K, V] {
+// it is not nil, is the partial decoder of the fields that the conditions read. If yield is set,
+// it is that of all the fields that are needed, and the filter gives the partial records as they
+// are, where it can decode in part (see yields).
+func newFilter[K, V any](base node[K, *V], conds []cond.Cond[V], decode func([]byte, *V) error, yield bool) *filter[K, V] {
 	f := &filter[K, V]{base: base, conds: conds}
 	if decode != nil {
 		if s, ok := base.(interface{ iterator() any }); ok {
 			if it, ok := s.iterator().(ext.StoredIterator[K, V]); ok {
-				f.decode, f.stored, f.scratch = decode, it, new(V)
+				f.decode, f.stored, f.scratch, f.yield = decode, it, new(V), yield
 			}
 		}
 	}
 	f.settle()
 	return f
 }
+
+// yields reports whether the filter gives partial records, which it does if it was asked to and
+// the iterator under it gives the records without decoding them.
+func (f *filter[K, V]) yields() bool { return f.yield }
 
 // settle moves to the first record, from where the base is, that satisfies the conditions.
 func (f *filter[K, V]) settle() {
@@ -144,10 +157,14 @@ func (f *filter[K, V]) settle() {
 			}
 		}
 		if ok {
-			if f.stored != nil && record == f.scratch {
+			switch {
+			case f.stored != nil && record == f.scratch && f.yield:
+				// What holds on to the record, like a sorter, must not see it change.
+				f.record, f.scratch = record, new(V)
+			case f.stored != nil && record == f.scratch:
 				// Only the fields of the conditions are decoded: the rest waits for Value.
 				f.st, f.hasSt = st, true
-			} else {
+			default:
 				f.record = record
 			}
 			return

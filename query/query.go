@@ -368,16 +368,25 @@ func (q *Query[K, V]) Explain() (string, error) {
 
 // open starts the plan in a transaction, for the records that it finds.
 func (pl *plan[K, V]) open(tx kv.Tx, store Store[K, V]) node[K, *V] {
+	n, _ := pl.openRecords(tx, store, false)
+	return n
+}
+
+// openRecords is open. If rows is set, and the plan has a decoder for the rows of a projection
+// and the access path gives the records without decoding them, the records that it returns are
+// partial: only the fields that the rows need are decoded, and the rest is zero. It says if they
+// are.
+func (pl *plan[K, V]) openRecords(tx kv.Tx, store Store[K, V], rows bool) (node[K, *V], bool) {
 	if pl.empty {
-		return none[K, *V]{}
+		return none[K, *V]{}, false
 	}
 	if pl.near != nil {
-		return pl.openNearest(tx, store)
+		return pl.openNearest(tx, store), false
 	}
 
-	n, err := pl.openAccess(tx, store)
+	n, partial, err := pl.openAccess(tx, store, rows)
 	if err != nil {
-		return &failed[K, *V]{err: err}
+		return &failed[K, *V]{err: err}, false
 	}
 	if !pl.ordered {
 		n = newSorter(n, descendings(pl.order), recordSortKeys(pl.order), store.KeyCodec().Encode, pl.keep())
@@ -385,37 +394,49 @@ func (pl *plan[K, V]) open(tx kv.Tx, store Store[K, V]) node[K, *V] {
 	if pl.offset > 0 || pl.limited {
 		n = newPage(n, pl.offset, pl.limit, pl.limited)
 	}
-	return n
+	return n, partial
 }
 
 // openAccess starts the access path of the plan in a transaction, which is an index, several
-// indexes or the store, and returns the records that it finds and that satisfy the check.
-func (pl *plan[K, V]) openAccess(tx kv.Tx, store Store[K, V]) (node[K, *V], error) {
+// indexes or the store, and returns the records that it finds and that satisfy the check. If rows
+// is set and the plan has a decoder for the rows of a projection, the records are partial if the
+// access path can give them without decoding them, and it says if they are.
+func (pl *plan[K, V]) openAccess(tx kv.Tx, store Store[K, V], rows bool) (node[K, *V], bool, error) {
 	var n node[K, *V]
 	if pl.combo != nil {
 		combined, err := pl.combo.open(tx, pl.reversed)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		n = &source[K, *V]{Iterator: combined}
 	} else if pl.index != nil {
 		it, err := pl.index.Instantiate(tx).ScanAll(pl.ranges, pl.reversed)
 		if err != nil {
-			return nil, fmt.Errorf("index %q: %w", pl.index.Name(), err)
+			return nil, false, fmt.Errorf("index %q: %w", pl.index.Name(), err)
 		}
 		n = &source[K, *V]{Iterator: it}
 	} else {
 		records, err := store.Records(tx, kvutil.All[K]())
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		n = &source[K, *V]{Iterator: records}
 	}
 
-	if len(pl.check) > 0 {
-		n = newFilter(n, pl.check, pl.checkDecode)
+	if rows && pl.rowDecode != nil {
+		// The rows need some of the fields only, for the check as well. Without a check and
+		// with nothing to decode from, the records are decoded in full as they are asked for.
+		if f := newFilter(n, pl.check, pl.rowDecode, true); f.yields() {
+			return f, true, nil
+		} else if len(pl.check) > 0 {
+			return f, false, nil
+		}
+		return n, false, nil
 	}
-	return n, nil
+	if len(pl.check) > 0 {
+		n = newFilter(n, pl.check, pl.checkDecode, false)
+	}
+	return n, false, nil
 }
 
 // keep returns the number of the items that a sort keeps, which is 0 for all of them.
