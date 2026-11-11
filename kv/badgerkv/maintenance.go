@@ -113,6 +113,10 @@ func (d *DB) shutdown() (err error) {
 	d.m.closing.Do(func() {
 		close(d.m.stop)
 		d.m.stopped.Wait()
+		// The commits that wait for a sync get it before the database is closed.
+		if d.group != nil {
+			d.group.close()
+		}
 
 		d.m.mu.Lock()
 		defer d.m.mu.Unlock()

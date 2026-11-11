@@ -39,6 +39,7 @@ type tx struct {
 	txn      *badger.Txn
 	writable bool
 	prefetch int
+	wrote    bool // the transaction has set or deleted a key, so its commit has to be synced
 }
 
 // Get implements the kv.Tx interface.
@@ -70,7 +71,9 @@ func (t *tx) Set(key, value []byte) error {
 		return kv.ErrReadOnly
 	}
 	// Badger keeps the slices until the transaction ends.
-	return mapError(t.txn.Set(bytes.Clone(key), bytes.Clone(value)))
+	err := t.txn.Set(bytes.Clone(key), bytes.Clone(value))
+	t.wrote = t.wrote || err == nil
+	return mapError(err)
 }
 
 // SetWithTTL implements the kv.TTLWriter interface.
@@ -79,7 +82,9 @@ func (t *tx) SetWithTTL(key, value []byte, ttl time.Duration) error {
 		return kv.ErrReadOnly
 	}
 	e := badger.NewEntry(bytes.Clone(key), bytes.Clone(value)).WithTTL(ttl)
-	return mapError(t.txn.SetEntry(e))
+	err := t.txn.SetEntry(e)
+	t.wrote = t.wrote || err == nil
+	return mapError(err)
 }
 
 // Delete implements the kv.Tx interface.
@@ -87,7 +92,9 @@ func (t *tx) Delete(key []byte) error {
 	if !t.writable {
 		return kv.ErrReadOnly
 	}
-	return mapError(t.txn.Delete(bytes.Clone(key)))
+	err := t.txn.Delete(bytes.Clone(key))
+	t.wrote = t.wrote || err == nil
+	return mapError(err)
 }
 
 // Writable implements the kv.Tx interface.

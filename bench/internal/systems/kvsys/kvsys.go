@@ -74,6 +74,7 @@ func (s *System) Settings() map[string]string {
 	o := s.options("x")
 	return map[string]string{
 		"sync_writes":      strconv.FormatBool(o.SyncWrites),
+		"group_commit":     strconv.FormatBool(o.SyncWrites),
 		"block_cache_size": strconv.FormatInt(o.BlockCacheSize, 10),
 		"mem_table_size":   strconv.FormatInt(o.MemTableSize, 10),
 		"compression":      compression(o.Compression),

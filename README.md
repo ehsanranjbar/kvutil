@@ -76,6 +76,13 @@ err = db.View(func(tx kv.Tx) error {
 })
 ```
 
+A database that `badgerkv.Open` opens with `SyncWrites` on commits the writes together: the
+commits that are waiting share one sync, so writers that are many do not wait for one sync each.
+A commit is visible to the other transactions before it is durable, and `Update` returns only
+once it is. If the sync fails, `Update` returns the error although the transaction is committed
+and visible, as it does for the errors of Badger's own sync. `badgerkv.WithoutGroupCommit` keeps
+the sync of Badger, once per transaction, and a database that `badgerkv.Wrap` wraps always has it.
+
 ## Typed stores
 
 A store is defined once, under a prefix, and is instantiated for each transaction. It is given
