@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -35,6 +36,10 @@ func literalNode[V any](k kind, value any, text string) *node[V] {
 type evaluated[V any] struct {
 	text string
 	eval func(v *V) any
+	// reads are the paths of the fields of the record that the expression reads, if readsKnown is
+	// set: those of the fields that it names. The functions that it calls get values, not records.
+	reads      []string
+	readsKnown bool
 }
 
 // evaluate returns the condition of an expression that is evaluated, after checking what can
@@ -47,7 +52,16 @@ func (c *core[V]) evaluate(e rsql.Expr) (cond.Cond[V], error) {
 	if n.kind != kindBool && n.kind != kindAny {
 		return nil, notACondition(e, n.kind)
 	}
-	return &evaluated[V]{text: show(e), eval: n.eval}, nil
+	scan := c.scan(e)
+	return &evaluated[V]{text: show(e), eval: n.eval, reads: scan.reads, readsKnown: scan.readsKnown}, nil
+}
+
+// Reads implements the cond.Reader interface.
+func (e *evaluated[V]) Reads() ([]string, bool) {
+	if !e.readsKnown {
+		return nil, false
+	}
+	return slices.Clone(e.reads), true
 }
 
 func notACondition(e rsql.Expr, k kind) error {

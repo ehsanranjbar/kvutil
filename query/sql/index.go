@@ -88,6 +88,10 @@ func newExpression[V, F any](text string, opts []Option[V]) (field.Field[V, F], 
 	if version := scan.version; version != "" {
 		f = f.WithVersion(version)
 	}
+	if scan.readsKnown {
+		// The functions that the expression calls get values, so only its fields are read.
+		f = f.Reading(scan.reads...)
+	}
 	return f, nil
 }
 
@@ -173,6 +177,10 @@ type scanned struct {
 	// version is the versions of the functions that it calls that have one: name@version,
 	// sorted, with commas between them.
 	version string
+	// reads are the paths of the fields of the record that the fields it names read, sorted and
+	// each once, if readsKnown is set. A function that it calls gets values, never the record.
+	reads      []string
+	readsKnown bool
 }
 
 // scan finds what matters in a text that has been compiled: the fields that it names and the
@@ -184,11 +192,24 @@ func (c *core[V]) scan(e rsql.Expr) scanned {
 		panic(err)
 	}
 
-	var found scanned
+	found := scanned{readsKnown: true}
 	for _, path := range s.refs {
-		if col, err := c.column(path); err == nil && col.multi {
+		col, err := c.column(path)
+		if err != nil || !col.readsKnown {
+			// What it names is not a field that is known, or one that reads what is not known.
+			found.reads, found.readsKnown = nil, false
+			continue
+		}
+		if col.multi {
 			found.multi = true
 		}
+		if found.readsKnown {
+			found.reads = append(found.reads, col.reads...)
+		}
+	}
+	if found.readsKnown {
+		slices.Sort(found.reads)
+		found.reads = slices.Compact(found.reads)
 	}
 	var versions []string
 	for _, name := range s.calls {

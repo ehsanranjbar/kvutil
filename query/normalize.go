@@ -52,7 +52,7 @@ func normalise[V any](conds []cond.Cond[V]) (normal []cond.Cond[V], empty bool) 
 			continue
 		}
 
-		key := cmp.Path + "\x00" + cmp.Codec
+		key := cmp.Path + "\x00" + cmp.Codec + "\x00" + readsKey(cmp)
 		if _, ok := groups[key]; !ok {
 			order = append(order, key)
 		}
@@ -179,7 +179,8 @@ func orToIn[V any](branches []cond.Cond[V]) cond.Cond[V] {
 		}
 		if first == nil {
 			first = c
-		} else if c.Path != first.Path || c.Codec != first.Codec || c.Multi != first.Multi {
+		} else if c.Path != first.Path || c.Codec != first.Codec || c.Multi != first.Multi ||
+			readsKey(c) != readsKey(first) {
 			return nil
 		}
 		values = append(values, c.Values...)
@@ -254,6 +255,18 @@ func merge[V any](cmps []*cond.Comparison[V]) (merged *cond.Comparison[V], empty
 		m.Op, m.Values, m.Low, m.High = cond.OpRange, nil, low, high
 	}
 	return &m, false
+}
+
+// readsKey returns a text that is the same for comparisons that read the same fields, and for the
+// ones whose reads are not known. A comparison that is made from several (a merged one, or one
+// of a disjunction) is a copy of the first of them, and so has its reads: comparisons are merged
+// only if they have the same, so that the one that they are merged to reads what each of them did.
+func readsKey[V any](c *cond.Comparison[V]) string {
+	paths, ok := cond.Reads[V](c)
+	if !ok {
+		return "?"
+	}
+	return "=" + strings.Join(paths, "\x01")
 }
 
 // sortedSet returns the values in ascending order, each once.

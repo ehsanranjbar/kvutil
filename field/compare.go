@@ -11,6 +11,9 @@ import (
 func (f Field[V, F]) comparison(op cond.Op, text string) *cond.Comparison[V] {
 	c := cond.NewComparison(f.path, f.codec.Name(), op, f.ascending).Describe(text)
 	c.Multi = f.multi
+	if f.readsKnown {
+		c.Reading(f.reads...)
+	}
 	return c
 }
 

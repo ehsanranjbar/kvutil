@@ -5,10 +5,12 @@ package field
 import (
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 
 	"github.com/ehsanranjbar/kvutil/codec"
 	"github.com/ehsanranjbar/kvutil/codec/lex"
+	"github.com/ehsanranjbar/kvutil/cond"
 )
 
 // Field is a named property of the records of the type V, whose values are of the type F.
@@ -28,6 +30,9 @@ type Field[V, F any] struct {
 	codec  codec.KeyCodec[F]
 	// The type of the values, which is F unless the field was found by Reflect.
 	typ reflect.Type
+	// reads are the paths of the fields of the record that the field reads, if readsKnown is set.
+	reads      []string
+	readsKnown bool
 }
 
 func newField[V, F any](path string, get func(*V) []F, multi bool, c []codec.KeyCodec[F]) Field[V, F] {
@@ -110,6 +115,10 @@ func ComputedEach[V, F any](path string, get func(*V) ([]F, error), c ...codec.K
 // as a value. It panics if the struct has no such field, if the field is of another type,
 // or if the type has no key codec and none is given.
 func Path[V, F any](path string, c ...codec.KeyCodec[F]) Field[V, F] {
+	return pathField[V](path, c).Reading(path)
+}
+
+func pathField[V, F any](path string, c []codec.KeyCodec[F]) Field[V, F] {
 	value, t, err := Accessor[V](path)
 	if err != nil {
 		panic(err.Error())
@@ -248,7 +257,7 @@ func Reflect[V any](path string) (Field[V, any], error) {
 	}
 
 	f.typ = t
-	return f, nil
+	return f.Reading(path), nil
 }
 
 // passesPointer reports whether the path to a field of a struct goes through a pointer, which
@@ -282,6 +291,34 @@ func passesPointer[V any](path string) bool {
 func (f Field[V, F]) Desc() Field[V, F] {
 	f.desc = true
 	return f
+}
+
+// Reading returns the field with the paths of the fields of the record that its function reads,
+// in the form that Path takes: "Year" or "Inner.X", the names of the fields of the struct with
+// dots between them. It is for a field defined with Of, Each, Computed or ComputedEach, whose
+// function is opaque, so that a query can decode only the fields of a record that it needs.
+// With no paths, the field is declared to read nothing of the record.
+//
+// A function that reads a field that is not declared makes queries return wrong results, as only
+// the declared fields are decoded: the function sees the zero value of every other one. Without
+// Reading, the reads of such a field are not known, and a query that uses it decodes all of the
+// record. A field defined with Path or Reflect reads its own path.
+func (f Field[V, F]) Reading(paths ...string) Field[V, F] {
+	f.reads = slices.Clone(paths)
+	f.readsKnown = true
+	return f
+}
+
+// Reads implements cond.Reader. It returns the paths of the fields of the record that the field
+// reads, and false if they are not known: a field defined with Path or Reflect reads its own
+// path, and any other reads what Reading declares. The other interfaces of this package leave
+// this out, as other packages implement them: whoever needs the reads of a field asserts that it
+// is a cond.Reader.
+func (f Field[V, F]) Reads() ([]string, bool) {
+	if !f.readsKnown {
+		return nil, false
+	}
+	return slices.Clone(f.reads), true
 }
 
 // Path returns the path of the field, which names it.
@@ -459,6 +496,7 @@ var (
 	_ Item[struct{}]            = Field[struct{}, int]{}
 	_ Selectable[struct{}, int] = Field[struct{}, int]{}
 	_ Untyped[struct{}]         = Field[struct{}, int]{}
+	_ cond.Reader               = Field[struct{}, int]{}
 )
 
 // List returns fields of different types as the parts of the keys of an index.

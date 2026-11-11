@@ -3,6 +3,7 @@ package sql
 import (
 	"encoding/hex"
 	"fmt"
+	"slices"
 
 	rsql "github.com/rqlite/sql"
 
@@ -373,6 +374,14 @@ type exists[V any] struct {
 // Match implements the cond.Cond interface.
 func (e *exists[V]) Match(v *V) (bool, error) {
 	return absent(e.col.value(v)) == e.missing, nil
+}
+
+// Reads implements the cond.Reader interface: it reads what the field does.
+func (e *exists[V]) Reads() ([]string, bool) {
+	if !e.col.readsKnown {
+		return nil, false
+	}
+	return slices.Clone(e.col.reads), true
 }
 
 // String implements the cond.Cond interface.

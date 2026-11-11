@@ -4,6 +4,7 @@ package cond
 
 import (
 	"bytes"
+	"slices"
 	"strings"
 )
 
@@ -60,9 +61,11 @@ type Comparison[V any] struct {
 	// both: Tags > 'a' AND Tags < 'c' is not Tags in the range from 'a' to 'c'.
 	Multi bool
 
-	keys func(*V) ([][]byte, error)
-	text string
-	err  error
+	keys       func(*V) ([][]byte, error)
+	text       string
+	err        error
+	reads      []string
+	readsKnown bool
 }
 
 // Match implements the Cond interface.
@@ -151,6 +154,23 @@ func NewComparison[V any](path, codec string, op Op, keys func(*V) ([][]byte, er
 func (c *Comparison[V]) Describe(text string) *Comparison[V] {
 	c.text = text
 	return c
+}
+
+// Reading sets the paths of the fields of the record that the function of the comparison reads,
+// which the field it is made for knows. Without it, what the comparison reads is not known.
+// With no paths, the comparison reads nothing of the record.
+func (c *Comparison[V]) Reading(paths ...string) *Comparison[V] {
+	c.reads = slices.Clone(paths)
+	c.readsKnown = true
+	return c
+}
+
+// Reads implements the Reader interface.
+func (c *Comparison[V]) Reads() ([]string, bool) {
+	if !c.readsKnown {
+		return nil, false
+	}
+	return slices.Clone(c.reads), true
 }
 
 // Fail makes the comparison fail with an error, if the error is not nil.
@@ -249,13 +269,38 @@ func (c *Negation[V]) String() string {
 type Predicate[V any] struct {
 	Name string
 	f    func(*V) bool
+
+	reads      []string
+	readsKnown bool
 }
 
 // Func returns the condition of a function returning true for a record.
 // As a function cannot be compared with another one, the name stands for what it does:
-// the name must change when the function does.
-func Func[V any](name string, f func(*V) bool) Cond[V] {
+// the name must change when the function does. What the function reads of the record is not
+// known unless Reading says so.
+func Func[V any](name string, f func(*V) bool) *Predicate[V] {
 	return &Predicate[V]{Name: name, f: f}
+}
+
+// Reading sets the paths of the fields of the record that the function reads, in the form that
+// field.Path takes: "Year" or "Inner.X". With no paths, the function reads nothing of the record.
+//
+// A function that reads a field that it does not declare makes queries return wrong results:
+// a query decodes only the fields that are declared, and the function sees the zero value of
+// every other one. Without Reading, what the function reads is not known, and a query that has
+// the condition decodes all of the record.
+func (c *Predicate[V]) Reading(paths ...string) *Predicate[V] {
+	c.reads = slices.Clone(paths)
+	c.readsKnown = true
+	return c
+}
+
+// Reads implements the Reader interface.
+func (c *Predicate[V]) Reads() ([]string, bool) {
+	if !c.readsKnown {
+		return nil, false
+	}
+	return slices.Clone(c.reads), true
 }
 
 // Match implements the Cond interface.

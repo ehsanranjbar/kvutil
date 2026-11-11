@@ -95,6 +95,9 @@ type Covered[V, C any] struct {
 	name  string
 	get   func(*V) C
 	codec codec.ValueCodec[C]
+
+	reads      []string
+	readsKnown bool
 }
 
 // Cover defines a value that an index can keep, which is named name and computed by get from a
@@ -120,6 +123,30 @@ func Cover[V, C any](name string, get func(*V) C, c ...codec.ValueCodec[C]) *Cov
 		vc = codec.ValueFor[C](nil)
 	}
 	return &Covered[V, C]{name: name, get: get, codec: vc}
+}
+
+// Reading sets the paths of the fields of the record that the function of the cover reads, in
+// the form that field.Path takes: "Year" or "Inner.X". With no paths, the function reads nothing
+// of the record. It returns the cover itself.
+//
+// A function that reads a field that is not declared makes queries return wrong results, as only
+// the declared fields are decoded: the function sees the zero value of every other one. Without
+// Reading, what the function reads is not known, and a query that selects the cover decodes all
+// of the record.
+func (c *Covered[V, C]) Reading(paths ...string) *Covered[V, C] {
+	c.reads = slices.Clone(paths)
+	c.readsKnown = true
+	return c
+}
+
+// Reads implements cond.Reader. It returns the paths of the fields of the record that the cover
+// reads, and false if they are not known. The CoverItem interface leaves this out: whoever needs
+// the reads of a cover asserts that it is a cond.Reader.
+func (c *Covered[V, C]) Reads() ([]string, bool) {
+	if !c.readsKnown {
+		return nil, false
+	}
+	return slices.Clone(c.reads), true
 }
 
 // Path implements the field.Item interface: it is the name of the cover.
@@ -158,6 +185,7 @@ type CoverItem[V any] interface {
 }
 
 var _ field.Selectable[struct{}, int] = (*Covered[struct{}, int])(nil)
+var _ cond.Reader = (*Covered[struct{}, int])(nil)
 var _ CoverItem[struct{}] = (*Covered[struct{}, int])(nil)
 
 // Covering stores the covers with every entry of the index, so that they can be read from the

@@ -302,10 +302,18 @@ type column[V any] struct {
 	// value returns the value of the field in a record for the evaluator: no value (nil), a
 	// value, or a list of values for a field of several.
 	value func(v *V) any
+	// reads are the paths of the fields of the record that value reads, if readsKnown is set.
+	reads      []string
+	readsKnown bool
 }
 
 func fieldColumn[V any](f field.Untyped[V]) *column[V] {
 	col := &column[V]{path: f.Path(), field: f, kind: kindOfType(f.Type()), multi: f.Multi()}
+	// The interface of a field does not have the reads: a field that is not a cond.Reader reads
+	// what is not known.
+	if r, ok := f.(cond.Reader); ok {
+		col.reads, col.readsKnown = r.Reads()
+	}
 	if f.Multi() {
 		col.value = func(v *V) any {
 			values := f.AnyValues(v)
@@ -373,6 +381,9 @@ func (c *core[V]) column(path string) (*column[V], error) {
 			reason: err,
 			kind:   kindOfType(t),
 			multi:  t.Kind() == reflect.Slice && t.Elem().Kind() != reflect.Uint8,
+			// It is read by reflection, from the field at the path.
+			reads:      []string{path},
+			readsKnown: true,
 			value: func(v *V) any {
 				rv, ok := get(v)
 				if !ok {
