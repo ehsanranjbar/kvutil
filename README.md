@@ -233,12 +233,39 @@ greatest product is the nearest). The less the distance, the nearer, and records
 distance come by key. A record whose vector has other dimensions, a component that is not a
 finite number, or no direction under `Cosine`, is not left out: writing it fails.
 
-The search is exact: it compares the query with every vector of the index, or with the vectors
-of the records of `Among`, so its results are the true nearest ones and its time grows with the
-number of vectors. `Where` reads the records nearest first and stops when it has enough, so it
-suits conditions that many records satisfy; `Among` reads the vectors of the candidates only, so
-it suits the ones that few do. The results are a source like the lookup of an index, and can be
-combined with `index.Intersect` and the like.
+`Where` reads the records nearest first and stops when it has enough, so it suits conditions
+that many records satisfy; `Among` reads the vectors of the candidates only, so it suits the
+ones that few do. The results are a source like the lookup of an index, and can be combined
+with `index.Intersect` and the like.
+
+Such a search is exact: it compares the query with every vector of the index, so its results
+are the true nearest ones and its time grows with the number of vectors. An index that is
+**partitioned** searches faster for nearly the same results:
+
+```go
+byEmbedding := vector.On(docs, "by_embedding", 384, vector.Cosine, embedding,
+    vector.Partitioned(0)) // the size of a partition; 0 is a default by the dimensions
+
+it, err = ins.Nearest(query, 10)                         // reads the nearest partitions
+it, err = ins.Search(query).Probes(32).Limit(10).Run()   // more of them: slower, misses less
+it, err = ins.Search(query).Exact().Limit(10).Run()      // all the vectors, as without partitions
+fmt.Println(it.Scanned())                                // the vectors that the query was compared with
+
+stats, err := ins.Stats() // {Partitions: 117, Unplaced: 0}
+```
+
+When the index is built, by `Migrate` or by `vector.Rebuild`, its vectors are grouped around
+centroids, and a search reads the partitions of the centroids that are nearest to the query: as
+many as `Probes` says, of the search or of the index (`vector.Probes(n)`), and the square root
+of their number otherwise. The distances are still exact, as the whole vectors are stored; what
+is approximate is which records are found, and that depends on the vectors. Embeddings, which
+gather around subjects, are found well with few partitions read; vectors with no structure at
+all are not, and need many.
+
+A record that is written goes to no partition: it is unplaced, and every search reads all the
+unplaced vectors. So a record is found as soon as it is written, writers of different records
+share no key of the index and never conflict, and writing a new record is one write, as without
+partitions.
 
 ## Versions and migrations
 
@@ -560,8 +587,7 @@ An engine that does not have a capability returns `kv.ErrUnsupported` for it.
 
 - A planner that combines indexes (a query reads one, and checks the rest on the records) or
   keeps statistics; and queries as text beyond the WHERE clause.
-- Approximate vector search, which does not compare the query with every vector, and vector
-  search as the order of a query.
+- Vector search as the order of a query, and vectors that are stored in less than their size.
 - Building an index while the program writes to its store: `Migrate` is alone with the data.
 - A migration that changes the keys of the records, other than by hand in `migrate.Custom`.
 - Records that expire in stores with indexes or aggregations.

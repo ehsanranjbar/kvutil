@@ -1,10 +1,12 @@
 package vector_test
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/ehsanranjbar/kvutil/field"
 	"github.com/ehsanranjbar/kvutil/index"
+	"github.com/ehsanranjbar/kvutil/iterutil"
 	"github.com/ehsanranjbar/kvutil/kv"
 	"github.com/ehsanranjbar/kvutil/kv/memkv"
 	extstore "github.com/ehsanranjbar/kvutil/store/ext"
@@ -159,4 +161,146 @@ func Example() {
 	//   4 Chats et chatons 0.00
 	//   2 Dogs and puppies 0.04
 	// untitled: kv: key not found
+}
+
+// Example_partitioned defines an index that keeps its vectors in partitions, which a search reads
+// the nearest of instead of all the vectors. It finds the nearest records that it reads, which
+// are the ones it is asked for as long as it reads the partitions that they are in.
+func Example_partitioned() {
+	docs := extstore.New[int64, Doc]("docs")
+
+	// The vectors are grouped in partitions of 8 at most, which are few here to be seen; the
+	// default size depends on the dimensions and is a few hundreds.
+	embeddings := vector.On(docs, "by_embedding", 3, vector.Cosine,
+		func(d *Doc) []float32 { return d.Embedding }, vector.Partitioned(8))
+
+	db := memkv.New()
+	if err := docs.Check(db); err != nil {
+		panic(err)
+	}
+
+	// Three subjects with eight docs each: the embeddings of a subject are about the same.
+	subjects := []struct {
+		name   string
+		centre [3]float32
+	}{
+		{"animals", [3]float32{1, 0.1, 0}},
+		{"food", [3]float32{0.1, 1, 0}},
+		{"space", [3]float32{0, 0.1, 1}},
+	}
+	err := db.Update(func(tx kv.Tx) error {
+		store := docs.Instantiate(tx)
+		for s, subject := range subjects {
+			for i := range 8 {
+				// A little different from one doc to the next.
+				shift := float32(i) * 0.01
+				d := Doc{
+					Title: fmt.Sprintf("%s %d", subject.name, i+1),
+					Lang:  "en",
+					Embedding: []float32{
+						subject.centre[0] + shift, subject.centre[1] - shift, subject.centre[2] + shift,
+					},
+				}
+				if err := store.Set(int64(s*8+i+1), &d); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		panic(err)
+	}
+
+	stats := func() vector.Stats {
+		var stats vector.Stats
+		err := db.View(func(tx kv.Tx) (err error) {
+			stats, err = embeddings.Instantiate(tx).Stats()
+			return err
+		})
+		if err != nil {
+			panic(err)
+		}
+		return stats
+	}
+
+	// A record is written to the unplaced area, which every search reads. The partitions are made
+	// when the index is built, which migrate.Run does when the index is defined or changed on a
+	// store with records in it, and Rebuild does when asked to.
+	fmt.Printf("written: %+v\n", stats())
+	if err := vector.Rebuild(context.Background(), db, embeddings); err != nil {
+		panic(err)
+	}
+	fmt.Printf("built: %+v\n", stats())
+
+	err = db.View(func(tx kv.Tx) error {
+		ins := embeddings.Instantiate(tx)
+		query := []float32{0.05, 1, 0.02}
+
+		// A search reads the unplaced vectors and the nearest partitions, as many as the index
+		// is defined to read, or else the square root of their number.
+		res, err := ins.Search(query).Limit(3).Run()
+		if err != nil {
+			return err
+		}
+		defer res.Close()
+		titles, err := iterutil.Of(res).Map(func(_ int64, d *Doc) (string, error) { return d.Title, nil }).Values()
+		if err != nil {
+			return err
+		}
+		fmt.Println("nearest:", titles, "compared with", res.Scanned())
+
+		// One partition is faster, and may miss records that are in another one.
+		one, err := ins.Search(query).Limit(3).Probes(1).Run()
+		if err != nil {
+			return err
+		}
+		fmt.Println("one partition: compared with", one.Scanned())
+
+		// An exact search compares the query with every vector.
+		exact, err := ins.Search(query).Limit(3).Exact().Run()
+		if err != nil {
+			return err
+		}
+		fmt.Println("exact: compared with", exact.Scanned())
+		return nil
+	})
+	if err != nil {
+		panic(err)
+	}
+
+	// A record that is written after the build is unplaced, so every search finds it at once,
+	// until the index is built again.
+	err = db.Update(func(tx kv.Tx) error {
+		return docs.Instantiate(tx).Set(25, &Doc{Title: "food 9", Lang: "en", Embedding: []float32{0.05, 1, 0.02}})
+	})
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("written: %+v\n", stats())
+	err = db.View(func(tx kv.Tx) error {
+		res, err := embeddings.Instantiate(tx).Search([]float32{0.05, 1, 0.02}).Limit(1).Probes(1).Run()
+		if err != nil {
+			return err
+		}
+		defer res.Close()
+		doc, err := res.Value()
+		if err != nil {
+			return err
+		}
+		fmt.Printf("nearest: %s at %.2f\n", doc.Title, res.Distance())
+		return nil
+	})
+	if err != nil {
+		panic(err)
+	}
+
+	// Output:
+	// written: {Partitions:0 Unplaced:24}
+	// built: {Partitions:6 Unplaced:0}
+	// nearest: [food 1 food 2 food 3] compared with 12
+	// one partition: compared with 4
+	// exact: compared with 24
+	// written: {Partitions:6 Unplaced:1}
+	// nearest: food 9 at 0.00
 }

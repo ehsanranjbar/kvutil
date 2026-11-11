@@ -16,10 +16,67 @@ import (
 
 // Instance is an Index in a transaction, which records are searched in.
 type Instance[K, V any] struct {
-	x       *Index[K, V]
-	tx      kv.Tx
-	entries *prefix.Tx
-	getter  extstore.Getter[K, V]
+	x      *Index[K, V]
+	tx     kv.Tx
+	data   *prefix.Tx
+	getter extstore.Getter[K, V]
+}
+
+// partitions returns the partitions that the transaction sees, or nil if there are none.
+func (i *Instance[K, V]) partitions() (*partitions, error) {
+	if i.x.size == 0 {
+		return nil, nil
+	}
+	return i.x.loadPartitions(i.data)
+}
+
+// find returns the stored vector of a record: the one in the partition that the record is in
+// if the index has partitions, otherwise the one in the unplaced area. It returns
+// kv.ErrNotFound if the record is in neither.
+func (i *Instance[K, V]) find(rawKey []byte) ([]byte, error) {
+	if i.x.size > 0 {
+		pid, placed, err := readPlace(i.data, rawKey)
+		if err != nil {
+			return nil, err
+		}
+		if placed {
+			b, err := i.data.Get(vectorKey(pid, rawKey))
+			if errors.Is(err, kv.ErrNotFound) {
+				return nil, fmt.Errorf("%w: the key %x is in the partition %d, which has no vector of it", ErrCorrupt, rawKey, pid)
+			}
+			return b, err
+		}
+	}
+	return i.data.Get(vectorKey(unplaced, rawKey))
+}
+
+// Stats is what an index has in a transaction.
+type Stats struct {
+	// Partitions is the number of partitions. It is 0 if the vectors are in none.
+	Partitions int
+	// Unplaced is the number of vectors that are in no partition, which every search compares
+	// the query with.
+	Unplaced int
+}
+
+// Stats returns what the index has in the transaction. It counts the keys of the unplaced
+// area, without reading the vectors.
+func (i *Instance[K, V]) Stats() (Stats, error) {
+	parts, err := i.partitions()
+	if err != nil {
+		return Stats{}, err
+	}
+	stats := Stats{Partitions: parts.count()}
+
+	it, err := i.data.Iterator(vectorKey(unplaced, nil), vectorKey(unplaced+1, nil))
+	if err != nil {
+		return Stats{}, err
+	}
+	defer it.Close()
+	for ; it.Valid(); it.Next() {
+		stats.Unplaced++
+	}
+	return stats, nil
 }
 
 // records returns what gets the records of the store, which is made when it is first needed.
@@ -48,7 +105,7 @@ func (i *Instance[K, V]) Vector(key K) ([]float32, error) {
 	if err != nil {
 		return nil, err
 	}
-	b, err := i.entries.Get(rawKey)
+	b, err := i.find(rawKey)
 	if err != nil {
 		return nil, err
 	}
@@ -73,6 +130,25 @@ type Search[K, V any] struct {
 	hasWithin bool
 	conds     []cond.Cond[V]
 	among     iterutil.Iterator[K, *V]
+	nprobes   int
+	hasProbes bool
+	exact     bool
+}
+
+// Probes makes the search read the nearest n partitions, besides the vectors that are in none,
+// when the index is partitioned. The more it reads, the nearer it is to finding all the nearest
+// records and the longer it takes. Run fails if n is not positive. It makes no difference to a
+// search with a source (Among), which is of the records of the source.
+func (s Search[K, V]) Probes(n int) Search[K, V] {
+	s.nprobes, s.hasProbes = n, true
+	return s
+}
+
+// Exact makes the search compare the query with every vector, whatever the partitions are, so
+// that it finds the nearest records and not the ones that are nearly the nearest.
+func (s Search[K, V]) Exact() Search[K, V] {
+	s.exact = true
+	return s
 }
 
 // Limit makes the search return at most k records. Without it all the records that are
@@ -126,6 +202,9 @@ func (s Search[K, V]) Run() (res *Results[K, V], err error) {
 	if s.limited && s.limit < 0 {
 		return nil, fmt.Errorf("vector: the limit of a search must not be negative, not %d", s.limit)
 	}
+	if s.hasProbes && s.nprobes <= 0 {
+		return nil, fmt.Errorf("vector: the number of partitions to read must be positive, not %d", s.nprobes)
+	}
 	q, err := s.ins.x.prepare(s.query)
 	if err != nil {
 		return nil, fmt.Errorf("invalid query: %w", err)
@@ -134,16 +213,19 @@ func (s Search[K, V]) Run() (res *Results[K, V], err error) {
 		return &Results[K, V]{ins: s.ins}, nil
 	}
 
-	var hits []hit[V]
+	var (
+		hits    []hit[V]
+		scanned int
+	)
 	if len(s.conds) == 0 {
-		hits, err = s.nearest(q, src)
+		hits, scanned, err = s.nearest(q, src)
 	} else {
-		hits, err = s.filtered(q, src)
+		hits, scanned, err = s.filtered(q, src)
 	}
 	if err != nil {
 		return nil, err
 	}
-	return &Results[K, V]{ins: s.ins, hits: hits}, nil
+	return &Results[K, V]{ins: s.ins, hits: hits, scanned: scanned}, nil
 }
 
 // hit is a record that a search found.
@@ -202,24 +284,24 @@ func (h *hitHeap[V]) Pop() any {
 
 // nearest finds the nearest candidates when there are no conditions to check on the records:
 // the first k of them, or all if there is no limit.
-func (s Search[K, V]) nearest(q []float32, src iterutil.Iterator[K, *V]) ([]hit[V], error) {
+func (s Search[K, V]) nearest(q []float32, src iterutil.Iterator[K, *V]) ([]hit[V], int, error) {
 	if !s.limited {
 		var hits []hit[V]
-		err := s.scan(q, src, func(rawKey []byte, dist float32) {
+		scanned, err := s.scan(q, src, func(rawKey []byte, dist float32) {
 			hits = append(hits, hit[V]{rawKey: bytes.Clone(rawKey), dist: dist})
 		})
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		slices.SortFunc(hits, compareHits[V])
-		return hits, nil
+		return hits, scanned, nil
 	}
 
 	// The furthest of the nearest k is at the root, and is replaced by a candidate that is nearer.
 	// The key of a candidate is only valid until the iterator moves, so it is copied only if the
 	// candidate gets in.
 	top := &hitHeap[V]{hits: make([]hit[V], 0, min(s.limit, 1024)), worst: true}
-	err := s.scan(q, src, func(rawKey []byte, dist float32) {
+	scanned, err := s.scan(q, src, func(rawKey []byte, dist float32) {
 		switch {
 		case len(top.hits) < s.limit:
 			heap.Push(top, hit[V]{rawKey: bytes.Clone(rawKey), dist: dist})
@@ -231,23 +313,23 @@ func (s Search[K, V]) nearest(q []float32, src iterutil.Iterator[K, *V]) ([]hit[
 		}
 	})
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	slices.SortFunc(top.hits, compareHits[V])
-	return top.hits, nil
+	return top.hits, scanned, nil
 }
 
 // filtered finds the nearest candidates whose records satisfy the conditions. Which records do
 // is only known by reading them, so the candidates are gone through from the nearest, and the
 // records are read until there are enough.
-func (s Search[K, V]) filtered(q []float32, src iterutil.Iterator[K, *V]) ([]hit[V], error) {
+func (s Search[K, V]) filtered(q []float32, src iterutil.Iterator[K, *V]) ([]hit[V], int, error) {
 	var all []hit[V]
-	err := s.scan(q, src, func(rawKey []byte, dist float32) {
+	scanned, err := s.scan(q, src, func(rawKey []byte, dist float32) {
 		all = append(all, hit[V]{rawKey: bytes.Clone(rawKey), dist: dist})
 	})
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	candidates := &hitHeap[V]{hits: all}
@@ -259,17 +341,17 @@ func (s Search[K, V]) filtered(q []float32, src iterutil.Iterator[K, *V]) ([]hit
 
 		key, err := s.ins.x.store.KeyCodec().Decode(h.rawKey)
 		if err != nil {
-			return nil, fmt.Errorf("failed to decode a key of the index: %w", err)
+			return nil, 0, fmt.Errorf("failed to decode a key of the index: %w", err)
 		}
 		record, err := s.ins.records().Get(key)
 		if err != nil {
-			return nil, fmt.Errorf("failed to get the record %v: %w", key, err)
+			return nil, 0, fmt.Errorf("failed to get the record %v: %w", key, err)
 		}
 
 		match := true
 		for _, c := range s.conds {
 			if match, err = c.Match(record); err != nil {
-				return nil, fmt.Errorf("failed to check the record %v: %w", key, err)
+				return nil, 0, fmt.Errorf("failed to check the record %v: %w", key, err)
 			}
 			if !match {
 				break
@@ -280,18 +362,28 @@ func (s Search[K, V]) filtered(q []float32, src iterutil.Iterator[K, *V]) ([]hit
 			hits = append(hits, h)
 		}
 	}
-	return hits, nil
+	return hits, scanned, nil
 }
 
 // scan calls found for every candidate whose distance from the query is not too much, in no
-// particular order. The key is only valid until found returns.
-func (s Search[K, V]) scan(q []float32, src iterutil.Iterator[K, *V], found func(rawKey []byte, dist float32)) error {
+// particular order, and returns the number of vectors that it measured the distance to. The key
+// is only valid until found returns.
+//
+// The candidates are the records of the source if there is one. Otherwise they are the unplaced
+// vectors and those of the nearest partitions, or all the vectors if the search is exact or the
+// index has no partitions.
+func (s Search[K, V]) scan(
+	q []float32,
+	src iterutil.Iterator[K, *V],
+	found func(rawKey []byte, dist float32),
+) (scanned int, err error) {
 	x := s.ins.x
 	consider := func(rawKey, stored []byte) error {
 		dist, err := distance(x.metric, q, stored)
 		if err != nil {
 			return fmt.Errorf("%w: the key %x", err, rawKey)
 		}
+		scanned++
 		if !s.hasWithin || dist <= s.within {
 			found(rawKey, dist)
 		}
@@ -299,27 +391,58 @@ func (s Search[K, V]) scan(q []float32, src iterutil.Iterator[K, *V], found func
 	}
 
 	if src != nil {
-		return s.scanSource(src, consider)
+		return scanned, s.scanSource(src, consider)
+	}
+	parts, err := s.ins.partitions()
+	if err != nil {
+		return 0, err
 	}
 
-	it, err := s.ins.entries.Iterator(nil, nil)
+	// One iterator goes over the vectors, and is moved to the start of each partition to read.
+	it, err := s.ins.data.Iterator([]byte{vectorsKey}, []byte{vectorsKey + 1})
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer it.Close()
-	for ; it.Valid(); it.Next() {
-		stored, err := it.Value()
-		if err != nil {
-			return err
+
+	readPartition := func(start []byte) error {
+		for ; it.Valid() && (start == nil || bytes.HasPrefix(it.Key(), start)); it.Next() {
+			rawKey, _, err := splitVectorKey(it.Key())
+			if err != nil {
+				return err
+			}
+			stored, err := it.Value()
+			if err != nil {
+				return err
+			}
+			if err := consider(rawKey, stored); err != nil {
+				return err
+			}
 		}
-		if err := consider(it.Key(), stored); err != nil {
-			return err
+		return nil
+	}
+
+	if parts == nil || s.exact {
+		return scanned, readPartition(nil)
+	}
+	for _, pid := range s.probes(parts, q) {
+		// What is left is past the partitions that were read, so there is nothing to seek to
+		// once the iterator is done.
+		if !it.Valid() {
+			break
+		}
+		start := vectorKey(pid, nil)
+		it.Seek(start)
+		if err := readPartition(start); err != nil {
+			return scanned, err
 		}
 	}
-	return nil
+	return scanned, nil
 }
 
 // scanSource goes through the records of a source, and considers the ones that have a vector.
+// The vector of a record is found where the record is, so which partitions are read is of no
+// matter.
 func (s Search[K, V]) scanSource(src iterutil.Iterator[K, *V], consider func(rawKey, stored []byte) error) error {
 	type rawKeyer interface {
 		RawKey() ([]byte, error)
@@ -343,7 +466,7 @@ func (s Search[K, V]) scanSource(src iterutil.Iterator[K, *V], consider func(raw
 			return err
 		}
 
-		stored, err := s.ins.entries.Get(rawKey)
+		stored, err := s.ins.find(rawKey)
 		if errors.Is(err, kv.ErrNotFound) {
 			continue
 		}
@@ -364,10 +487,11 @@ func (s Search[K, V]) scanSource(src iterutil.Iterator[K, *V], consider func(raw
 // Results are the records that a search found, the nearest first. They are iterated over like
 // any other records, and they also tell the distance of each.
 type Results[K, V any] struct {
-	ins    *Instance[K, V]
-	hits   []hit[V]
-	pos    int
-	closed bool
+	ins     *Instance[K, V]
+	hits    []hit[V]
+	scanned int
+	pos     int
+	closed  bool
 	// set is the keys of the hits, which is made when it is first needed.
 	set map[string]struct{}
 }
@@ -455,6 +579,13 @@ func (r *Results[K, V]) Contains(rawKey []byte, _ *V) (bool, error) {
 	}
 	_, ok := r.set[string(rawKey)]
 	return ok, nil
+}
+
+// Scanned returns the number of vectors that the search compared the query with. It is what
+// the time of a search is spent on, and a search of a partitioned index is meant to keep it
+// well below the number of vectors that the index has.
+func (r *Results[K, V]) Scanned() int {
+	return r.scanned
 }
 
 // Len returns the number of results in all, wherever the iterator is.

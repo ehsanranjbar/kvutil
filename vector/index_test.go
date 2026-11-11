@@ -126,6 +126,12 @@ func (l *library) nearest(t *testing.T, db kv.DB, q []float32, k int) []int64 {
 	return keys
 }
 
+// check checks the keys of the index against the docs.
+func (l *library) check(t *testing.T, db kv.DB) layout {
+	t.Helper()
+	return checkLayout(t, db, l.x, l.docs)
+}
+
 // vectorOf returns the vector that the index has for a doc.
 func (l *library) vectorOf(t *testing.T, db kv.DB, id int64) ([]float32, error) {
 	t.Helper()
@@ -167,11 +173,13 @@ func TestMaintenance(t *testing.T) {
 		_, err = l.vectorOf(t, db, 2)
 		require.ErrorIs(t, err, kv.ErrNotFound)
 		require.Equal(t, []int64{1, 3}, l.nearest(t, db, q, 10))
+		l.check(t, db)
 
 		// And gets in again with one.
 		put(t, db, l.docs, map[int64]doc{2: {Title: "north", Embedding: []float32{0, 2}}})
 		require.Equal(t, 3, entries(t, db, l.x))
 		require.Equal(t, []int64{2, 1, 3}, l.nearest(t, db, q, 10))
+		l.check(t, db)
 
 		// A deleted record leaves it.
 		del(t, db, l.docs, 3)
@@ -179,6 +187,7 @@ func TestMaintenance(t *testing.T) {
 		_, err = l.vectorOf(t, db, 3)
 		require.ErrorIs(t, err, kv.ErrNotFound)
 		require.Equal(t, []int64{2, 1}, l.nearest(t, db, q, 10))
+		l.check(t, db)
 
 		// Deleting a record that has no vector, and one that does not exist, does nothing.
 		put(t, db, l.docs, map[int64]doc{4: {Title: "empty"}, 5: {Title: "empty too", Embedding: []float32{}}})
@@ -192,6 +201,7 @@ func TestMaintenance(t *testing.T) {
 		del(t, db, l.docs, 2)
 		require.Zero(t, entries(t, db, l.x))
 		require.Empty(t, l.nearest(t, db, q, 10))
+		l.check(t, db)
 	})
 }
 
@@ -207,6 +217,7 @@ func TestRecordsWithoutVector(t *testing.T) {
 		})
 		require.Equal(t, 2, entries(t, db, l.x))
 		require.Equal(t, []int64{3, 1}, l.nearest(t, db, []float32{0, 0}, 10))
+		l.check(t, db)
 	})
 }
 
@@ -258,6 +269,7 @@ func TestInvalidVectors(t *testing.T) {
 		v, err := l.vectorOf(t, db, 1)
 		require.NoError(t, err)
 		require.InDeltaSlice(t, []float32{1, 0}, v, 1e-6)
+		l.check(t, db)
 	})
 
 	// A zero vector has no direction only where the cosine is measured.
@@ -275,6 +287,7 @@ func TestInvalidVectors(t *testing.T) {
 		require.NoError(t, trySet(t, db, l.docs, 3, doc{Embedding: []float32{1e18, -1e18}}))
 		del(t, db, l.docs, 3)
 		require.Equal(t, []int64{1}, l.nearest(t, db, []float32{0, 0}, 5))
+		l.check(t, db)
 	})
 }
 
@@ -350,6 +363,7 @@ func TestUnchangedVector(t *testing.T) {
 		require.NoError(t, err)
 		require.InDeltaSlice(t, []float32{0, 1}, v, 1e-6)
 		require.Equal(t, 2, entries(t, db, l.x))
+		l.check(t, db)
 	})
 }
 
@@ -366,7 +380,7 @@ func TestCorruptEntry(t *testing.T) {
 		rawKey, err := l.docs.KeyCodec().Encode(2)
 		require.NoError(t, err)
 		require.NoError(t, db.Update(func(tx kv.Tx) error {
-			return tx.Set(append(append(append([]byte{}, l.x.Prefix()...), 'v'), rawKey...), []byte{1, 2, 3})
+			return tx.Set(vectorEntryKey(l.x.Prefix(), 0, rawKey), []byte{1, 2, 3})
 		}))
 
 		_, err = l.vectorOf(t, db, 2)
@@ -433,6 +447,7 @@ func TestMigration(t *testing.T) {
 		require.NoError(t, v2.docs.Check(db))
 		require.Equal(t, 3, entries(t, db, v2.x))
 		require.Equal(t, []int64{3, 1, 2}, v2.nearest(t, db, q, 10))
+		v2.check(t, db)
 
 		again, err := v2.docs.Migrate(ctx, db)
 		require.NoError(t, err)
@@ -454,6 +469,7 @@ func TestMigration(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, v4.docs.Check(db))
 		require.Equal(t, []int64{3, 2, 1}, v4.nearest(t, db, q, 10))
+		v4.check(t, db)
 		v, err := v4.vectorOf(t, db, 1)
 		require.NoError(t, err)
 		require.Equal(t, []float32{10, 1}, v)
@@ -500,10 +516,12 @@ func TestRebuild(t *testing.T) {
 		require.NoError(t, vector.Rebuild(context.Background(), db, l.x))
 		require.Equal(t, withVector, entries(t, db, l.x))
 		require.Equal(t, want, l.nearest(t, db, []float32{500, 0}, 20))
+		l.check(t, db)
 
 		// Building it again deletes what is there, so it makes no difference.
 		require.NoError(t, vector.Rebuild(context.Background(), db, l.x))
 		require.Equal(t, withVector, entries(t, db, l.x))
+		l.check(t, db)
 
 		// A build that is cancelled stops.
 		ctx, cancel := context.WithCancel(context.Background())

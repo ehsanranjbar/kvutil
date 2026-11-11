@@ -3,27 +3,48 @@ package vector
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
+	"errors"
 	"fmt"
 	"slices"
 	"strconv"
+	"sync/atomic"
 
-	"github.com/ehsanranjbar/kvutil"
 	"github.com/ehsanranjbar/kvutil/kv"
 	"github.com/ehsanranjbar/kvutil/kv/prefix"
 	"github.com/ehsanranjbar/kvutil/migrate"
 	extstore "github.com/ehsanranjbar/kvutil/store/ext"
 )
 
-// entriesKey is what the prefix of the entries is made of, after the prefix of the extension.
-// An entry is under that and the primary key of its record.
-const entriesKey = 'v'
+// The keys of an index, under the prefix of its extension. All the integers are 4 bytes,
+// big-endian.
+//
+//	'p' <partition> <primary key>  the vector of a record, in the partition it is in.
+//	'k' <primary key>              the partition that a record is in, if it is in one.
+//	'c' <partition>                the centroid of a partition.
+//	's'                            the state: a nonce, and the next partition id.
+//
+// The partition 0 is the unplaced area, which is where a record is written. It is in no
+// partition until the index is built again, and every search reads it in full.
+const (
+	vectorsKey   = 'p'
+	placesKey    = 'k'
+	centroidsKey = 'c'
+	stateKey     = 's'
+)
 
-// encoding identifies how a vector is stored, which the index records of itself.
-const encoding = "f32le"
+// unplaced is the partition of the vectors that are in none.
+const unplaced uint32 = 0
+
+// encoding identifies how a vector is stored and where, which the index records of itself.
+const encoding = "f32le/p1"
 
 // options are what the options of an index set.
 type options struct {
-	version string
+	version     string
+	partitioned bool
+	size        int
+	probes      int
 }
 
 // Option is an option of an index.
@@ -42,6 +63,39 @@ func Versioned(version string) Option {
 	}
 }
 
+// Partitioned makes the index keep its vectors in partitions of about size vectors at most,
+// which a search reads the nearest ones of instead of all the vectors. size 0 is a default
+// that depends on the dimensions; it panics if size is negative.
+//
+// The partitions are formed when the index is built (see Rebuild), and the records that are
+// written after that are found by every search until it is built again.
+func Partitioned(size int) Option {
+	if size < 0 {
+		panic(fmt.Sprintf("vector: the size of a partition must not be negative, not %d", size))
+	}
+	return func(o *options) {
+		o.partitioned, o.size = true, size
+	}
+}
+
+// Probes sets how many partitions a search of the index reads when the search does not say.
+// 0, the default, is the square root of the number of partitions, rounded up. It panics if n
+// is negative.
+func Probes(n int) Option {
+	if n < 0 {
+		panic(fmt.Sprintf("vector: the number of probes must not be negative, not %d", n))
+	}
+	return func(o *options) {
+		o.probes = n
+	}
+}
+
+// defaultPartitionSize returns the size of a partition that is used when none is given: the
+// vectors of a partition are about a megabyte, within limits.
+func defaultPartitionSize(dims int) int {
+	return min(1024, max(64, (1<<20)/(4*dims)))
+}
+
 // Index is a vector index of a store. It is kept up to date as an extension of the store,
 // and is instantiated for a transaction to search in.
 type Index[K, V any] struct {
@@ -51,10 +105,15 @@ type Index[K, V any] struct {
 	metric  Metric
 	get     func(*V) []float32
 	version string
-	// prefix is the prefix of the extension, and entries the one that the entries are under.
-	// They are set when the index is added to its store.
-	prefix  []byte
-	entries []byte
+	// size is the size of a partition, which is 0 if the index is not partitioned, and probes is
+	// the number of partitions that a search reads, if it is not 0.
+	size   int
+	probes int
+	// prefix is the prefix of the extension, which the keys of the index are under. It is set when
+	// the index is added to its store.
+	prefix []byte
+	// parts is the partitions as they were last read, which are read again if the state changed.
+	parts atomic.Pointer[partitions]
 }
 
 // On defines a new vector index on a store. get returns the vector of a record; a record for
@@ -90,6 +149,13 @@ func On[K, V any](
 		metric:  metric,
 		get:     get,
 		version: o.version,
+		probes:  o.probes,
+	}
+	if o.partitioned {
+		x.size = o.size
+		if x.size == 0 {
+			x.size = defaultPartitionSize(dims)
+		}
 	}
 	store.AddExtension(name, maintainer[K, V]{x: x})
 	return x
@@ -110,6 +176,11 @@ func (x *Index[K, V]) Metric() Metric {
 	return x.metric
 }
 
+// PartitionSize returns the size of the partitions of the index, or 0 if it is not partitioned.
+func (x *Index[K, V]) PartitionSize() int {
+	return x.size
+}
+
 // Prefix returns the prefix that the index keeps its entries under, which is given to it when it
 // is added to its store. The slice must not be modified.
 func (x *Index[K, V]) Prefix() []byte {
@@ -119,9 +190,9 @@ func (x *Index[K, V]) Prefix() []byte {
 // Instantiate creates the instance of the index for a transaction.
 func (x *Index[K, V]) Instantiate(tx kv.Tx) *Instance[K, V] {
 	return &Instance[K, V]{
-		x:       x,
-		tx:      tx,
-		entries: prefix.New(tx, x.entries),
+		x:    x,
+		tx:   tx,
+		data: prefix.New(tx, x.prefix),
 	}
 }
 
@@ -136,7 +207,53 @@ func (x *Index[K, V]) attributes() map[string]string {
 	if x.version != "" {
 		attrs["version"] = x.version
 	}
+	// The number of probes is no attribute, as it changes no stored data.
+	if x.size > 0 {
+		attrs["partitions"] = strconv.Itoa(x.size)
+	}
 	return attrs
+}
+
+// vectorKey returns the key of the vector of a record in a partition, which the keys of the
+// records in the partition follow in the order of the store.
+func vectorKey(pid uint32, rawKey []byte) []byte {
+	k := make([]byte, 0, 5+len(rawKey))
+	k = append(k, vectorsKey)
+	k = binary.BigEndian.AppendUint32(k, pid)
+	return append(k, rawKey...)
+}
+
+// placeKey returns the key of the partition that a record is in.
+func placeKey(rawKey []byte) []byte {
+	return append([]byte{placesKey}, rawKey...)
+}
+
+// centroidKey returns the key of the centroid of a partition.
+func centroidKey(pid uint32) []byte {
+	return binary.BigEndian.AppendUint32([]byte{centroidsKey}, pid)
+}
+
+// splitVectorKey returns the primary key of a record and the partition of a vector from its key.
+func splitVectorKey(key []byte) (rawKey []byte, pid uint32, err error) {
+	if len(key) < 5 {
+		return nil, 0, fmt.Errorf("%w: the key %x is too short", ErrCorrupt, key)
+	}
+	return key[5:], binary.BigEndian.Uint32(key[1:5]), nil
+}
+
+// readPlace returns the partition that a record is in, and whether it is in one.
+func readPlace(data *prefix.Tx, rawKey []byte) (pid uint32, placed bool, err error) {
+	b, err := data.Get(placeKey(rawKey))
+	if errors.Is(err, kv.ErrNotFound) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, err
+	}
+	if len(b) != 4 {
+		return 0, false, fmt.Errorf("%w: the place of the key %x has %d bytes", ErrCorrupt, rawKey, len(b))
+	}
+	return binary.BigEndian.Uint32(b), true, nil
 }
 
 // maintainer is the extension that keeps an index up to date.
@@ -148,7 +265,6 @@ type maintainer[K, V any] struct {
 func (m maintainer[K, V]) Keep(prefix []byte) migrate.Part {
 	x := m.x
 	x.prefix = bytes.Clone(prefix)
-	x.entries = append(bytes.Clone(prefix), entriesKey)
 	return migrate.Part{
 		Kind:       "vector",
 		Attributes: x.attributes,
@@ -163,23 +279,29 @@ func (m maintainer[K, V]) Keep(prefix []byte) migrate.Part {
 // Instantiate implements the extstore.Extension interface.
 func (m maintainer[K, V]) Instantiate(tx kv.Tx) extstore.ExtensionInstance[K, V] {
 	return &maintenance[K, V]{
-		x:       m.x,
-		entries: prefix.New(tx, m.x.entries),
+		x:    m.x,
+		data: prefix.New(tx, m.x.prefix),
 	}
 }
 
 type maintenance[K, V any] struct {
-	x       *Index[K, V]
-	entries *prefix.Tx
+	x    *Index[K, V]
+	data *prefix.Tx
 }
 
 // OnSet implements the extstore.ExtensionInstance interface.
+//
+// A vector is always written to the unplaced area, which every search reads, so that writers
+// share no key and the record is found at once. Which partition it belongs to is for the build
+// to say.
 func (m *maintenance[K, V]) OnSet(_ K, rawKey []byte, old, new *V, _ ...any) error {
+	hadVector := old != nil && len(m.x.get(old)) > 0
+
 	vec := m.x.get(new)
 	if len(vec) == 0 {
 		// The record has no vector now, so the entry of the one it had is to go.
-		if old != nil && len(m.x.get(old)) > 0 {
-			return m.entries.Delete(rawKey)
+		if hadVector {
+			return m.remove(rawKey)
 		}
 		return nil
 	}
@@ -193,7 +315,15 @@ func (m *maintenance[K, V]) OnSet(_ K, rawKey []byte, old, new *V, _ ...any) err
 	if old != nil && slices.Equal(m.x.get(old), vec) {
 		return nil
 	}
-	return m.entries.Set(rawKey, encode(stored))
+
+	// The vector that the record had is in a partition, if the index has them. Only then is
+	// there something to read.
+	if hadVector && m.x.size > 0 {
+		if err := m.unplace(rawKey); err != nil {
+			return err
+		}
+	}
+	return m.data.Set(vectorKey(unplaced, rawKey), encode(stored))
 }
 
 // OnDelete implements the extstore.ExtensionInstance interface.
@@ -201,94 +331,33 @@ func (m *maintenance[K, V]) OnDelete(_ K, rawKey []byte, old *V) error {
 	if len(m.x.get(old)) == 0 {
 		return nil
 	}
-	return m.entries.Delete(rawKey)
+	return m.remove(rawKey)
+}
+
+// remove deletes the vector of a record, wherever it is.
+func (m *maintenance[K, V]) remove(rawKey []byte) error {
+	if m.x.size > 0 {
+		if err := m.unplace(rawKey); err != nil {
+			return err
+		}
+	}
+	return m.data.Delete(vectorKey(unplaced, rawKey))
+}
+
+// unplace deletes the vector of a record from the partition it is in, if it is in one.
+func (m *maintenance[K, V]) unplace(rawKey []byte) error {
+	pid, placed, err := readPlace(m.data, rawKey)
+	if err != nil || !placed {
+		return err
+	}
+	if err := m.data.Delete(vectorKey(pid, rawKey)); err != nil {
+		return err
+	}
+	return m.data.Delete(placeKey(rawKey))
 }
 
 // batchSize returns the number of records that Rebuild indexes in a transaction. It is bounded
 // by the size of the vectors too, so that a transaction stays small whatever the dimensions.
 func (x *Index[K, V]) batchSize() int {
 	return min(500, max(16, (1<<20)/(4*x.dims)))
-}
-
-// Rebuild builds an index again from the records of its store: it deletes the entries that
-// the index has and writes the ones of every record. It is how an index that is defined on a
-// store with records in it gets to know of them, and migrate.Run calls it for an index that is
-// new, that has changed, or whose store was migrated.
-//
-// It must not run while records are written to the store. A record with a vector that is not
-// valid fails the build, which is left unfinished.
-func Rebuild[K, V any](ctx context.Context, db kv.DB, x *Index[K, V]) error {
-	start := x.prefix
-	if err := kv.DeleteRange(ctx, db, start, kv.PrefixEnd(start)); err != nil {
-		return fmt.Errorf("failed to clear the index %q: %w", x.name, err)
-	}
-
-	batch := x.batchSize()
-	var last *K
-	for more := true; more; {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-
-		// What a batch finds is only kept once its transaction is committed, as the function
-		// may run more than once.
-		var (
-			batchLast *K
-			batchSize int
-		)
-		err := db.Update(func(tx kv.Tx) error {
-			batchLast, batchSize = last, 0
-
-			var r kvutil.Range[K]
-			if last != nil {
-				r = r.After(*last)
-			}
-			it, err := x.store.Records(tx, r)
-			if err != nil {
-				return err
-			}
-			defer it.Close()
-
-			entries := prefix.New(tx, x.entries)
-			for ; it.Valid() && batchSize < batch; it.Next() {
-				batchSize++
-				key, err := it.Key()
-				if err != nil {
-					return err
-				}
-				record, err := it.Value()
-				if err != nil {
-					return err
-				}
-				if err := x.add(entries, key, record); err != nil {
-					return err
-				}
-				batchLast = &key
-			}
-			return nil
-		})
-		if err != nil {
-			return fmt.Errorf("failed to build the index %q: %w", x.name, err)
-		}
-		last, more = batchLast, batchSize == batch
-	}
-	return nil
-}
-
-// add writes the entry of a record, if it has a vector.
-func (x *Index[K, V]) add(entries *prefix.Tx, key K, record *V) error {
-	vec := x.get(record)
-	if len(vec) == 0 {
-		return nil
-	}
-
-	stored, err := x.prepare(vec)
-	if err != nil {
-		return fmt.Errorf("failed to index the record %v: %w", key, err)
-	}
-	rawKey, err := x.store.KeyCodec().Encode(key)
-	if err != nil {
-		return err
-	}
-	return entries.Set(rawKey, encode(stored))
 }

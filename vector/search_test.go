@@ -1,6 +1,7 @@
 package vector_test
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math"
@@ -39,9 +40,16 @@ type fixture struct {
 // another one, so that there are ties.
 func newFixture(t *testing.T, db kv.DB, metric vector.Metric) *fixture {
 	t.Helper()
+	return newFixtureWith(t, db, metric)
+}
+
+// newFixtureWith is newFixture for an index with options. An index that is partitioned is built
+// once the docs are written, so that they are in partitions.
+func newFixtureWith(t *testing.T, db kv.DB, metric vector.Metric, opts ...vector.Option) *fixture {
+	t.Helper()
 
 	f := &fixture{metric: metric, docs: extstore.New[int64, doc]("docs"), byID: map[int64]doc{}}
-	f.x = vector.On(f.docs, "by_embedding", oracleDims, metric, embedding)
+	f.x = vector.On(f.docs, "by_embedding", oracleDims, metric, embedding, opts...)
 	f.byLang = index.On(f.docs, "by_lang", field.Path[doc, string]("Lang"))
 	require.NoError(t, f.docs.Check(db))
 
@@ -74,6 +82,10 @@ func newFixture(t *testing.T, db kv.DB, metric vector.Metric) *fixture {
 		f.byID[id] = d
 	}
 	put(t, db, f.docs, f.byID)
+	if f.x.PartitionSize() > 0 {
+		require.NoError(t, vector.Rebuild(context.Background(), db, f.x))
+	}
+	checkLayout(t, db, f.x, f.docs)
 	f.query = random(rng)
 	return f
 }
@@ -217,7 +229,44 @@ func (f *fixture) verify(t *testing.T, name string, s vector.Search[int64, doc],
 
 func TestSearchOracle(t *testing.T) {
 	eachMetric(t, allMetrics, func(t *testing.T, db kv.DB, metric vector.Metric) {
-		f := newFixture(t, db, metric)
+		oracleCases(t, db, newFixture(t, db, metric), func(s vector.Search[int64, doc]) vector.Search[int64, doc] {
+			return s
+		})
+	})
+}
+
+// TestSearchOraclePartitioned runs the searches of the oracle on an index with partitions, which
+// find what an exact search does when they are exact, or read every partition.
+func TestSearchOraclePartitioned(t *testing.T) {
+	eachMetric(t, allMetrics, func(t *testing.T, db kv.DB, metric vector.Metric) {
+		f := newFixtureWith(t, db, metric, vector.Partitioned(20))
+		var partitions int
+		require.NoError(t, db.View(func(tx kv.Tx) error {
+			stats, err := f.x.Instantiate(tx).Stats()
+			partitions = stats.Partitions
+			require.Zero(t, stats.Unplaced)
+			return err
+		}))
+		require.Greater(t, partitions, 3)
+
+		t.Run("exact", func(t *testing.T) {
+			oracleCases(t, db, f, vector.Search[int64, doc].Exact)
+		})
+		t.Run("every partition", func(t *testing.T) {
+			oracleCases(t, db, f, func(s vector.Search[int64, doc]) vector.Search[int64, doc] {
+				return s.Probes(partitions)
+			})
+		})
+	})
+}
+
+// oracleCases runs searches of every kind on the docs of a fixture, which the oracle says what
+// they must find. The searches are changed by the function first.
+func oracleCases(t *testing.T, db kv.DB, f *fixture, tweak func(vector.Search[int64, doc]) vector.Search[int64, doc]) {
+	t.Helper()
+
+	metric := f.metric
+	{
 		none := math.NaN()
 
 		english := cond.Func("english", func(d *doc) bool { return d.Lang == "en" })
@@ -229,7 +278,7 @@ func TestSearchOracle(t *testing.T) {
 
 		require.NoError(t, db.View(func(tx kv.Tx) error {
 			ins := f.x.Instantiate(tx)
-			search := func() vector.Search[int64, doc] { return ins.Search(f.query) }
+			search := func() vector.Search[int64, doc] { return tweak(ins.Search(f.query)) }
 			fromRange := func() vector.Search[int64, doc] {
 				it, err := f.docs.Instantiate(tx).Iterator(kvutil.From[int64](100).Until(200))
 				require.NoError(t, err)
@@ -248,7 +297,7 @@ func TestSearchOracle(t *testing.T) {
 				// Nearest is a search with a limit.
 				nearest, err := ins.Nearest(f.query, k)
 				require.NoError(t, err)
-				limited, err := search().Limit(k).Run()
+				limited, err := ins.Search(f.query).Limit(k).Run()
 				require.NoError(t, err)
 				require.Equal(t, drain(t, limited), drain(t, nearest), name)
 			}
@@ -280,7 +329,7 @@ func TestSearchOracle(t *testing.T) {
 			f.verify(t, "lang where limit", fromLang().Where(rare), both, 2, none)
 			return nil
 		}))
-	})
+	}
 }
 
 // source is a source of records that counts how many times it is closed.

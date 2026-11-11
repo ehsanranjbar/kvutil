@@ -4,6 +4,12 @@
 // The index is an extension of a store, kept up to date with it like any other. Searching
 // compares the query with every vector that is stored, so the result is exact and the time it
 // takes grows with the number of records.
+//
+// An index can be partitioned (see Partitioned) to search faster for an approximate result: its
+// vectors are grouped around centroids when it is built, and a search reads the vectors of the
+// nearest groups only. The distances are always exact, as the whole vectors are stored; what is
+// approximate is which records are found. The records that are written after the build are in
+// no group, and every search reads them, until the index is built again.
 package vector
 
 import (
