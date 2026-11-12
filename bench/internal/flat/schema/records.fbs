@@ -1,0 +1,106 @@
+// The values of the records that the stores of kvutil keep in the benchmarks, without the id:
+// kvutil keeps it in the key.
+//
+// An absent string (the field is not set) is a nil pointer in the Go record, and a string that
+// is present, even an empty one, is a non-nil pointer. Time is Unix nanoseconds. A field is only
+// ever appended to a table, never moved: a record written without a newer field reads it as zero,
+// and a reader that does not know a newer field ignores it (see OrderV2 and OrderV3).
+namespace fbgen;
+
+table Order {
+  code:string;
+  customer:string;
+  name:string;
+  status:string;
+  total:long;
+  qty:int;
+  at:long;
+  note:string;      // absent = nil
+  tags:[string];
+  payload:[ubyte];
+}
+
+table Book {
+  code:string;
+  author:string;
+  year:long;
+  price:long;
+  in_print:bool;
+  tags:[string];
+  title:string;
+  subtitle:string;  // absent = nil
+  score:long;
+  payload:[ubyte];
+}
+
+table Doc {
+  lang:string;
+  year:long;
+  embedding:[float];
+}
+
+table Event {
+  customer:string;
+  amount:long;
+  at:long;
+  kind:string;
+}
+
+// The records of the relations workload.
+
+table Parent {
+  name:string;
+  region:string;
+  created:long;
+}
+
+table Child {
+  title:string;
+  qty:long;
+  status:string;
+  payload:[ubyte];
+}
+
+table Entity {
+  name:string;
+  kind:string;
+}
+
+table PairData {
+  role:string;
+  since:long;
+}
+
+// The versions of the order of the lifecycle workload. OrderV2 is Order with a priority, and
+// OrderV3 is OrderV2 with one more field, extra. The fields are the same in the same places, so
+// a record written as OrderV2 reads as an OrderV3 with an empty extra (the change that needs no
+// migration), and a record written as OrderV3 reads as an OrderV2 that ignores extra.
+
+table OrderV2 {
+  code:string;
+  customer:string;
+  name:string;
+  status:string;
+  total:long;
+  qty:int;
+  at:long;
+  note:string;      // absent = nil
+  tags:[string];
+  payload:[ubyte];
+  priority:int;
+}
+
+table OrderV3 {
+  code:string;
+  customer:string;
+  name:string;
+  status:string;
+  total:long;
+  qty:int;
+  at:long;
+  note:string;      // absent = nil
+  tags:[string];
+  payload:[ubyte];
+  priority:int;
+  extra:string;
+}

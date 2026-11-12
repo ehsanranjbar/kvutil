@@ -3,6 +3,9 @@
 // answers one question: which of the two formats suits the stored records of kvutil. The id of a
 // record is not in any of the formats: kvutil keeps it in the key.
 //
+// FlatBuffers is bench/internal/flat, which the benchmarks use for their stores (its codecs are
+// what the rows of "flatbuffers" measure); this file is the Cap'n Proto side.
+//
 // Mapping, the same in both formats:
 //   - time.Time is Unix nanoseconds (int64). The dataset has second resolution in UTC, and a
 //     decoded time is time.Unix(0, n).UTC(), which equals the generated one.
@@ -17,166 +20,18 @@
 package formats
 
 import (
-	"bytes"
 	"encoding/binary"
 	"errors"
-	"fmt"
 	"time"
 
 	capnp "capnproto.org/go/capnp/v3"
-	flatbuffers "github.com/google/flatbuffers/go"
 
 	"github.com/ehsanranjbar/kvutil/bench/formats/capgen"
-	"github.com/ehsanranjbar/kvutil/bench/formats/fbgen"
 	"github.com/ehsanranjbar/kvutil/bench/internal/dataset"
 )
 
 // ---------------------------------------------------------------------------------------------
-// FlatBuffers
-//
-// The encoders use the builder by hand (the generated Start/Add/End functions). The decoders read
-// with the generated accessors and not with the object API (UnPack): that one maps an absent
-// string to "" and so loses the nil of Order.Note and Book.Subtitle.
-
-// BuildOrderFB builds the record into an empty builder and finishes it: the encoding is
-// b.FinishedBytes(), a slice of the builder's buffer.
-func BuildOrderFB(b *flatbuffers.Builder, o *dataset.Order) {
-	code := b.CreateString(o.Code)
-	customer := b.CreateString(o.Customer)
-	name := b.CreateString(o.Name)
-	status := b.CreateString(o.Status)
-	var note flatbuffers.UOffsetT
-	if o.Note != nil {
-		note = b.CreateString(*o.Note)
-	}
-	tags := createStringVector(b, o.Tags, fbgen.OrderStartTagsVector)
-	var payload flatbuffers.UOffsetT
-	if len(o.Payload) > 0 {
-		payload = b.CreateByteVector(o.Payload)
-	}
-
-	fbgen.OrderStart(b)
-	fbgen.OrderAddCode(b, code)
-	fbgen.OrderAddCustomer(b, customer)
-	fbgen.OrderAddName(b, name)
-	fbgen.OrderAddStatus(b, status)
-	fbgen.OrderAddTotal(b, o.Total)
-	fbgen.OrderAddQty(b, o.Qty)
-	fbgen.OrderAddAt(b, o.At.UnixNano())
-	if o.Note != nil {
-		fbgen.OrderAddNote(b, note)
-	}
-	if tags != 0 {
-		fbgen.OrderAddTags(b, tags)
-	}
-	if payload != 0 {
-		fbgen.OrderAddPayload(b, payload)
-	}
-	fbgen.FinishOrderBuffer(b, fbgen.OrderEnd(b))
-}
-
-// BuildBookFB is BuildOrderFB for a book.
-func BuildBookFB(b *flatbuffers.Builder, bk *dataset.Book) {
-	code := b.CreateString(bk.Code)
-	author := b.CreateString(bk.Author)
-	title := b.CreateString(bk.Title)
-	var subtitle flatbuffers.UOffsetT
-	if bk.Subtitle != nil {
-		subtitle = b.CreateString(*bk.Subtitle)
-	}
-	tags := createStringVector(b, bk.Tags, fbgen.BookStartTagsVector)
-	var payload flatbuffers.UOffsetT
-	if len(bk.Payload) > 0 {
-		payload = b.CreateByteVector(bk.Payload)
-	}
-
-	fbgen.BookStart(b)
-	fbgen.BookAddCode(b, code)
-	fbgen.BookAddAuthor(b, author)
-	fbgen.BookAddYear(b, bk.Year)
-	fbgen.BookAddPrice(b, bk.Price)
-	fbgen.BookAddInPrint(b, bk.InPrint)
-	if tags != 0 {
-		fbgen.BookAddTags(b, tags)
-	}
-	fbgen.BookAddTitle(b, title)
-	if bk.Subtitle != nil {
-		fbgen.BookAddSubtitle(b, subtitle)
-	}
-	fbgen.BookAddScore(b, bk.Score)
-	if payload != 0 {
-		fbgen.BookAddPayload(b, payload)
-	}
-	fbgen.FinishBookBuffer(b, fbgen.BookEnd(b))
-}
-
-// BuildDocFB is BuildOrderFB for a document.
-func BuildDocFB(b *flatbuffers.Builder, d *dataset.Doc) {
-	lang := b.CreateString(d.Lang)
-	var emb flatbuffers.UOffsetT
-	if len(d.Embedding) > 0 {
-		fbgen.DocStartEmbeddingVector(b, len(d.Embedding))
-		for i := len(d.Embedding) - 1; i >= 0; i-- {
-			b.PrependFloat32(d.Embedding[i])
-		}
-		emb = b.EndVector(len(d.Embedding))
-	}
-
-	fbgen.DocStart(b)
-	fbgen.DocAddLang(b, lang)
-	fbgen.DocAddYear(b, int64(d.Year))
-	if emb != 0 {
-		fbgen.DocAddEmbedding(b, emb)
-	}
-	fbgen.FinishDocBuffer(b, fbgen.DocEnd(b))
-}
-
-func createStringVector(b *flatbuffers.Builder, ss []string, start func(*flatbuffers.Builder, int) flatbuffers.UOffsetT) flatbuffers.UOffsetT {
-	if len(ss) == 0 {
-		return 0
-	}
-	var buf [8]flatbuffers.UOffsetT
-	offs := buf[:0]
-	for _, s := range ss {
-		offs = append(offs, b.CreateString(s))
-	}
-	start(b, len(offs))
-	for i := len(offs) - 1; i >= 0; i-- {
-		b.PrependUOffsetT(offs[i])
-	}
-	return b.EndVector(len(offs))
-}
-
-// EncodeOrderFB encodes a record with a builder that is reused: it resets the builder first, and
-// returns a copy of the encoding that the caller owns (the builder's buffer is reused by the next
-// call).
-func EncodeOrderFB(b *flatbuffers.Builder, o *dataset.Order) []byte {
-	b.Reset()
-	BuildOrderFB(b, o)
-	return bytes.Clone(b.FinishedBytes())
-}
-
-// EncodeBookFB is EncodeOrderFB for a book.
-func EncodeBookFB(b *flatbuffers.Builder, bk *dataset.Book) []byte {
-	b.Reset()
-	BuildBookFB(b, bk)
-	return bytes.Clone(b.FinishedBytes())
-}
-
-// EncodeDocFB is EncodeOrderFB for a document.
-func EncodeDocFB(b *flatbuffers.Builder, d *dataset.Doc) []byte {
-	b.Reset()
-	BuildDocFB(b, d)
-	return bytes.Clone(b.FinishedBytes())
-}
-
-// recoverFB turns the panic of the accessors on a buffer that is corrupt into an error: the
-// FlatBuffers Go accessors do not check the bounds and panic with an index out of range.
-func recoverFB(err *error) {
-	if r := recover(); r != nil {
-		*err = fmt.Errorf("formats: corrupt flatbuffer: %v", r)
-	}
-}
+// Cap'n Proto
 
 func copyBytes(b []byte) []byte {
 	if len(b) == 0 {
@@ -184,74 +39,6 @@ func copyBytes(b []byte) []byte {
 	}
 	return append([]byte(nil), b...)
 }
-
-// DecodeOrderFB decodes a record, copying out of bz.
-func DecodeOrderFB(bz []byte) (o dataset.Order, err error) {
-	defer recoverFB(&err)
-	t := fbgen.GetRootAsOrder(bz, 0)
-	o.Code = string(t.Code())
-	o.Customer = string(t.Customer())
-	o.Name = string(t.Name())
-	o.Status = string(t.Status())
-	o.Total = t.Total()
-	o.Qty = t.Qty()
-	o.At = time.Unix(0, t.At()).UTC()
-	if n := t.Note(); n != nil { // absent is nil, and present (even empty) is not
-		s := string(n)
-		o.Note = &s
-	}
-	if n := t.TagsLength(); n > 0 {
-		o.Tags = make([]string, n)
-		for i := range o.Tags {
-			o.Tags[i] = string(t.Tags(i))
-		}
-	}
-	o.Payload = copyBytes(t.PayloadBytes())
-	return o, nil
-}
-
-// DecodeBookFB decodes a book, copying out of bz.
-func DecodeBookFB(bz []byte) (bk dataset.Book, err error) {
-	defer recoverFB(&err)
-	t := fbgen.GetRootAsBook(bz, 0)
-	bk.Code = string(t.Code())
-	bk.Author = string(t.Author())
-	bk.Year = t.Year()
-	bk.Price = t.Price()
-	bk.InPrint = t.InPrint()
-	if n := t.TagsLength(); n > 0 {
-		bk.Tags = make([]string, n)
-		for i := range bk.Tags {
-			bk.Tags[i] = string(t.Tags(i))
-		}
-	}
-	bk.Title = string(t.Title())
-	if n := t.Subtitle(); n != nil {
-		s := string(n)
-		bk.Subtitle = &s
-	}
-	bk.Score = t.Score()
-	bk.Payload = copyBytes(t.PayloadBytes())
-	return bk, nil
-}
-
-// DecodeDocFB decodes a document, copying out of bz.
-func DecodeDocFB(bz []byte) (d dataset.Doc, err error) {
-	defer recoverFB(&err)
-	t := fbgen.GetRootAsDoc(bz, 0)
-	d.Lang = string(t.Lang())
-	d.Year = int(t.Year())
-	if n := t.EmbeddingLength(); n > 0 {
-		d.Embedding = make([]float32, n)
-		for i := range d.Embedding {
-			d.Embedding[i] = t.Embedding(i)
-		}
-	}
-	return d, nil
-}
-
-// ---------------------------------------------------------------------------------------------
-// Cap'n Proto
 
 // CapnpWriter encodes records into messages of one segment.
 type CapnpWriter struct {

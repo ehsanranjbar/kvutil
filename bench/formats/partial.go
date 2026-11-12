@@ -1,11 +1,11 @@
 package formats
 
-// The record types that kvutil stores with FlatBuffers and with Cap'n Proto, for the codec.Binary
-// codec: the type of the record with MarshalBinary, UnmarshalBinary and UnmarshalPartial. They are
-// what a store would be given (codec.Binary[OrderFB]()) to use these formats, and so what the
-// how=partial rows of the benchmarks measure.
+// The record types that kvutil stores with Cap'n Proto (and the binary one written by hand), for
+// the codec.Binary codec: the type of the record with MarshalBinary, UnmarshalBinary and
+// UnmarshalPartial. They are what a store would be given (codec.Binary[OrderCapnp]()) to use the
+// format, and so what the how=partial rows of the benchmarks measure. FlatBuffers has codecs of
+// its own, in bench/internal/flat (flat.Order()), which have partial decoding.
 //
-//	OrderFB, BookFB, DocFB                  FlatBuffers
 //	OrderCapnp, BookCapnp, DocCapnp         Cap'n Proto, a message per decode (capnp.Unmarshal), which
 //	                                        is all that a store can do: it has no reader per iterator
 //	OrderCapnpReuse, BookCapnpReuse, DocCapnpReuse
@@ -24,10 +24,8 @@ import (
 	"time"
 
 	capnp "capnproto.org/go/capnp/v3"
-	flatbuffers "github.com/google/flatbuffers/go"
 
 	"github.com/ehsanranjbar/kvutil/bench/formats/capgen"
-	"github.com/ehsanranjbar/kvutil/bench/formats/fbgen"
 	"github.com/ehsanranjbar/kvutil/bench/internal/dataset"
 )
 
@@ -100,167 +98,6 @@ func (o *OrderBin) UnmarshalPartial(bz []byte, fields []string) error {
 		}
 	}
 	return r.err
-}
-
-// ---------------------------------------------------------------------------------------------
-// FlatBuffers
-
-func fbStrings(n int, at func(int) []byte) []string {
-	if n <= 0 {
-		return nil
-	}
-	ss := make([]string, n)
-	for i := range ss {
-		ss[i] = string(at(i))
-	}
-	return ss
-}
-
-// OrderFB is an Order stored as a FlatBuffer.
-type OrderFB dataset.Order
-
-// MarshalBinary implements encoding.BinaryMarshaler.
-func (o *OrderFB) MarshalBinary() ([]byte, error) {
-	b := flatbuffers.NewBuilder(1024)
-	BuildOrderFB(b, (*dataset.Order)(o))
-	return b.FinishedBytes(), nil
-}
-
-// UnmarshalBinary implements encoding.BinaryUnmarshaler.
-func (o *OrderFB) UnmarshalBinary(bz []byte) error {
-	d, err := DecodeOrderFB(bz)
-	*o = OrderFB(d)
-	return err
-}
-
-// UnmarshalPartial implements codec.PartialUnmarshaler.
-func (o *OrderFB) UnmarshalPartial(data []byte, fields []string) (err error) {
-	defer recoverFB(&err)
-	t := fbgen.GetRootAsOrder(data, 0)
-	for _, f := range fields {
-		switch f {
-		case "Code":
-			o.Code = string(t.Code())
-		case "Customer":
-			o.Customer = string(t.Customer())
-		case "Name":
-			o.Name = string(t.Name())
-		case "Status":
-			o.Status = string(t.Status())
-		case "Total":
-			o.Total = t.Total()
-		case "Qty":
-			o.Qty = t.Qty()
-		case "At":
-			o.At = time.Unix(0, t.At()).UTC()
-		case "Note":
-			if n := t.Note(); n != nil {
-				s := string(n)
-				o.Note = &s
-			}
-		case "Tags":
-			o.Tags = fbStrings(t.TagsLength(), t.Tags)
-		case "Payload":
-			o.Payload = copyBytes(t.PayloadBytes())
-		default:
-			return o.UnmarshalBinary(data)
-		}
-	}
-	return nil
-}
-
-// BookFB is a Book stored as a FlatBuffer.
-type BookFB dataset.Book
-
-// MarshalBinary implements encoding.BinaryMarshaler.
-func (bk *BookFB) MarshalBinary() ([]byte, error) {
-	b := flatbuffers.NewBuilder(1024)
-	BuildBookFB(b, (*dataset.Book)(bk))
-	return b.FinishedBytes(), nil
-}
-
-// UnmarshalBinary implements encoding.BinaryUnmarshaler.
-func (bk *BookFB) UnmarshalBinary(bz []byte) error {
-	d, err := DecodeBookFB(bz)
-	*bk = BookFB(d)
-	return err
-}
-
-// UnmarshalPartial implements codec.PartialUnmarshaler.
-func (bk *BookFB) UnmarshalPartial(data []byte, fields []string) (err error) {
-	defer recoverFB(&err)
-	t := fbgen.GetRootAsBook(data, 0)
-	for _, f := range fields {
-		switch f {
-		case "Code":
-			bk.Code = string(t.Code())
-		case "Author":
-			bk.Author = string(t.Author())
-		case "Year":
-			bk.Year = t.Year()
-		case "Price":
-			bk.Price = t.Price()
-		case "InPrint":
-			bk.InPrint = t.InPrint()
-		case "Tags":
-			bk.Tags = fbStrings(t.TagsLength(), t.Tags)
-		case "Title":
-			bk.Title = string(t.Title())
-		case "Subtitle":
-			if n := t.Subtitle(); n != nil {
-				s := string(n)
-				bk.Subtitle = &s
-			}
-		case "Score":
-			bk.Score = t.Score()
-		case "Payload":
-			bk.Payload = copyBytes(t.PayloadBytes())
-		default:
-			return bk.UnmarshalBinary(data)
-		}
-	}
-	return nil
-}
-
-// DocFB is a Doc stored as a FlatBuffer.
-type DocFB dataset.Doc
-
-// MarshalBinary implements encoding.BinaryMarshaler.
-func (d *DocFB) MarshalBinary() ([]byte, error) {
-	b := flatbuffers.NewBuilder(1024)
-	BuildDocFB(b, (*dataset.Doc)(d))
-	return b.FinishedBytes(), nil
-}
-
-// UnmarshalBinary implements encoding.BinaryUnmarshaler.
-func (d *DocFB) UnmarshalBinary(bz []byte) error {
-	v, err := DecodeDocFB(bz)
-	*d = DocFB(v)
-	return err
-}
-
-// UnmarshalPartial implements codec.PartialUnmarshaler.
-func (d *DocFB) UnmarshalPartial(data []byte, fields []string) (err error) {
-	defer recoverFB(&err)
-	t := fbgen.GetRootAsDoc(data, 0)
-	for _, f := range fields {
-		switch f {
-		case "Lang":
-			d.Lang = string(t.Lang())
-		case "Year":
-			d.Year = int(t.Year())
-		case "Embedding":
-			if n := t.EmbeddingLength(); n > 0 {
-				d.Embedding = make([]float32, n)
-				for i := range d.Embedding {
-					d.Embedding[i] = t.Embedding(i)
-				}
-			}
-		default:
-			return d.UnmarshalBinary(data)
-		}
-	}
-	return nil
 }
 
 // ---------------------------------------------------------------------------------------------

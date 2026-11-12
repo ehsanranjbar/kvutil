@@ -7,12 +7,12 @@ import (
 	"time"
 
 	capnp "capnproto.org/go/capnp/v3"
-	flatbuffers "github.com/google/flatbuffers/go"
 	"github.com/stretchr/testify/require"
 
 	"github.com/ehsanranjbar/kvutil/bench/formats/capgen"
-	"github.com/ehsanranjbar/kvutil/bench/formats/fbgen"
 	"github.com/ehsanranjbar/kvutil/bench/internal/dataset"
+	"github.com/ehsanranjbar/kvutil/bench/internal/flat"
+	"github.com/ehsanranjbar/kvutil/bench/internal/flat/fbgen"
 	"github.com/ehsanranjbar/kvutil/codec"
 )
 
@@ -88,8 +88,9 @@ func TestRoundTripOrder(t *testing.T) {
 			require.NoError(t, gotBin.UnmarshalBinary(bz))
 			require.Equal(t, want, dataset.Order(gotBin), "binary")
 
-			bz = EncodeOrderFB(flatbuffers.NewBuilder(0), src)
-			got, err = DecodeOrderFB(bz)
+			bz, err = flat.Order().Encode(want)
+			require.NoError(t, err)
+			got, err = flat.Order().Decode(bz)
 			require.NoError(t, err)
 			require.Equal(t, want, got, "flatbuffers")
 
@@ -125,8 +126,9 @@ func TestRoundTripBook(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, want, got, "msgpack")
 
-			bz = EncodeBookFB(flatbuffers.NewBuilder(0), src)
-			got, err = DecodeBookFB(bz)
+			bz, err = flat.Book().Encode(want)
+			require.NoError(t, err)
+			got, err = flat.Book().Decode(bz)
 			require.NoError(t, err)
 			require.Equal(t, want, got, "flatbuffers")
 
@@ -161,8 +163,9 @@ func TestRoundTripDoc(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, want, got, "msgpack")
 
-		bz = EncodeDocFB(flatbuffers.NewBuilder(0), src)
-		got, err = DecodeDocFB(bz)
+		bz, err = flat.Doc().Encode(want)
+		require.NoError(t, err)
+		got, err = flat.Doc().Decode(bz)
 		require.NoError(t, err)
 		require.Equal(t, want, got, "flatbuffers")
 
@@ -192,8 +195,8 @@ func TestDecodeCopiesOutOfTheInput(t *testing.T) {
 	src.Note = strp("a note")
 	want := order(src)
 
-	bz := EncodeOrderFB(flatbuffers.NewBuilder(0), src)
-	got, err := DecodeOrderFB(bz)
+	bz := flat.EncodeOrder(src)
+	got, err := flat.Order().Decode(bz)
 	require.NoError(t, err)
 	clear(bz)
 	require.Equal(t, want, got, "flatbuffers")
@@ -209,8 +212,9 @@ func TestDecodeCopiesOutOfTheInput(t *testing.T) {
 
 	d := testDocs(1)[0]
 	wantDoc := doc(d)
-	bz = EncodeDocFB(flatbuffers.NewBuilder(0), d)
-	gotDoc, err := DecodeDocFB(bz)
+	bz, err = flat.Doc().Encode(wantDoc)
+	require.NoError(t, err)
+	gotDoc, err := flat.Doc().Decode(bz)
 	require.NoError(t, err)
 	clear(bz)
 	require.Equal(t, wantDoc, gotDoc, "flatbuffers doc")
@@ -220,7 +224,7 @@ func TestDecodeCopiesOutOfTheInput(t *testing.T) {
 func TestNativeReads(t *testing.T) {
 	var rd CapnpReader
 	for _, src := range testOrders(dataset.Small, 20) {
-		bz := EncodeOrderFB(flatbuffers.NewBuilder(0), src)
+		bz := flat.EncodeOrder(src)
 		o := fbgen.GetRootAsOrder(bz, 0)
 		require.Equal(t, src.Total, o.Total())
 		require.Equal(t, src.Customer, string(o.Customer()))
@@ -275,12 +279,6 @@ func TestCapnpReaderReuse(t *testing.T) {
 		}
 	}
 	_, err := rd.Open(nil)
-	require.Error(t, err)
-}
-
-func TestCorruptFlatBuffer(t *testing.T) {
-	bz := EncodeOrderFB(flatbuffers.NewBuilder(0), testOrders(dataset.Small, 1)[0])
-	_, err := DecodeOrderFB(bz[:6])
 	require.Error(t, err)
 }
 
@@ -368,7 +366,6 @@ func TestPartialOrder(t *testing.T) {
 	for _, size := range []dataset.ValueSize{dataset.Small, dataset.Large} {
 		srcs := convertAll(testOrders(size, 20), func(o *dataset.Order) dataset.Order { return order(o) })
 		testBinaryRecord(t, codec.Binary[OrderBin](), convertAll(srcs, func(o dataset.Order) OrderBin { return OrderBin(o) }))
-		testBinaryRecord(t, codec.Binary[OrderFB](), convertAll(srcs, func(o dataset.Order) OrderFB { return OrderFB(o) }))
 		testBinaryRecord(t, codec.Binary[OrderCapnp](), convertAll(srcs, func(o dataset.Order) OrderCapnp { return OrderCapnp(o) }))
 		testBinaryRecord(t, codec.Binary[OrderCapnpReuse](), convertAll(srcs, func(o dataset.Order) OrderCapnpReuse { return OrderCapnpReuse(o) }))
 	}
@@ -377,7 +374,6 @@ func TestPartialOrder(t *testing.T) {
 func TestPartialBook(t *testing.T) {
 	for _, size := range []dataset.ValueSize{dataset.Small, dataset.Large} {
 		srcs := convertAll(testBooks(size, 20), func(b *dataset.Book) dataset.Book { return book(b) })
-		testBinaryRecord(t, codec.Binary[BookFB](), convertAll(srcs, func(b dataset.Book) BookFB { return BookFB(b) }))
 		testBinaryRecord(t, codec.Binary[BookCapnp](), convertAll(srcs, func(b dataset.Book) BookCapnp { return BookCapnp(b) }))
 		testBinaryRecord(t, codec.Binary[BookCapnpReuse](), convertAll(srcs, func(b dataset.Book) BookCapnpReuse { return BookCapnpReuse(b) }))
 	}
@@ -385,23 +381,15 @@ func TestPartialBook(t *testing.T) {
 
 func TestPartialDoc(t *testing.T) {
 	srcs := convertAll(testDocs(20), func(d *dataset.Doc) dataset.Doc { return doc(d) })
-	testBinaryRecord(t, codec.Binary[DocFB](), convertAll(srcs, func(d dataset.Doc) DocFB { return DocFB(d) }))
 	testBinaryRecord(t, codec.Binary[DocCapnp](), convertAll(srcs, func(d dataset.Doc) DocCapnp { return DocCapnp(d) }))
 	testBinaryRecord(t, codec.Binary[DocCapnpReuse](), convertAll(srcs, func(d dataset.Doc) DocCapnpReuse { return DocCapnpReuse(d) }))
 }
 
 // A truncated or corrupt encoding is an error and not a panic, in a partial decode too.
 func TestPartialCorrupt(t *testing.T) {
-	src := OrderFB(order(testOrders(dataset.Small, 1)[0]))
-	cf := codec.Binary[OrderFB]()
-	bz, err := cf.Encode(src)
-	require.NoError(t, err)
-	decF, _ := codec.PartialOf(cf, []string{"Total"})
-	var gotF OrderFB
-	require.Error(t, decF(bz[:6], &gotF))
-
+	src := OrderBin(order(testOrders(dataset.Small, 1)[0]))
 	cc := codec.Binary[OrderCapnp]()
-	bz, err = cc.Encode(OrderCapnp(src))
+	bz, err := cc.Encode(OrderCapnp(src))
 	require.NoError(t, err)
 	dec, _ := codec.PartialOf(cc, []string{"Total"})
 	var gotC OrderCapnp

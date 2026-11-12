@@ -7,8 +7,8 @@ import (
 )
 
 type DocT struct {
-	Lang string `json:"lang"`
-	Year int64 `json:"year"`
+	Lang      string    `json:"lang"`
+	Year      int64     `json:"year"`
 	Embedding []float32 `json:"embedding"`
 }
 

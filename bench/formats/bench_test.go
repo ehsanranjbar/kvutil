@@ -30,24 +30,26 @@ package formats
 // record is a zeroed scratch value, dec(bz, &v) and the read of the field. The codecs are the
 // ones that a store is given: codec.Formatted[T](codec.Msgpack) (a narrower struct that skips the
 // other fields of the map), codec.Binary[OrderBin] (walks and skips the fields before the one it
-// wants), and codec.Binary[OrderFB], codec.Binary[OrderCapnp] and codec.Binary[OrderCapnpReuse]
-// (partial.go: the accessor of the format straight from the bytes, and a copy). capnp does
+// wants), flat.Order() (bench/internal/flat: the codec of the stores of the benchmarks, the
+// accessors of FlatBuffers straight from the bytes, and a copy), and codec.Binary[OrderCapnp] and
+// codec.Binary[OrderCapnpReuse] (partial.go: the accessor of Cap'n Proto, and a copy). capnp does
 // capnp.Unmarshal per record, as a store has to; capnp-reuse gets its message from a sync.Pool.
 // A setup fails the benchmark if PartialOf has no decoder, or if a decoded field differs from the
 // source, so that a row cannot silently be a full decode.
 //
-// The full rows of flatbuffers and capnp call the decoders of convert.go. They are not repeated
-// through codec.Binary: its Decode is those decoders (capnp.Unmarshal for capnp) and one copy of
-// the struct, which is the same work.
+// The full rows of flatbuffers call the Decode of flat.Order() and so on, and those of capnp the
+// decoders of convert.go. The capnp ones are not repeated through codec.Binary: its Decode is
+// those decoders (capnp.Unmarshal) and one copy of the struct, which is the same work.
 //
 // The rules that keep it fair:
 //
 //  1. Every format encodes the very same records: N=256 of the generators of bench/internal/dataset
 //     (the same seed and ids), and the loop of a benchmark cycles through them.
 //  2. A builder or an arena is reused where that is the idiom of the format, and then the name of
-//     the row says so: flatbuffers-reuse (one Builder, Reset between records, and a copy of the
-//     result because the caller must own it) against flatbuffers (a new Builder of 1 KB per
-//     record, whose bytes are returned as they are); capnp-reuse (one Message whose pooled arena
+//     the row says so: flatbuffers-reuse (the Encode of flat.Order(): a Builder from a sync.Pool,
+//     Reset between records, and a copy of the result because the caller must own it) against
+//     flatbuffers (a new Builder of 1 KB per record, whose bytes are returned as they are, built by
+//     flat.BuildOrder); capnp-reuse (one Message whose pooled arena
 //     is released and taken again, and, for reading, one Message over one read-only arena, see
 //     CapnpReader) against capnp (a new Message per record, and capnp.Unmarshal per read).
 //     capnp-packed is the packed stream, for the size and the full decode only. Msgpack and
@@ -68,8 +70,9 @@ import (
 	flatbuffers "github.com/google/flatbuffers/go"
 
 	"github.com/ehsanranjbar/kvutil/bench/formats/capgen"
-	"github.com/ehsanranjbar/kvutil/bench/formats/fbgen"
 	"github.com/ehsanranjbar/kvutil/bench/internal/dataset"
+	"github.com/ehsanranjbar/kvutil/bench/internal/flat"
+	"github.com/ehsanranjbar/kvutil/bench/internal/flat/fbgen"
 	"github.com/ehsanranjbar/kvutil/codec"
 )
 
@@ -490,13 +493,15 @@ func capnpFormats[T any](
 	}
 }
 
-// fbFormats are the rows of FlatBuffers of a type.
+// fbFormats are the rows of FlatBuffers of a type, from bench/internal/flat: its codec (which
+// the stores of the benchmarks are given) for the decode and for the encode of
+// flatbuffers-reuse (a builder from a pool, reset between records, and a copy of the result), and
+// its build function for flatbuffers (a new builder per record, whose bytes are returned as they
+// are).
 func fbFormats[T any](
 	build func(*flatbuffers.Builder, *T),
-	encode func(*flatbuffers.Builder, *T) []byte,
-	decode func([]byte) (T, error),
+	c codec.ValueCodec[T],
 ) []fullFormat[T] {
-	newDec := func() func([]byte) (T, error) { return decode }
 	return []fullFormat[T]{{
 		format: "flatbuffers",
 		newEnc: func() func(*T) ([]byte, error) {
@@ -506,13 +511,12 @@ func fbFormats[T any](
 				return b.FinishedBytes(), nil
 			}
 		},
-		newDec: newDec,
+		newDec: func() func([]byte) (T, error) { return c.Decode },
 		enc:    true, dec: true, reads: true,
 	}, {
 		format: "flatbuffers-reuse",
 		newEnc: func() func(*T) ([]byte, error) {
-			b := flatbuffers.NewBuilder(1024)
-			return func(v *T) ([]byte, error) { return encode(b, v), nil }
+			return func(v *T) ([]byte, error) { return c.Encode(*v) }
 		},
 		enc: true,
 	}}
@@ -588,12 +592,12 @@ func orderGroup(name string, size dataset.ValueSize) runner {
 		},
 		enc: true, dec: true, reads: true,
 	})
-	g.formats = append(g.formats, fbFormats(BuildOrderFB, EncodeOrderFB, DecodeOrderFB)...)
+	g.formats = append(g.formats, fbFormats(flat.BuildOrder, flat.Order())...)
 	g.formats = append(g.formats, capnpFormats((*CapnpWriter).EncodeOrder, DecodeOrderCapnp)...)
 	g.partials = []partialFormat[dataset.Order]{
 		partialOf("msgpack", "msgpack", codec.Formatted[dataset.Order](codec.Msgpack), func(o *dataset.Order) *dataset.Order { return o }),
 		partialOf("binary", "binary", bin, func(o *dataset.Order) *OrderBin { return (*OrderBin)(o) }),
-		partialOf("flatbuffers", "flatbuffers", codec.Binary[OrderFB](), func(o *dataset.Order) *OrderFB { return (*OrderFB)(o) }),
+		partialOf("flatbuffers", "flatbuffers", flat.Order(), func(o *dataset.Order) *dataset.Order { return o }),
 		partialOf("capnp", "capnp", codec.Binary[OrderCapnp](), func(o *dataset.Order) *OrderCapnp { return (*OrderCapnp)(o) }),
 		partialOf("capnp-reuse", "capnp", codec.Binary[OrderCapnpReuse](), func(o *dataset.Order) *OrderCapnpReuse { return (*OrderCapnpReuse)(o) }),
 	}
@@ -637,11 +641,11 @@ func bookGroup() runner {
 		capnpReaders: []capnpReader{{"capnp", openCapnp}, {"capnp-reuse", openReuse}},
 	}
 	g.formats = append(g.formats, msgpackFormat[dataset.Book]())
-	g.formats = append(g.formats, fbFormats(BuildBookFB, EncodeBookFB, DecodeBookFB)...)
+	g.formats = append(g.formats, fbFormats(flat.BuildBook, flat.Book())...)
 	g.formats = append(g.formats, capnpFormats((*CapnpWriter).EncodeBook, DecodeBookCapnp)...)
 	g.partials = []partialFormat[dataset.Book]{
 		partialOf("msgpack", "msgpack", codec.Formatted[dataset.Book](codec.Msgpack), func(b *dataset.Book) *dataset.Book { return b }),
-		partialOf("flatbuffers", "flatbuffers", codec.Binary[BookFB](), func(b *dataset.Book) *BookFB { return (*BookFB)(b) }),
+		partialOf("flatbuffers", "flatbuffers", flat.Book(), func(b *dataset.Book) *dataset.Book { return b }),
 		partialOf("capnp", "capnp", codec.Binary[BookCapnp](), func(b *dataset.Book) *BookCapnp { return (*BookCapnp)(b) }),
 		partialOf("capnp-reuse", "capnp", codec.Binary[BookCapnpReuse](), func(b *dataset.Book) *BookCapnpReuse { return (*BookCapnpReuse)(b) }),
 	}
@@ -700,11 +704,11 @@ func docGroup() runner {
 		capnpReaders: []capnpReader{{"capnp", openCapnp}, {"capnp-reuse", openReuse}},
 	}
 	g.formats = append(g.formats, msgpackFormat[dataset.Doc]())
-	g.formats = append(g.formats, fbFormats(BuildDocFB, EncodeDocFB, DecodeDocFB)...)
+	g.formats = append(g.formats, fbFormats(flat.BuildDoc, flat.Doc())...)
 	g.formats = append(g.formats, capnpFormats((*CapnpWriter).EncodeDoc, DecodeDocCapnp)...)
 	g.partials = []partialFormat[dataset.Doc]{
 		partialOf("msgpack", "msgpack", codec.Formatted[dataset.Doc](codec.Msgpack), func(d *dataset.Doc) *dataset.Doc { return d }),
-		partialOf("flatbuffers", "flatbuffers", codec.Binary[DocFB](), func(d *dataset.Doc) *DocFB { return (*DocFB)(d) }),
+		partialOf("flatbuffers", "flatbuffers", flat.Doc(), func(d *dataset.Doc) *dataset.Doc { return d }),
 		partialOf("capnp", "capnp", codec.Binary[DocCapnp](), func(d *dataset.Doc) *DocCapnp { return (*DocCapnp)(d) }),
 		partialOf("capnp-reuse", "capnp", codec.Binary[DocCapnpReuse](), func(d *dataset.Doc) *DocCapnpReuse { return (*DocCapnpReuse)(d) }),
 	}

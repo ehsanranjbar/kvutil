@@ -40,36 +40,45 @@ the fairness rules are at the top of `bench_test.go`.
   `v = V{}`, `dec(bz, &v)` and the read of the field. The codecs are the ones a store is given:
   `codec.Formatted[T](codec.Msgpack)` (decodes into a narrower struct and skips the other fields
   of the map), `codec.Binary[OrderBin]` (the hand-written codec walks and skips the fields before
-  the one it wants), `codec.Binary[OrderFB|BookFB|DocFB]` and `codec.Binary[OrderCapnp|...]`
-  (`partial.go`: the accessor of the format straight from the bytes, and a copy of the field;
-  a path that is not known decodes everything). `capnp` makes a message per record with
+  the one it wants), `flat.Order()|Book()|Doc()` (`bench/internal/flat`, the FlatBuffers codecs
+  that the stores of the benchmarks are given: the accessors straight from the bytes, and a copy
+  of the field) and `codec.Binary[OrderCapnp|...]` (`partial.go`: the accessor of Cap'n Proto
+  straight from the bytes, and a copy of the field; a path that is not known decodes
+  everything). `capnp` makes a message per record with
   `capnp.Unmarshal` (a store has no reader per iterator to reuse; that is the honest cost of
   this API), and `capnp-reuse` (`OrderCapnpReuse|...`) gets a `CapnpReader` from a `sync.Pool`
-  to show what reusing the message would give. The `full` rows of flatbuffers and capnp are not
-  repeated through `codec.Binary`: its `Decode` is the same decoder (and `capnp.Unmarshal`) and a
-  copy of the struct.
+  to show what reusing the message would give. The `full` rows of flatbuffers (the `Decode` of
+  `flat.Order()`, and `flat.Order().Encode` for `flatbuffers-reuse`, whose builder comes from a
+  `sync.Pool`; the `flatbuffers` encode row builds into a new builder with `flat.BuildOrder`) and
+  of capnp are not repeated through `codec.Binary`: its `Decode` is the same decoder (and
+  `capnp.Unmarshal`) and a copy of the struct.
 
 ## Generated code
 
-`fbgen/` and `capgen/` are committed. The schemas are in `schema/`; the ids are not in them, as
-kvutil keeps the id in the key. To generate them again, with flatc 25.12.19, Cap'n Proto 1.5.0 and
-`capnpc-go` of `capnproto.org/go/capnp/v3 v3.1.0-alpha.2` (`go install capnproto.org/go/capnp/v3/capnpc-go@v3.1.0-alpha.2`,
-which lands in `~/go/bin`), from this directory:
+FlatBuffers is not generated here any more: its schema (`schema/records.fbs`), the generated code
+(`fbgen/`) and the codecs are in `bench/internal/flat`, which the benchmarks use for their stores,
+and this module imports it (the `native` rows read with its `fbgen` accessors). To generate that
+code again, see the package comment of `bench/internal/flat`; with flatc 25.12.19, from
+`bench/internal/flat`:
 
 ```sh
 flatc --go --gen-object-api --go-namespace fbgen \
-  --go-module-name github.com/ehsanranjbar/kvutil/bench/formats -o . schema/records.fbs
+  --go-module-name github.com/ehsanranjbar/kvutil/bench/internal/flat -o . schema/records.fbs
+gofmt -w fbgen
+```
 
+`capgen/` is committed. The schema is in `schema/`; the ids are not in it, as kvutil keeps the id
+in the key. To generate it again, with Cap'n Proto 1.5.0 and `capnpc-go` of
+`capnproto.org/go/capnp/v3 v3.1.0-alpha.2` (`go install capnproto.org/go/capnp/v3/capnpc-go@v3.1.0-alpha.2`,
+which lands in `~/go/bin`), from this directory:
+
+```sh
 capnp compile -I "$(go list -m -f '{{.Dir}}' capnproto.org/go/capnp/v3)/std" \
   --src-prefix=schema -o"$HOME/go/bin/capnpc-go:capgen" schema/records.capnp
 ```
 
-The first writes `fbgen/{Order,Book,Doc}.go` (the object API is generated, but the code uses the
-accessors: the object API cannot tell an absent string from an empty one). The second writes
-`capgen/records.capnp.go`; `--src-prefix` keeps `schema/` out of the output path, and `-I` is where
-`/go.capnp` of the Go annotations is.
-
-The generated FlatBuffers files are not `gofmt`-ed; the rest is.
+It writes `capgen/records.capnp.go`; `--src-prefix` keeps `schema/` out of the output path, and
+`-I` is where `/go.capnp` of the Go annotations is.
 
 ## Mapping
 

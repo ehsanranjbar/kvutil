@@ -7,16 +7,16 @@ import (
 )
 
 type BookT struct {
-	Code string `json:"code"`
-	Author string `json:"author"`
-	Year int64 `json:"year"`
-	Price int64 `json:"price"`
-	InPrint bool `json:"in_print"`
-	Tags []string `json:"tags"`
-	Title string `json:"title"`
-	Subtitle string `json:"subtitle"`
-	Score int64 `json:"score"`
-	Payload []byte `json:"payload"`
+	Code     string   `json:"code"`
+	Author   string   `json:"author"`
+	Year     int64    `json:"year"`
+	Price    int64    `json:"price"`
+	InPrint  bool     `json:"in_print"`
+	Tags     []string `json:"tags"`
+	Title    string   `json:"title"`
+	Subtitle string   `json:"subtitle"`
+	Score    int64    `json:"score"`
+	Payload  []byte   `json:"payload"`
 }
 
 func (t *BookT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {

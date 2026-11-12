@@ -6,20 +6,22 @@ import (
 	flatbuffers "github.com/google/flatbuffers/go"
 )
 
-type OrderT struct {
-	Code string `json:"code"`
-	Customer string `json:"customer"`
-	Name string `json:"name"`
-	Status string `json:"status"`
-	Total int64 `json:"total"`
-	Qty int32 `json:"qty"`
-	At int64 `json:"at"`
-	Note string `json:"note"`
-	Tags []string `json:"tags"`
-	Payload []byte `json:"payload"`
+type OrderV3T struct {
+	Code     string   `json:"code"`
+	Customer string   `json:"customer"`
+	Name     string   `json:"name"`
+	Status   string   `json:"status"`
+	Total    int64    `json:"total"`
+	Qty      int32    `json:"qty"`
+	At       int64    `json:"at"`
+	Note     string   `json:"note"`
+	Tags     []string `json:"tags"`
+	Payload  []byte   `json:"payload"`
+	Priority int32    `json:"priority"`
+	Extra    string   `json:"extra"`
 }
 
-func (t *OrderT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
+func (t *OrderV3T) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	if t == nil {
 		return 0
 	}
@@ -50,7 +52,7 @@ func (t *OrderT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 		for j := 0; j < tagsLength; j++ {
 			tagsOffsets[j] = builder.CreateString(t.Tags[j])
 		}
-		OrderStartTagsVector(builder, tagsLength)
+		OrderV3StartTagsVector(builder, tagsLength)
 		for j := tagsLength - 1; j >= 0; j-- {
 			builder.PrependUOffsetT(tagsOffsets[j])
 		}
@@ -60,21 +62,27 @@ func (t *OrderT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	if t.Payload != nil {
 		payloadOffset = builder.CreateByteString(t.Payload)
 	}
-	OrderStart(builder)
-	OrderAddCode(builder, codeOffset)
-	OrderAddCustomer(builder, customerOffset)
-	OrderAddName(builder, nameOffset)
-	OrderAddStatus(builder, statusOffset)
-	OrderAddTotal(builder, t.Total)
-	OrderAddQty(builder, t.Qty)
-	OrderAddAt(builder, t.At)
-	OrderAddNote(builder, noteOffset)
-	OrderAddTags(builder, tagsOffset)
-	OrderAddPayload(builder, payloadOffset)
-	return OrderEnd(builder)
+	extraOffset := flatbuffers.UOffsetT(0)
+	if t.Extra != "" {
+		extraOffset = builder.CreateString(t.Extra)
+	}
+	OrderV3Start(builder)
+	OrderV3AddCode(builder, codeOffset)
+	OrderV3AddCustomer(builder, customerOffset)
+	OrderV3AddName(builder, nameOffset)
+	OrderV3AddStatus(builder, statusOffset)
+	OrderV3AddTotal(builder, t.Total)
+	OrderV3AddQty(builder, t.Qty)
+	OrderV3AddAt(builder, t.At)
+	OrderV3AddNote(builder, noteOffset)
+	OrderV3AddTags(builder, tagsOffset)
+	OrderV3AddPayload(builder, payloadOffset)
+	OrderV3AddPriority(builder, t.Priority)
+	OrderV3AddExtra(builder, extraOffset)
+	return OrderV3End(builder)
 }
 
-func (rcv *Order) UnPackTo(t *OrderT) {
+func (rcv *OrderV3) UnPackTo(t *OrderV3T) {
 	t.Code = string(rcv.Code())
 	t.Customer = string(rcv.Customer())
 	t.Name = string(rcv.Name())
@@ -89,53 +97,55 @@ func (rcv *Order) UnPackTo(t *OrderT) {
 		t.Tags[j] = string(rcv.Tags(j))
 	}
 	t.Payload = rcv.PayloadBytes()
+	t.Priority = rcv.Priority()
+	t.Extra = string(rcv.Extra())
 }
 
-func (rcv *Order) UnPack() *OrderT {
+func (rcv *OrderV3) UnPack() *OrderV3T {
 	if rcv == nil {
 		return nil
 	}
-	t := &OrderT{}
+	t := &OrderV3T{}
 	rcv.UnPackTo(t)
 	return t
 }
 
-type Order struct {
+type OrderV3 struct {
 	_tab flatbuffers.Table
 }
 
-func GetRootAsOrder(buf []byte, offset flatbuffers.UOffsetT) *Order {
+func GetRootAsOrderV3(buf []byte, offset flatbuffers.UOffsetT) *OrderV3 {
 	n := flatbuffers.GetUOffsetT(buf[offset:])
-	x := &Order{}
+	x := &OrderV3{}
 	x.Init(buf, n+offset)
 	return x
 }
 
-func FinishOrderBuffer(builder *flatbuffers.Builder, offset flatbuffers.UOffsetT) {
+func FinishOrderV3Buffer(builder *flatbuffers.Builder, offset flatbuffers.UOffsetT) {
 	builder.Finish(offset)
 }
 
-func GetSizePrefixedRootAsOrder(buf []byte, offset flatbuffers.UOffsetT) *Order {
+func GetSizePrefixedRootAsOrderV3(buf []byte, offset flatbuffers.UOffsetT) *OrderV3 {
 	n := flatbuffers.GetUOffsetT(buf[offset+flatbuffers.SizeUint32:])
-	x := &Order{}
+	x := &OrderV3{}
 	x.Init(buf, n+offset+flatbuffers.SizeUint32)
 	return x
 }
 
-func FinishSizePrefixedOrderBuffer(builder *flatbuffers.Builder, offset flatbuffers.UOffsetT) {
+func FinishSizePrefixedOrderV3Buffer(builder *flatbuffers.Builder, offset flatbuffers.UOffsetT) {
 	builder.FinishSizePrefixed(offset)
 }
 
-func (rcv *Order) Init(buf []byte, i flatbuffers.UOffsetT) {
+func (rcv *OrderV3) Init(buf []byte, i flatbuffers.UOffsetT) {
 	rcv._tab.Bytes = buf
 	rcv._tab.Pos = i
 }
 
-func (rcv *Order) Table() flatbuffers.Table {
+func (rcv *OrderV3) Table() flatbuffers.Table {
 	return rcv._tab
 }
 
-func (rcv *Order) Code() []byte {
+func (rcv *OrderV3) Code() []byte {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(4))
 	if o != 0 {
 		return rcv._tab.ByteVector(o + rcv._tab.Pos)
@@ -143,7 +153,7 @@ func (rcv *Order) Code() []byte {
 	return nil
 }
 
-func (rcv *Order) Customer() []byte {
+func (rcv *OrderV3) Customer() []byte {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(6))
 	if o != 0 {
 		return rcv._tab.ByteVector(o + rcv._tab.Pos)
@@ -151,7 +161,7 @@ func (rcv *Order) Customer() []byte {
 	return nil
 }
 
-func (rcv *Order) Name() []byte {
+func (rcv *OrderV3) Name() []byte {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(8))
 	if o != 0 {
 		return rcv._tab.ByteVector(o + rcv._tab.Pos)
@@ -159,7 +169,7 @@ func (rcv *Order) Name() []byte {
 	return nil
 }
 
-func (rcv *Order) Status() []byte {
+func (rcv *OrderV3) Status() []byte {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(10))
 	if o != 0 {
 		return rcv._tab.ByteVector(o + rcv._tab.Pos)
@@ -167,7 +177,7 @@ func (rcv *Order) Status() []byte {
 	return nil
 }
 
-func (rcv *Order) Total() int64 {
+func (rcv *OrderV3) Total() int64 {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(12))
 	if o != 0 {
 		return rcv._tab.GetInt64(o + rcv._tab.Pos)
@@ -175,11 +185,11 @@ func (rcv *Order) Total() int64 {
 	return 0
 }
 
-func (rcv *Order) MutateTotal(n int64) bool {
+func (rcv *OrderV3) MutateTotal(n int64) bool {
 	return rcv._tab.MutateInt64Slot(12, n)
 }
 
-func (rcv *Order) Qty() int32 {
+func (rcv *OrderV3) Qty() int32 {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(14))
 	if o != 0 {
 		return rcv._tab.GetInt32(o + rcv._tab.Pos)
@@ -187,11 +197,11 @@ func (rcv *Order) Qty() int32 {
 	return 0
 }
 
-func (rcv *Order) MutateQty(n int32) bool {
+func (rcv *OrderV3) MutateQty(n int32) bool {
 	return rcv._tab.MutateInt32Slot(14, n)
 }
 
-func (rcv *Order) At() int64 {
+func (rcv *OrderV3) At() int64 {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(16))
 	if o != 0 {
 		return rcv._tab.GetInt64(o + rcv._tab.Pos)
@@ -199,11 +209,11 @@ func (rcv *Order) At() int64 {
 	return 0
 }
 
-func (rcv *Order) MutateAt(n int64) bool {
+func (rcv *OrderV3) MutateAt(n int64) bool {
 	return rcv._tab.MutateInt64Slot(16, n)
 }
 
-func (rcv *Order) Note() []byte {
+func (rcv *OrderV3) Note() []byte {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(18))
 	if o != 0 {
 		return rcv._tab.ByteVector(o + rcv._tab.Pos)
@@ -211,7 +221,7 @@ func (rcv *Order) Note() []byte {
 	return nil
 }
 
-func (rcv *Order) Tags(j int) []byte {
+func (rcv *OrderV3) Tags(j int) []byte {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(20))
 	if o != 0 {
 		a := rcv._tab.Vector(o)
@@ -220,7 +230,7 @@ func (rcv *Order) Tags(j int) []byte {
 	return nil
 }
 
-func (rcv *Order) TagsLength() int {
+func (rcv *OrderV3) TagsLength() int {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(20))
 	if o != 0 {
 		return rcv._tab.VectorLen(o)
@@ -228,7 +238,7 @@ func (rcv *Order) TagsLength() int {
 	return 0
 }
 
-func (rcv *Order) Payload(j int) byte {
+func (rcv *OrderV3) Payload(j int) byte {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(22))
 	if o != 0 {
 		a := rcv._tab.Vector(o)
@@ -237,7 +247,7 @@ func (rcv *Order) Payload(j int) byte {
 	return 0
 }
 
-func (rcv *Order) PayloadLength() int {
+func (rcv *OrderV3) PayloadLength() int {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(22))
 	if o != 0 {
 		return rcv._tab.VectorLen(o)
@@ -245,7 +255,7 @@ func (rcv *Order) PayloadLength() int {
 	return 0
 }
 
-func (rcv *Order) PayloadBytes() []byte {
+func (rcv *OrderV3) PayloadBytes() []byte {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(22))
 	if o != 0 {
 		return rcv._tab.ByteVector(o + rcv._tab.Pos)
@@ -253,7 +263,7 @@ func (rcv *Order) PayloadBytes() []byte {
 	return nil
 }
 
-func (rcv *Order) MutatePayload(j int, n byte) bool {
+func (rcv *OrderV3) MutatePayload(j int, n byte) bool {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(22))
 	if o != 0 {
 		a := rcv._tab.Vector(o)
@@ -262,45 +272,71 @@ func (rcv *Order) MutatePayload(j int, n byte) bool {
 	return false
 }
 
-func OrderStart(builder *flatbuffers.Builder) {
-	builder.StartObject(10)
+func (rcv *OrderV3) Priority() int32 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(24))
+	if o != 0 {
+		return rcv._tab.GetInt32(o + rcv._tab.Pos)
+	}
+	return 0
 }
-func OrderAddCode(builder *flatbuffers.Builder, code flatbuffers.UOffsetT) {
+
+func (rcv *OrderV3) MutatePriority(n int32) bool {
+	return rcv._tab.MutateInt32Slot(24, n)
+}
+
+func (rcv *OrderV3) Extra() []byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(26))
+	if o != 0 {
+		return rcv._tab.ByteVector(o + rcv._tab.Pos)
+	}
+	return nil
+}
+
+func OrderV3Start(builder *flatbuffers.Builder) {
+	builder.StartObject(12)
+}
+func OrderV3AddCode(builder *flatbuffers.Builder, code flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(code), 0)
 }
-func OrderAddCustomer(builder *flatbuffers.Builder, customer flatbuffers.UOffsetT) {
+func OrderV3AddCustomer(builder *flatbuffers.Builder, customer flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(1, flatbuffers.UOffsetT(customer), 0)
 }
-func OrderAddName(builder *flatbuffers.Builder, name flatbuffers.UOffsetT) {
+func OrderV3AddName(builder *flatbuffers.Builder, name flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(2, flatbuffers.UOffsetT(name), 0)
 }
-func OrderAddStatus(builder *flatbuffers.Builder, status flatbuffers.UOffsetT) {
+func OrderV3AddStatus(builder *flatbuffers.Builder, status flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(3, flatbuffers.UOffsetT(status), 0)
 }
-func OrderAddTotal(builder *flatbuffers.Builder, total int64) {
+func OrderV3AddTotal(builder *flatbuffers.Builder, total int64) {
 	builder.PrependInt64Slot(4, total, 0)
 }
-func OrderAddQty(builder *flatbuffers.Builder, qty int32) {
+func OrderV3AddQty(builder *flatbuffers.Builder, qty int32) {
 	builder.PrependInt32Slot(5, qty, 0)
 }
-func OrderAddAt(builder *flatbuffers.Builder, at int64) {
+func OrderV3AddAt(builder *flatbuffers.Builder, at int64) {
 	builder.PrependInt64Slot(6, at, 0)
 }
-func OrderAddNote(builder *flatbuffers.Builder, note flatbuffers.UOffsetT) {
+func OrderV3AddNote(builder *flatbuffers.Builder, note flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(7, flatbuffers.UOffsetT(note), 0)
 }
-func OrderAddTags(builder *flatbuffers.Builder, tags flatbuffers.UOffsetT) {
+func OrderV3AddTags(builder *flatbuffers.Builder, tags flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(8, flatbuffers.UOffsetT(tags), 0)
 }
-func OrderStartTagsVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+func OrderV3StartTagsVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(4, numElems, 4)
 }
-func OrderAddPayload(builder *flatbuffers.Builder, payload flatbuffers.UOffsetT) {
+func OrderV3AddPayload(builder *flatbuffers.Builder, payload flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(9, flatbuffers.UOffsetT(payload), 0)
 }
-func OrderStartPayloadVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+func OrderV3StartPayloadVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(1, numElems, 1)
 }
-func OrderEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
+func OrderV3AddPriority(builder *flatbuffers.Builder, priority int32) {
+	builder.PrependInt32Slot(10, priority, 0)
+}
+func OrderV3AddExtra(builder *flatbuffers.Builder, extra flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(11, flatbuffers.UOffsetT(extra), 0)
+}
+func OrderV3End(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()
 }
