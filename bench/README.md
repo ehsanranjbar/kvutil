@@ -38,8 +38,8 @@ open -a Docker
 cd bench
 
 ./run.sh --smoke -w kv-basic            # a few minutes (the first run builds the image): does it all work?
-./run.sh -s 1000000                     # the run: about 3.5 hours, durable only
-./run.sh -s 1000000 -d both             # both durability modes: about 7 hours
+./run.sh -s 1000000                     # the run: about 3.75 hours, durable only
+./run.sh -s 1000000 -d both             # both durability modes: about 7.5 hours
 ./run.sh -s 100000                      # a smaller one: 3 hours, durable only
 open results/<host>-<timestamp>/report.html
 ```
@@ -66,9 +66,9 @@ isolate itself from it.
 
 ### How long and how much disk
 
-> The figures of this section (durations, counts of results, sizes on disk) were measured before
-> the records of the benchmarks were changed from msgpack to FlatBuffers. The counts of results do
-> not depend on the format; the sizes and the times may differ a little, and have not been measured again.
+> The smoke figures of this section (the 841 results, the pieces of 7.5, 8.7 and 8 minutes, the
+> sizes at 10,000 records) were measured with the records in msgpack. The full run at a million and
+> its sizes were measured again with the records in FlatBuffers.
 
 **Time.** What was measured: a smoke run of every workload (10,000 records, a second and a half per
 timed case) on a MacBook, in Docker Desktop with 4 CPUs and 4 GB for each container, in three pieces
@@ -85,13 +85,15 @@ time = 841 x (warm-up + duration)  x  (2 for -d both)  +  20 s x (scale / 10,000
 | --- | --- |
 | `./run.sh --smoke` (all workloads, with `verify`) | 25 minutes (30 with `vector-search`) |
 | `./run.sh -s 100000` (10 s and 2 s per case, durable) | 3 hours (3.4 with `vector-search`) |
-| `./run.sh -s 1000000 --verify` (small values, durable) | 3.5 hours (measured, below) |
-| `./run.sh -s 1000000 -d both` | 7 hours |
-| `./run.sh -s 1000000 -d both --duration 5s --warmup 1s` | 3.5 hours |
+| `./run.sh -s 1000000 --verify` (small values, durable) | 3 hours 47 minutes (measured, below) |
+| `./run.sh -s 1000000 -d both` | 7.5 hours |
+| `./run.sh -s 1000000 -d both --duration 5s --warmup 1s` | 3.75 hours |
 
 A full run was measured on a Mac, in Docker Desktop with 8 CPUs and 8 GB, and 4 CPUs and 4 GB for
-each container: `-s 1000000`, durable, small values. kvutil with all the workloads took about 2
-hours, `--verify` included, and PostgreSQL and TimescaleDB together about 1.5 hours: 3.5 hours.
+each container: `-s 1000000 --verify`, durable, small values, all the workloads with `vector-search`,
+1,329 results. The build and `--verify` took 1 minute, kvutil 2 hours 9 minutes, PostgreSQL 1 hour
+20 minutes and TimescaleDB 18 minutes: 3 hours 47 minutes. `vector-search` alone took about 8
+minutes on each system.
 
 The loading and building (indexes, aggregations, the storage steps) of the formula were measured at
 10,000 records only and extended linearly; at a million, an index build is slower than linear, and
@@ -103,9 +105,9 @@ hour. The timed results of each workload at the defaults
 `relations` 92 (18), `agg-read` 72 (14), `record-codecs` 36 (7), `agg-write` 30 (6),
 `agg-freshness` 24 (5), `agg-hot-group` 20 (4), `storage` 8 (2); `bulk-load`, `key-order-fetch`,
 `agg-rebuild` and `lifecycle` have none (their cases are single measurements). `vector-search` was
-added after the measurements above, and its figures are an estimate, not a measurement: 63 timed
-results (kvutil 33, PostgreSQL 30; 13 minutes at the defaults), and with the loading and building of
-its six databases and the recall of every case about 25 minutes at `-s 100000` and 5 at `--smoke`.
+added after the smoke measurements: 75 results (kvutil 39, PostgreSQL 36), about 16 minutes at
+`-s 1000000` (measured; it stops at 250,000 documents, so `-s 100000` takes a little less) and an
+estimated 5 at `--smoke`.
 A part of the suite is a run of its own: `./run.sh -s 1000000 -w kv,query`.
 
 **Disk.** The data of both systems is in Docker volumes, removed at the end of a run (`--keep` does
@@ -113,7 +115,10 @@ not). At 10,000 small records the largest database of a workload was 44 MiB (Pos
 `concurrency`, with 96 MiB of WAL, which grows to `max_wal_size` of 4 GB in a long run) and kvutil's
 largest 42 MiB (`index-maintenance` and `key-order-fetch`, which keep several copies of the data and
 the large values), so a million small records need about 5 GB for each system at the most, and at
-most one database of each is alive at a time. With the 2.5 GB of images (`pgvector/pgvector` 0.8 GB,
+most one database of each is alive at a time. At a million, in FlatBuffers, an order takes 206 bytes
+(161 in msgpack, 96 in the binary codec), and the `storage` database of a million orders with its
+four indexes is 197 MB in the LSM tree and 338 MB in the value log (169 and 294 MB with msgpack),
+against 307 MB for PostgreSQL's table and indexes. With the 2.5 GB of images (`pgvector/pgvector` 0.8 GB,
 TimescaleDB 1.5 GB, the harness 0.2 GB), the cache of the build and the report, plan on **20 GB free
 for `-s 1000000`** (small values), and **60 GB for `-s 500000 -V large`**, where a record is 20
 times larger. `vector-search` stops at 250,000 documents whatever the scale is: its databases are
