@@ -32,11 +32,11 @@ import (
 
 	"github.com/ehsanranjbar/kvutil/bench/internal/dataset"
 	"github.com/ehsanranjbar/kvutil/bench/internal/dockerapi"
+	"github.com/ehsanranjbar/kvutil/bench/internal/flat"
 	"github.com/ehsanranjbar/kvutil/bench/internal/harness"
 	"github.com/ehsanranjbar/kvutil/bench/internal/metrics"
 	"github.com/ehsanranjbar/kvutil/bench/internal/systems/kvsys"
 	"github.com/ehsanranjbar/kvutil/bench/internal/systems/pgsys"
-	"github.com/ehsanranjbar/kvutil/bench/internal/wl"
 )
 
 func init() { harness.Register(workload{}) }
@@ -139,7 +139,7 @@ func avgRecordBytes(spec dataset.Spec, version uint32) float64 {
 	const sample = 200
 	var total int
 	for id := int64(1); id <= sample; id++ {
-		total += len(wl.Msgpack(spec.Gen(id, version)))
+		total += len(flat.EncodeOrder(spec.Gen(id, version)))
 	}
 	return float64(total) / sample
 }

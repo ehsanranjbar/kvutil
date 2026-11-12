@@ -9,6 +9,7 @@ import (
 	"fmt"
 
 	"github.com/ehsanranjbar/kvutil/bench/internal/dataset"
+	"github.com/ehsanranjbar/kvutil/bench/internal/flat"
 	"github.com/ehsanranjbar/kvutil/bench/internal/systems/kvsys"
 	"github.com/ehsanranjbar/kvutil/bench/internal/wl"
 	"github.com/ehsanranjbar/kvutil/field"
@@ -54,7 +55,7 @@ const (
 )
 
 // NewStore returns the record store of the books, without indexes.
-func NewStore() *Store { return record.New[int64, Book]("books") }
+func NewStore() *Store { return record.NewWithCodecs[int64, Book]("books", nil, flat.Book()) }
 
 // AddQueryIndexes defines the indexes of the queries workload on the store and returns their
 // names:

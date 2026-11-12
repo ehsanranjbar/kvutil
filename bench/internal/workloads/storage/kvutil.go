@@ -8,6 +8,7 @@ import (
 	badger "github.com/dgraph-io/badger/v4"
 	"github.com/ehsanranjbar/kvutil/bench/internal/dataset"
 	"github.com/ehsanranjbar/kvutil/bench/internal/dockerapi"
+	"github.com/ehsanranjbar/kvutil/bench/internal/flat"
 	"github.com/ehsanranjbar/kvutil/bench/internal/systems/kvsys"
 	"github.com/ehsanranjbar/kvutil/bench/internal/wl"
 	"github.com/ehsanranjbar/kvutil/field"
@@ -70,7 +71,7 @@ func openKV(ctx context.Context, sys *kvsys.System, v *variant, meter *dockerapi
 
 // define makes the store with the indexes of the kinds and migrates the database to it.
 func (d *kvDriver) define(ctx context.Context, kinds []string) error {
-	st := record.New[int64, order]("rec")
+	st := record.NewWithCodecs[int64, order]("rec", nil, flat.Order())
 	prefixes := map[string][]byte{}
 	for _, kind := range kinds {
 		name := "by_" + kind
@@ -247,8 +248,8 @@ func (d *kvDriver) Reclaims() []reclaim {
 }
 
 func (d *kvDriver) ExpiryPrepare(ctx context.Context) error {
-	d.plain = typed.New[int64, order]("plain")
-	d.ttl = typed.New[int64, order]("ttl")
+	d.plain = typed.NewWithCodecs[int64, order]("plain", nil, flat.Order())
+	d.ttl = typed.NewWithCodecs[int64, order]("ttl", nil, flat.Order())
 	_, err := migrate.Run(ctx, d.db, d.plain, d.ttl)
 	return err
 }

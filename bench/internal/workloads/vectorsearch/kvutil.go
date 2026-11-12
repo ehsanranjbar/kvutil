@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/ehsanranjbar/kvutil/bench/internal/dataset"
+	"github.com/ehsanranjbar/kvutil/bench/internal/flat"
 	"github.com/ehsanranjbar/kvutil/bench/internal/harness"
 	"github.com/ehsanranjbar/kvutil/bench/internal/plans"
 	"github.com/ehsanranjbar/kvutil/bench/internal/systems/kvsys"
@@ -38,7 +39,7 @@ const (
 )
 
 // newStore returns the store of the documents, without indexes.
-func newStore() *docStore { return extstore.New[int64, doc]("docs") }
+func newStore() *docStore { return extstore.NewWithCodecs[int64, doc]("docs", nil, flat.Doc()) }
 
 // vectorOptions are the options of the vector index of a variant.
 func vectorOptions(kind string) ([]vector.Option, string) {

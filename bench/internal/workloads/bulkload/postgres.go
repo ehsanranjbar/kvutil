@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/ehsanranjbar/kvutil/bench/internal/dataset"
+	"github.com/ehsanranjbar/kvutil/bench/internal/flat"
 	"github.com/ehsanranjbar/kvutil/bench/internal/harness"
 	"github.com/ehsanranjbar/kvutil/bench/internal/systems/pgsys"
 	"github.com/ehsanranjbar/kvutil/bench/internal/wl"
@@ -58,7 +59,7 @@ func (t *pgTarget) args(o *dataset.Order) []any {
 	if t.rows {
 		return wl.OrderArgs(o)
 	}
-	return []any{o.ID, wl.Msgpack(o)}
+	return []any{o.ID, flat.EncodeOrder(o)}
 }
 
 // insertSQL returns the statement that inserts a number of rows.
@@ -107,7 +108,7 @@ func (t *pgTarget) Check(ctx context.Context, digest bool) (int64, string, error
 		if err := rows.Scan(&k, &v); err != nil {
 			return 0, "", err
 		}
-		o, err := wl.DecodeMsgpack(v, k)
+		o, err := flat.DecodeOrder(v, k)
 		if err != nil {
 			return 0, "", err
 		}

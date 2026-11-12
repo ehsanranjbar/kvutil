@@ -31,13 +31,13 @@ type kvStores struct {
 
 func newKVStores() *kvStores {
 	s := &kvStores{
-		parents:  record.New[int64, parent]("parents"),
-		children: record.New[int64, child]("children"),
-		lefts:    record.New[int64, entity]("lefts"),
-		rights:   record.New[int64, entity]("rights"),
+		parents:  record.NewWithCodecs[int64, parent]("parents", nil, parentCodec()),
+		children: record.NewWithCodecs[int64, child]("children", nil, childCodec()),
+		lefts:    record.NewWithCodecs[int64, entity]("lefts", nil, entityCodec()),
+		rights:   record.NewWithCodecs[int64, entity]("rights", nil, entityCodec()),
 	}
 	s.owned = relation.Associate("owned", s.parents, s.children)
-	s.members = relation.New[pairData]("members", s.lefts, s.rights)
+	s.members = relation.NewWithCodec("members", s.lefts, s.rights, pairCodec())
 	return s
 }
 

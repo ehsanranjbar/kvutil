@@ -3,7 +3,7 @@
 // that order, or to sort the keys first and read them in the order of the keys? It runs on kvutil
 // only.
 //
-// The records are in raw Badger (8 byte keys, msgpack values; the ids are 0 to N-1), and K of them
+// The records are in raw Badger (8 byte keys, FlatBuffers values; the ids are 0 to N-1), and K of them
 // are read in four ways, in a read transaction of their own:
 //
 //	random-get  one Get for each key, in the order that the keys came in
@@ -34,6 +34,7 @@ import (
 	"time"
 
 	"github.com/ehsanranjbar/kvutil/bench/internal/dataset"
+	"github.com/ehsanranjbar/kvutil/bench/internal/flat"
 	"github.com/ehsanranjbar/kvutil/bench/internal/harness"
 	"github.com/ehsanranjbar/kvutil/bench/internal/metrics"
 	"github.com/ehsanranjbar/kvutil/bench/internal/systems/kvsys"
@@ -233,7 +234,7 @@ func (v *variant) open(sys *kvsys.System, spec dataset.Spec, n int64) (*kvsys.DB
 		o := &dataset.Order{}
 		return func(w kv.BulkWriter, id int64) error {
 			spec.GenInto(o, id, 0)
-			return w.Set(wl.Key8(id), wl.Msgpack(o))
+			return w.Set(wl.Key8(id), flat.EncodeOrder(o))
 		}
 	})
 	if err == nil {
@@ -286,7 +287,7 @@ func (v *variant) Run(ctx context.Context, rc *harness.RunContext) error {
 	}
 	sample := spec
 	sample.Values = v.values
-	valueBytes := len(wl.Msgpack(sample.Gen(0, 0)))
+	valueBytes := len(flat.EncodeOrder(sample.Gen(0, 0)))
 
 	for _, cache := range []string{"warm", "cold"} {
 		if cache == "warm" {

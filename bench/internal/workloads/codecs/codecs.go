@@ -1,7 +1,8 @@
-// Package codecs is the workload of the encodings of a record: a kvutil record store (record.New)
-// with the default msgpack codec, a JSON codec and a binary codec (MarshalBinary), against a
-// PostgreSQL table of columns, a table with a jsonb column and a table with the msgpack bytes in a
-// bytea. It measures Get, and Set of an existing and of a new record, and says how many bytes a
+// Package codecs is the workload of the encodings of a record: a kvutil record store with the
+// FlatBuffers codec that the benchmarks use, the default msgpack codec of kvutil (record.New), a
+// JSON codec and a binary codec (MarshalBinary), against a PostgreSQL table of columns, a table
+// with a jsonb column and a table with the msgpack bytes in a bytea (the analogue of the msgpack
+// variant). It measures Get, and Set of an existing and of a new record, and says how many bytes a
 // record takes.
 //
 // The ids start at 1: a record store takes the zero id for a record that has none.
@@ -27,13 +28,14 @@ type workload struct{}
 func (workload) Name() string  { return "record-codecs" }
 func (workload) Group() string { return "records" }
 func (workload) Description() string {
-	return "Set/Get of a record with msgpack, JSON and binary codecs against a row of columns, jsonb and bytea"
+	return "Set/Get of a record with FlatBuffers, msgpack, JSON and binary codecs against a row of columns, jsonb and bytea"
 }
 
 func (workload) Variants(sys harness.System) []harness.Variant {
 	switch sys.(type) {
 	case *kvsys.System:
 		return []harness.Variant{
+			&variant{name: "flatbuffers", open: openFlatBuffers},
 			&variant{name: "msgpack", open: openMsgpack},
 			&variant{name: "json", open: openJSON},
 			&variant{name: "binary", open: openBinary},

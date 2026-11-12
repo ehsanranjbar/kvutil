@@ -15,7 +15,7 @@ import (
 // That is the whole point of the change that needs no migration: a record that was written as an
 // OrderV2 reads as an OrderV3 whose extra is empty (a FlatBuffers reader finds no field where the
 // writer's table was shorter), and one written as an OrderV3 reads as an OrderV2 that does not
-// know of extra, as msgpack decodes a map into a struct without the key. They are two tables, and
+// know of extra, as a reader leaves out a field that its table does not have. They are two tables, and
 // not one with extra, so that each version of the program has the schema of its own: the V2 codec
 // never sees extra, and the V3 codec writes it only when it is not empty.
 

@@ -16,7 +16,9 @@ import (
 	"github.com/vmihailenco/msgpack/v5"
 )
 
-// Msgpack returns the record as the default codec of kvutil encodes it.
+// Msgpack returns the record as the default codec of kvutil encodes it. The benchmarks keep their
+// records in FlatBuffers (flat.EncodeOrder); this is for the bytea-msgpack variant of the
+// record-codecs workload.
 func Msgpack(o *dataset.Order) []byte {
 	bz, err := msgpack.Marshal(o)
 	if err != nil {

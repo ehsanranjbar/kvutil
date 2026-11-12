@@ -14,13 +14,14 @@ delete takes the records of a pool that is loaded right before, past the scale, 
 (`pool`, 20,000 to 300,000 of them, a tenth of which are the warm-up).
 
 * kvutil, three layers over the same Badger, and values that are the same bytes:
-  * `raw`: `kv.Tx` with the id as 8 bytes (big endian) and the bytes of the record, encoded by
-    msgpack outside of the measured time. This is the engine and the thin adapter.
+  * `raw`: `kv.Tx` with the id as 8 bytes (big endian) and the bytes of the record, encoded in
+    FlatBuffers outside of the measured time. This is the engine and the thin adapter.
   * `typed-bytes`: `typed.Store[int64, blob]`, whose values are bytes that encode themselves
     (`MarshalBinary`). The difference with `raw` is the typed layer alone (the prefix, the key codec,
     the instances, the checks).
-  * `typed`: `typed.Store[int64, Order]` with its default codecs, which encodes and decodes the
-    record (msgpack) inside of the measured time. This is how the store is used.
+  * `typed`: `typed.Store[int64, Order]` with the FlatBuffers codec of the order (and the default
+    codec of the key), which encodes and decodes the record inside of the measured time. This is
+    how the store is used.
 * PostgreSQL, `bytea`: `kv(k bigint PRIMARY KEY, v bytea)`, with the same bytes as `raw`. The key is
   a `bigint`, which is the natural key of an integer id (a `bytea` key would only add the cost of
   comparing bytes), and the value is `bytea`, which is the shape of a key-value use of a table, so
@@ -48,16 +49,19 @@ for the disk in `durable` mode. After each load the records are counted.
 
 ## record-codecs (group `records`)
 
-`record.Store` (`record.New`) with three value codecs, against three shapes of a PostgreSQL row:
+`record.Store` with four value codecs, against three shapes of a PostgreSQL row. Every other
+workload keeps its records in FlatBuffers (`internal/flat`), so this is the one that compares the
+formats; `msgpack`, `json` and `binary` are here to compare against.
 
 | System | Variant | |
 | --- | --- | --- |
-| kvutil | `msgpack` | the default codec |
+| kvutil | `flatbuffers` | `internal/flat.Order()`: the codec that the other workloads use, with partial decoding |
+| | `msgpack` | the default codec of kvutil (`record.New`) |
 | | `json` | `codec.Formatted[Order](codec.JSON)` |
 | | `binary` | a record type with `MarshalBinary`/`UnmarshalBinary` written by hand (a format of varints and lengths), which a record store takes as its codec by itself |
 | PostgreSQL | `columns` | a row of typed columns, the tags in a `text[]` |
 | | `jsonb` | `(id, doc jsonb)`, the record marshalled by `encoding/json` in the client |
-| | `bytea-msgpack` | `(id, v bytea)` with the msgpack of kvutil's default |
+| | `bytea-msgpack` | `(id, v bytea)` with the msgpack of kvutil's default codec (the analogue of the `msgpack` variant) |
 
 Cases: `load`, `size` (average bytes of a stored record: the length of the codec's output, or
 `pg_column_size`), `get`, `set-update`, `set-insert`. Reads decode into the same Go struct in all of
@@ -85,7 +89,7 @@ are new records.
 | `conditional` | `index.Where(Total >= 90000)` on `Customer`: a tenth of the records | a partial index `WHERE total >= 90000` |
 | `covering` | `index.Including(Total)` on `Customer` | `INCLUDE (total)` |
 
-PostgreSQL's table is the columns of `record-codecs`; kvutil's is the record store with msgpack. The
+PostgreSQL's table is the columns of `record-codecs`; kvutil's is the record store with FlatBuffers values. The
 `build` of PostgreSQL is its server's work, so the CPU of the harness in that case is nothing: see
 the `docker stats` file for it. kvutil builds one index after the other on one thread, and
 PostgreSQL may use parallel workers for a large build.
@@ -110,7 +114,7 @@ asked in the ways that each system has. The records are books (`dataset.Book`, i
 
 PostgreSQL has `books(id bigint PRIMARY KEY, code text, author text, year bigint, price bigint,
 in_print boolean, tags text[], title text, subtitle text, score bigint, payload bytea)`, and kvutil
-a record store with msgpack values, with the same eight indexes. The books are loaded first and the
+a record store with FlatBuffers values, with the same eight indexes. The books are loaded first and the
 indexes built after (kvutil `Migrate`, PostgreSQL `CREATE INDEX`), both as phases (`load` and
 `build`), which the first way of each system reports; then PostgreSQL runs `VACUUM (ANALYZE)` and a
 checkpoint, so that it has statistics and a visibility map, and index-only scans are possible.
@@ -145,7 +149,10 @@ kvutil has no bind parameters, so "prepared" there is one query for each set of 
 has a pool of 1,024 sets of arguments (random, from the seed; the same pool for every way and both
 systems), an operation picks one at random, and `prepared` has the 1,024 queries built and planned
 before the measurement. A query reads and decodes everything it returns (kvutil decodes the books,
-pgx scans the rows into a `Book`), and the rows are counted (`units`, rows/s).
+pgx scans the rows into a `Book`), and the rows are counted (`units`, rows/s). The codec of the
+books is a partial decoder, so that a condition that kvutil checks on a record (a `cond.Func`, a
+filter that is not served by an index) decodes only the fields that it reads, and the whole record
+only when the record satisfies it.
 
 **The cases**, each at 1 worker and at `-concurrency`. `$1`… are the parameters of the prepared
 statement; the select list is every column (`id, code, … payload`) unless the case says otherwise.
@@ -216,7 +223,7 @@ planner picks, which has no statistics. kvutil has no way to ask for the order o
 
 Does a "bitmap heap scan" pay on Badger? K records are fetched by primary key, the keys coming in
 random order, as an index gives them; is it faster to read them in that order, or to sort the keys
-first and read them in the order of the keys? Records are msgpack values under 8 byte keys in raw
+first and read them in the order of the keys? Records are FlatBuffers values under 8 byte keys in raw
 Badger (ids 0 to N-1); the variants are `small` (about 200 bytes) and `large` (4 KB; at most 250,000
 records), whatever `-values` says. Each K (10, 100, 1,000, 10,000, 100,000 and half of the records,
 500,000 at most, but not more than half) is read in four ways, all from the unsorted ids to the last
@@ -283,7 +290,7 @@ sums and maxima are exact on every system and cannot drift), `at` has the resolu
 | | `materialized` | The same, with `materialized_only = true`; the policies refresh up to the end of the data | The materialization only |
 | | `caggs` (rebuild) | The same, built by the workload | The materialization only |
 
-**kvutil** (`internal/workloads/aggs/kvutil.go`), on `record.New[int64, Event]("events")` (msgpack):
+**kvutil** (`internal/workloads/aggs/kvutil.go`), on `record.NewWithCodecs[int64, Event]("events", nil, flat.Event())` (FlatBuffers):
 
 ```go
 at := func(e *Event) time.Time { return e.At }
@@ -526,11 +533,12 @@ Parents and children, and a many-to-many relation with data on its pairs. One va
 | Left and right records | max(20, N/20) and max(20, N/10) | accounts and teams |
 | Pairs | about N | the left record of rank k has 1/(k+1) of the pairs of the first (at most as many as there are right records), the right records of a left record are spread evenly; each pair has a role and a date |
 
-**kvutil** (`relations/kvutil.go`), the stores are `record.New` with msgpack:
+**kvutil** (`relations/kvutil.go`), the stores are `record.NewWithCodecs` with the FlatBuffers codecs of the workload
+(`relations/flat.go`), and the data of a pair has one as well (`relation.NewWithCodec`):
 
 ```go
 owned   := relation.Associate("owned", parents, children)         // a child belongs to a parent
-members := relation.New[pairData]("members", lefts, rights)       // pairs with data
+members := relation.NewWithCodec("members", lefts, rights, pairCodec()) // pairs with data
 // a child, with the check of the parent and the references of both directions:
 children.Instantiate(tx).Set(&c, owned.Under(parentID))
 owned.Instantiate(tx).Children(parentID)   // iterator of keys; Value() reads the record of each
@@ -580,7 +588,7 @@ them, as phases (the time, `records_per_sec`, and the sizes after):
 | Variant | Cases | kvutil | PostgreSQL |
 | --- | --- | --- | --- |
 | `index-single`, `index-unique`, `index-composite`, `index-multi` | `add-index`, `drop-index`, `add-index-concurrently` (PostgreSQL only) | the store is defined again with the index and `Migrate` builds it (checked: one `Built` action); defined without it, `Migrate` deletes its entries (one `Dropped`) | `CREATE INDEX` on `customer` / `CREATE UNIQUE INDEX` on `code` / `(customer, created_at)` / `USING gin (tags)`; `DROP INDEX`; `CREATE INDEX CONCURRENTLY` |
-| `migrate` | `convert` (the sum), `convert-add-column` and `convert-update` (PostgreSQL), `add-field` | `record.New[int64, orderV2]("rec").WithVersion(2).MigrateFrom(1, func(id, old *Order) (*orderV2, error) {…})`: `Migrate` converts every record in batches of 256 records (a priority from the total); the second case is a store whose record has one more field and the same version: `Migrate` finds nothing to do | `ALTER TABLE ADD COLUMN priority integer` and `UPDATE … SET priority = total / 10000`; `ALTER TABLE ADD COLUMN extra text NOT NULL DEFAULT 'x'`, which PostgreSQL does in the catalog and not in the rows |
+| `migrate` | `convert` (the sum), `convert-add-column` and `convert-update` (PostgreSQL), `add-field` | `record.NewWithCodecs[int64, orderV2]("rec", nil, orderV2Codec()).WithVersion(2).MigrateFrom(1, func(id, old *Order) (*orderV2, error) {…}, migrate.WithOldCodec(flat.Order()))` (every version of the record has a FlatBuffers codec of its own): `Migrate` converts every record in batches of 256 records (a priority from the total); the second case is a store whose record has one more field and the same version: `Migrate` finds nothing to do | `ALTER TABLE ADD COLUMN priority integer` and `UPDATE … SET priority = total / 10000`; `ALTER TABLE ADD COLUMN extra text NOT NULL DEFAULT 'x'`, which PostgreSQL does in the catalog and not in the rows |
 | `migrate-indexed` | `build-indexes` (customer, status, total), then the same as `migrate` | `Migrate` converts the records and builds the three indexes again from the new ones (three `Built`) | the `UPDATE` writes a new version of every row, and of every index entry (the update is not HOT: it writes the page full) |
 | `open` | `open-new`, `open-loaded`, `restart-loaded` | a database with nothing in it: `Open`, define the stores, `Migrate` (records them), a first `Get`; reopened with records and three indexes: `Open`, `Migrate` (nothing to do: an empty report is checked), a first `Get`; restarted: the close and the open of the database in the process | a new connection and a first query (`SELECT count(*)` of an empty table; a primary key lookup); a restart: `docker restart` of the container through the Docker API, then a new connection until the first answer |
 
@@ -626,7 +634,7 @@ PostgreSQL `CHECKPOINT`), and its result has `extra`:
 | Key | |
 | --- | --- |
 | `disk_bytes_before`, `disk_bytes_after`, `disk_growth_bytes` | the size of the database (the files of Badger by the blocks they occupy, `pg_total_relation_size` of the tables) |
-| `user_bytes` | the bytes that the user wrote in the step: the records, encoded (msgpack), by the mean of 200 of them; 0 for a delete |
+| `user_bytes` | the bytes that the user wrote in the step: the records, encoded (FlatBuffers), by the mean of 200 of them; 0 for a delete |
 | `container_write_bytes`, `write_amp`, `write_bytes_per_dataset_byte` | the bytes that the container wrote to block devices during the step (from the cgroup `io.stat` of the harness' container for kvutil, from the Docker API for PostgreSQL's container); `write_amp` is those over `user_bytes`. Absent when the figure is unavailable, and then `info.io_source` is `unavailable`; it is `cgroup` or `docker-api` otherwise |
 | `wal_bytes`, `pg_stat_io_write_bytes`, `wal_per_user_byte` | PostgreSQL only: the WAL the server made (`pg_stat_wal`), and the bytes it wrote to relations and the WAL according to `pg_stat_io` |
 
@@ -711,7 +719,7 @@ alone (as the orders are), so any document can be generated by itself, and the n
 `insert` case are made by the same generator. The queries are a pool of 256 vectors drawn the same
 way from a stream of their own; each operation picks one at random.
 
-kvutil keeps the embedding twice, in the record (msgpack: 5 bytes a component) and in the index
+kvutil keeps the embedding twice, in the record (FlatBuffers: 4 bytes a component, 1,584 bytes for a document of 384 floats) and in the index
 (4 bytes a component), as the index is derived from the records by a function; PostgreSQL has it
 once in the table, and once more in the index it builds.
 
@@ -841,7 +849,7 @@ produce, and compares them:
   id and a digest of the value of every record, `Get` results, and the rows of scans.
 * `bulk-load`: every strategy, at 1 and 3 workers, must leave a digest of all records that is the
   same as the others; the digest of the three variants of both systems is compared.
-* `record-codecs`: every record read back through each of the six variants, canonically.
+* `record-codecs`: every record read back through each of the seven variants, canonically.
 * `index-maintenance`: after the writes, each configuration answers a set of probes with ids
   through its indexes (kvutil `Lookup`, `Match`, `Range`) or in SQL; the lists of ids, sorted, must
   be the same. The configurations are different groups, so each is compared with its counterpart.

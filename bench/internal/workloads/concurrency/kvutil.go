@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/ehsanranjbar/kvutil/bench/internal/dataset"
+	"github.com/ehsanranjbar/kvutil/bench/internal/flat"
 	"github.com/ehsanranjbar/kvutil/bench/internal/harness"
 	"github.com/ehsanranjbar/kvutil/bench/internal/systems/kvsys"
 	"github.com/ehsanranjbar/kvutil/bench/internal/wl"
@@ -14,11 +15,11 @@ import (
 	"github.com/ehsanranjbar/kvutil/store/record"
 )
 
-func encodeOrder(o *dataset.Order) []byte { return wl.Msgpack(o) }
+func encodeOrder(o *dataset.Order) []byte { return flat.EncodeOrder(o) }
 
 // kvEnv is kvutil on a database of its own. The counters are raw keys (the counter in 8 bytes
 // under a key of 8 bytes) and so are the blind writes; the records of the mixed cases are a
-// record store with the default codec.
+// record store with the FlatBuffers codec of the order.
 type kvEnv struct {
 	db     *kvsys.DB
 	orders *record.Store[int64, dataset.Order]
@@ -33,7 +34,7 @@ func openKV(ctx context.Context, sys *kvsys.System, s spec) (env, error) {
 	if err != nil {
 		return nil, err
 	}
-	e := &kvEnv{db: db, orders: record.New[int64, dataset.Order]("orders")}
+	e := &kvEnv{db: db, orders: record.NewWithCodecs[int64, dataset.Order]("orders", nil, flat.Order())}
 	if _, err := e.orders.Migrate(ctx, db); err != nil {
 		db.Destroy()
 		return nil, err

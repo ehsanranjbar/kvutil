@@ -5,6 +5,7 @@ import (
 	"errors"
 
 	"github.com/ehsanranjbar/kvutil/bench/internal/dataset"
+	"github.com/ehsanranjbar/kvutil/bench/internal/flat"
 	"github.com/ehsanranjbar/kvutil/bench/internal/harness"
 	"github.com/ehsanranjbar/kvutil/bench/internal/systems/kvsys"
 	"github.com/ehsanranjbar/kvutil/bench/internal/wl"
@@ -13,7 +14,7 @@ import (
 	"github.com/ehsanranjbar/kvutil/store/record"
 )
 
-// recordStore is what the three record stores of kvutil share, whatever the type of their
+// recordStore is what the record stores of kvutil share, whatever the type of their
 // records is: the functions that convert to and from the record of the dataset.
 type recordStore[T any] struct {
 	db    *kvsys.DB
@@ -81,6 +82,15 @@ func (s *recordStore[T]) Sizes(context.Context) (harness.Sizes, error) {
 
 func (s *recordStore[T]) Close(context.Context) error { return s.db.Destroy() }
 
+func openFlatBuffers(ctx context.Context, sys harness.System, _ harness.Params) (store, error) {
+	st := record.NewWithCodecs[int64, dataset.Order]("rec", nil, flat.Order())
+	return openRecords(ctx, sys, "codecs-flatbuffers", st, st.ValueCodec(),
+		func(o *dataset.Order) *dataset.Order { return o },
+		func(o *dataset.Order) *dataset.Order { return o })
+}
+
+// openMsgpack is the default codec of kvutil, which the other workloads no longer use: it is here
+// to compare the formats.
 func openMsgpack(ctx context.Context, sys harness.System, _ harness.Params) (store, error) {
 	st := record.New[int64, dataset.Order]("rec")
 	return openRecords(ctx, sys, "codecs-msgpack", st, st.ValueCodec(),

@@ -66,6 +66,10 @@ isolate itself from it.
 
 ### How long and how much disk
 
+> The figures of this section (durations, counts of results, sizes on disk) were measured before
+> the records of the benchmarks were changed from msgpack to FlatBuffers. The counts of results do
+> not depend on the format; the sizes and the times may differ a little, and have not been measured again.
+
 **Time.** What was measured: a smoke run of every workload (10,000 records, a second and a half per
 timed case) on a MacBook, in Docker Desktop with 4 CPUs and 4 GB for each container, in three pieces
 that took 7.5, 8.7 and 8 minutes (24 in all, the build of the image included). It had 841 timed
@@ -113,7 +117,7 @@ most one database of each is alive at a time. With the 2.5 GB of images (`pgvect
 TimescaleDB 1.5 GB, the harness 0.2 GB), the cache of the build and the report, plan on **20 GB free
 for `-s 1000000`** (small values), and **60 GB for `-s 500000 -V large`**, where a record is 20
 times larger. `vector-search` stops at 250,000 documents whatever the scale is: its databases are
-about 1 GB each at that size (an estimate: kvutil keeps a document of about 1.9 KB and its 1.5 KB
+about 1 GB each at that size (an estimate: kvutil keeps a document of about 1.6 KB (FlatBuffers) and its 1.5 KB
 vector, PostgreSQL a row of 1.6 KB and an index), which `-V` does not change. On Docker Desktop the limit is the size of its disk image (Settings > Resources).
 The results of a run are 3 to 10 MB, the report about 1 MB.
 
@@ -479,11 +483,18 @@ the system chose in it (see [Reading the plans](docs/workloads.md#reading-the-pl
 `kvbench list` has them with their variants. What each one does, its variants and its cases, and
 how `kvbench verify` checks it, is in [docs/workloads.md](docs/workloads.md).
 
+The records of every workload are FlatBuffers (`internal/flat`: a codec for each record, with
+partial decoding, so that the queries of kvutil decode only the fields that their conditions read),
+in kvutil's stores and in the raw Badger and `bytea` rows that stand in for a record, so that the
+raw and the typed rows hold the same bytes. PostgreSQL keeps its own formats (columns, `jsonb`).
+`record-codecs` is the one workload that compares the formats, and keeps msgpack, JSON and a
+binary codec next to FlatBuffers.
+
 | Workload | Group | Measures |
 | --- | --- | --- |
 | [`kv-basic`](docs/workloads.md#kv-basic-group-kv) | `kv` | get, set, delete and scans by the primary key, in three layers of kvutil |
 | [`bulk-load`](docs/workloads.md#bulk-load-group-load) | `load` | loading N records: `WriteBatch` and transactions against `COPY` and multi-row `INSERT` |
-| [`record-codecs`](docs/workloads.md#record-codecs-group-records) | `records` | records with msgpack, JSON and binary codecs against columns, `jsonb` and `bytea` |
+| [`record-codecs`](docs/workloads.md#record-codecs-group-records) | `records` | records with FlatBuffers, msgpack, JSON and binary codecs against columns, `jsonb` and `bytea` |
 | [`index-maintenance`](docs/workloads.md#index-maintenance-group-index) | `index` | what an index costs a write, and what it costs to build |
 | [`queries`](docs/workloads.md#queries-group-query) | `query` | 17 queries on a catalogue of books with 8 indexes, in the ways each system has, with the plans |
 | [`selectivity-sweep`](docs/workloads.md#selectivity-sweep-group-query) | `query` | a range on an indexed field from 10 rows to half of the table |

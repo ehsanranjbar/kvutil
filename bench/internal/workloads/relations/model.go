@@ -12,7 +12,7 @@ import (
 // The records of the relations. Both the parents and the children are stored under an int64 id
 // that is a key and not a part of the value.
 type parent struct {
-	ID      int64 `msgpack:"-"`
+	ID      int64
 	Name    string
 	Region  string
 	Created time.Time
@@ -23,7 +23,7 @@ func (p *parent) SetId(id int64) { p.ID = id }
 
 // child belongs to a parent, which the association keeps (the child has no field for it).
 type child struct {
-	ID      int64 `msgpack:"-"`
+	ID      int64
 	Title   string
 	Qty     int64
 	Status  string
@@ -35,7 +35,7 @@ func (c *child) SetId(id int64) { c.ID = id }
 
 // entity is a record of either side of the many-to-many relation: an account or a team.
 type entity struct {
-	ID   int64 `msgpack:"-"`
+	ID   int64
 	Name string
 	Kind string
 }

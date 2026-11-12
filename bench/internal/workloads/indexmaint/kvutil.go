@@ -8,6 +8,7 @@ import (
 
 	"github.com/ehsanranjbar/kvutil"
 	"github.com/ehsanranjbar/kvutil/bench/internal/dataset"
+	"github.com/ehsanranjbar/kvutil/bench/internal/flat"
 	"github.com/ehsanranjbar/kvutil/bench/internal/harness"
 	"github.com/ehsanranjbar/kvutil/bench/internal/systems/kvsys"
 	"github.com/ehsanranjbar/kvutil/bench/internal/wl"
@@ -34,7 +35,7 @@ var (
 
 type recordStore = record.Store[int64, order]
 
-func newStore() *recordStore { return record.New[int64, order]("rec") }
+func newStore() *recordStore { return record.NewWithCodecs[int64, order]("rec", nil, flat.Order()) }
 
 // kvIndexes are the indexes that a configuration adds to a store, and how they answer the probes.
 type kvIndexes struct {

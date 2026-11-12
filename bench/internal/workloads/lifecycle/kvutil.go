@@ -8,8 +8,10 @@ import (
 
 	"github.com/ehsanranjbar/kvutil"
 	"github.com/ehsanranjbar/kvutil/bench/internal/dataset"
+	"github.com/ehsanranjbar/kvutil/bench/internal/flat"
 	"github.com/ehsanranjbar/kvutil/bench/internal/systems/kvsys"
 	"github.com/ehsanranjbar/kvutil/bench/internal/wl"
+	"github.com/ehsanranjbar/kvutil/codec"
 	"github.com/ehsanranjbar/kvutil/field"
 	"github.com/ehsanranjbar/kvutil/index"
 	"github.com/ehsanranjbar/kvutil/kv"
@@ -20,7 +22,7 @@ import (
 // orderV2 is the record after the value change: the fields of dataset.Order and a priority
 // that is derived from the total.
 type orderV2 struct {
-	ID       int64 `msgpack:"-"`
+	ID       int64
 	Code     string
 	Customer string
 	Name     string
@@ -41,7 +43,7 @@ func (o *orderV2) priority() int32 { return o.Priority }
 // orderV3Flat is orderV2 with one more field, which an old record does not have: the change that
 // needs no migration, as the codec leaves out what it does not know.
 type orderV3Flat struct {
-	ID       int64 `msgpack:"-"`
+	ID       int64
 	Code     string
 	Customer string
 	Name     string
@@ -133,9 +135,10 @@ type stageOf[V any, PV record.Record[int64, V]] struct {
 }
 
 func newStage[V any, PV record.Record[int64, V]](
-	version uint64, kinds []string, conv func(*dataset.Order) *V, configure func(*record.Store[int64, V]),
+	version uint64, kinds []string, vc codec.ValueCodec[V], conv func(*dataset.Order) *V,
+	configure func(*record.Store[int64, V]),
 ) *stageOf[V, PV] {
-	st := record.New[int64, V, PV]("rec").WithVersion(version)
+	st := record.NewWithCodecs[int64, V, PV]("rec", nil, vc).WithVersion(version)
 	if configure != nil {
 		configure(st)
 	}
@@ -179,7 +182,8 @@ func (s *stageOf[V, PV]) each(tx kv.Tx, fn func(int64, int32)) error {
 }
 
 func stageV1(kinds []string) stage {
-	return newStage[dataset.Order, *dataset.Order](1, kinds, func(o *dataset.Order) *dataset.Order { return o }, nil)
+	return newStage[dataset.Order, *dataset.Order](1, kinds, flat.Order(),
+		func(o *dataset.Order) *dataset.Order { return o }, nil)
 }
 
 func orderToV2(o *dataset.Order) *orderV2 {
@@ -192,16 +196,17 @@ func orderToV2(o *dataset.Order) *orderV2 {
 // stageV2 is the store after the value change: version 2, with the migration from version 1 that
 // computes the priority of every record.
 func stageV2(kinds []string) stage {
-	return newStage[orderV2, *orderV2](2, kinds, orderToV2, func(st *record.Store[int64, orderV2]) {
+	return newStage[orderV2, *orderV2](2, kinds, orderV2Codec(), orderToV2, func(st *record.Store[int64, orderV2]) {
+		// The records of the version 1 were written in FlatBuffers as dataset.Order.
 		st.MigrateFrom(1, func(id int64, old *dataset.Order) (*orderV2, error) {
 			return orderToV2(old), nil
-		})
+		}, migrate.WithOldCodec(flat.Order()))
 	})
 }
 
 // stageV3 is the store with a field added to the record, in the same version: no migration.
 func stageV3(kinds []string) stage {
-	return newStage[orderV3Flat, *orderV3Flat](2, kinds, func(o *dataset.Order) *orderV3Flat {
+	return newStage[orderV3Flat, *orderV3Flat](2, kinds, orderV3Codec(), func(o *dataset.Order) *orderV3Flat {
 		v := orderToV2(o)
 		return &orderV3Flat{ID: v.ID, Code: v.Code, Customer: v.Customer, Name: v.Name, Status: v.Status,
 			Total: v.Total, Qty: v.Qty, At: v.At, Note: v.Note, Tags: v.Tags, Payload: v.Payload, Priority: v.Priority}
@@ -212,7 +217,7 @@ func stageV3(kinds []string) stage {
 			v := orderToV2(old)
 			return &orderV3Flat{ID: v.ID, Priority: v.Priority, Code: v.Code, Customer: v.Customer, Name: v.Name,
 				Status: v.Status, Total: v.Total, Qty: v.Qty, At: v.At, Note: v.Note, Tags: v.Tags, Payload: v.Payload}, nil
-		})
+		}, migrate.WithOldCodec(flat.Order()))
 	})
 }
 

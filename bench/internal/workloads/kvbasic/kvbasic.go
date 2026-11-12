@@ -4,8 +4,8 @@
 //
 // The variants of kvutil are three layers over the same Badger: raw (kv.Tx with 8 byte keys and the
 // bytes of the record), typed-bytes (typed.Store with values that are bytes: the cost of the typed
-// layer alone) and typed (typed.Store of the record, which adds the msgpack encoding and decoding
-// of a struct). PostgreSQL has the table kv(k bigint PRIMARY KEY, v bytea) with the same bytes.
+// layer alone) and typed (typed.Store of the record, which adds the FlatBuffers encoding and
+// decoding of a struct). PostgreSQL has the table kv(k bigint PRIMARY KEY, v bytea) with the same bytes.
 package kvbasic
 
 import (

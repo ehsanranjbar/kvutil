@@ -10,6 +10,7 @@ import (
 
 	"github.com/ehsanranjbar/kvutil/agg"
 	"github.com/ehsanranjbar/kvutil/bench/internal/dataset"
+	"github.com/ehsanranjbar/kvutil/bench/internal/flat"
 	"github.com/ehsanranjbar/kvutil/bench/internal/harness"
 	"github.com/ehsanranjbar/kvutil/bench/internal/systems/kvsys"
 	"github.com/ehsanranjbar/kvutil/bench/internal/wl"
@@ -39,7 +40,7 @@ type kvAggs struct {
 
 // newKVStore returns the store of the events with its aggregations, or without them.
 func newKVStore(withAggs bool) *kvAggs {
-	st := record.New[int64, event]("events")
+	st := record.NewWithCodecs[int64, event]("events", nil, flat.Event())
 	a := &kvAggs{store: st}
 	if !withAggs {
 		return a

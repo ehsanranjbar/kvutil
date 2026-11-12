@@ -48,7 +48,7 @@ func TestBinaryIsSmallerThanMsgpack(t *testing.T) {
 
 func TestKvutilCodecsReturnTheSameRecords(t *testing.T) {
 	outs, diffs := testutil.Verify(t, workload{}, testutil.Kvutil(t), testutil.Params(300))
-	if len(outs) != 3 {
+	if len(outs) != 4 {
 		t.Fatalf("%d outputs", len(outs))
 	}
 	if len(diffs) > 0 {
@@ -79,7 +79,7 @@ func TestRunEmitsEveryCase(t *testing.T) {
 			}
 		}
 	}
-	for _, v := range []string{"msgpack", "json", "binary"} {
+	for _, v := range []string{"flatbuffers", "msgpack", "json", "binary"} {
 		for _, c := range []string{"load", "size", "get", "set-update", "set-insert"} {
 			if !seen[v+"/"+c] {
 				t.Errorf("no result for %s/%s", v, c)

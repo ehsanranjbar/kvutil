@@ -11,6 +11,7 @@ import (
 
 	"github.com/ehsanranjbar/kvutil"
 	"github.com/ehsanranjbar/kvutil/bench/internal/dataset"
+	"github.com/ehsanranjbar/kvutil/bench/internal/flat"
 	"github.com/ehsanranjbar/kvutil/bench/internal/harness"
 	"github.com/ehsanranjbar/kvutil/bench/internal/systems/kvsys"
 	"github.com/ehsanranjbar/kvutil/bench/internal/systems/pgsys"
@@ -60,7 +61,8 @@ func (b *base) Sizes(context.Context) (harness.Sizes, error) {
 
 func (b *base) Close(context.Context) error { return b.db.Destroy() }
 
-// --- typed: typed.Store[int64, Order], which encodes the key and the record with msgpack.
+// --- typed: typed.Store[int64, Order], which encodes the key with the default codec and the record in
+// FlatBuffers.
 
 type typedStore struct {
 	base
@@ -72,7 +74,7 @@ func openTyped(ctx context.Context, sys harness.System, _ harness.Params) (store
 	if err != nil {
 		return nil, err
 	}
-	st := typed.New[int64, dataset.Order]("kv")
+	st := typed.NewWithCodecs[int64, dataset.Order]("kv", nil, flat.Order())
 	if _, err := st.Migrate(ctx, db); err != nil {
 		db.Destroy()
 		return nil, err
@@ -160,7 +162,7 @@ func (s *typedStore) Dump(_ context.Context, from int64, limit int) ([]string, e
 			if err != nil {
 				return err
 			}
-			lines = append(lines, digest(id, wl.Msgpack(o)))
+			lines = append(lines, digest(id, flat.EncodeOrder(o)))
 		}
 		return nil
 	})
@@ -168,7 +170,8 @@ func (s *typedStore) Dump(_ context.Context, from int64, limit int) ([]string, e
 }
 
 // --- typed-bytes: typed.Store[int64, blob], whose values are bytes that encode themselves, so
-// that the difference with raw is the typed layer and nothing of msgpack.
+// that the difference with raw is the typed layer and nothing of the encoding of a record (the
+// bytes are the FlatBuffers of the record, encoded by the benchmark and not by the store).
 
 type blob []byte
 
@@ -206,14 +209,14 @@ func (s *blobStore) Load(_ context.Context, spec dataset.Spec, from, to int64, w
 			if err != nil {
 				return err
 			}
-			return w.Set(append(bytes.Clone(s.st.DataPrefix()), k...), wl.Msgpack(o))
+			return w.Set(append(bytes.Clone(s.st.DataPrefix()), k...), flat.EncodeOrder(o))
 		}
 	})
 	return err
 }
 
 func (s *blobStore) Prepare(o *dataset.Order) any {
-	b := blob(wl.Msgpack(o))
+	b := blob(flat.EncodeOrder(o))
 	return &b
 }
 
@@ -302,13 +305,13 @@ func (s *rawStore) Load(_ context.Context, spec dataset.Spec, from, to int64, wo
 		o := &dataset.Order{}
 		return func(w kv.BulkWriter, id int64) error {
 			spec.GenInto(o, id, 0)
-			return w.Set(wl.Key8(id), wl.Msgpack(o))
+			return w.Set(wl.Key8(id), flat.EncodeOrder(o))
 		}
 	})
 	return err
 }
 
-func (s *rawStore) Prepare(o *dataset.Order) any { return wl.Msgpack(o) }
+func (s *rawStore) Prepare(o *dataset.Order) any { return flat.EncodeOrder(o) }
 
 func (s *rawStore) Get(_ context.Context, id int64) (bool, error) {
 	found := true
@@ -404,7 +407,7 @@ func (s *pgStore) Load(ctx context.Context, spec dataset.Spec, from, to int64, w
 					return nil, nil
 				}
 				spec.GenInto(o, id, 0)
-				row := []any{id, wl.Msgpack(o)}
+				row := []any{id, flat.EncodeOrder(o)}
 				id++
 				return row, nil
 			}))
@@ -412,7 +415,7 @@ func (s *pgStore) Load(ctx context.Context, spec dataset.Spec, from, to int64, w
 	})
 }
 
-func (s *pgStore) Prepare(o *dataset.Order) any { return wl.Msgpack(o) }
+func (s *pgStore) Prepare(o *dataset.Order) any { return flat.EncodeOrder(o) }
 
 func (s *pgStore) Get(ctx context.Context, id int64) (bool, error) {
 	var v []byte

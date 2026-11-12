@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/ehsanranjbar/kvutil/bench/internal/dataset"
+	"github.com/ehsanranjbar/kvutil/bench/internal/flat"
 	"github.com/ehsanranjbar/kvutil/bench/internal/harness"
 	"github.com/ehsanranjbar/kvutil/bench/internal/systems/kvsys"
 	"github.com/ehsanranjbar/kvutil/bench/internal/wl"
@@ -23,7 +24,7 @@ func openKV(ctx context.Context, sys harness.System, _ harness.Params) (target, 
 	if err != nil {
 		return nil, err
 	}
-	st := typed.New[int64, dataset.Order]("kv")
+	st := typed.NewWithCodecs[int64, dataset.Order]("kv", nil, flat.Order())
 	if _, err := st.Migrate(ctx, db); err != nil {
 		db.Destroy()
 		return nil, err
