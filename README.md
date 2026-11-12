@@ -625,9 +625,16 @@ On an Apple M5 Pro, with 10,000 records in `memkv` and no index, a scan with a c
 of the records satisfy takes 8.2 ms on books with a payload of 4 KB, against 11.6 ms with the
 records decoded in full, and allocates 5.2 MiB against 43 MiB. `Count` of the same takes 7.2 ms
 against 11.4 ms, and allocates 1 MiB. On records of 384-dimensional vectors a `Count` takes
-54 ms against 110 ms. When half of the records satisfy the condition, `Run` gains nothing, as
-they are decoded twice, in part and in full; a projection and `Count` still do
-([query/partial_bench_test.go](query/partial_bench_test.go)).
+54 ms against 110 ms ([query/partial_bench_test.go](query/partial_bench_test.go)).
+
+A record that satisfies the conditions is decoded twice, in part and then in full, which costs
+more than decoding it in full once when most of them do. So a query times the two kinds of decode
+as it goes, and decodes the records in full at once while the share of them that satisfy the
+conditions is past the point where the two ways cost the same: between a third and a half of the
+records with msgpack, nine tenths with FlatBuffers, whose fields cost next to nothing to read. On those books,
+a scan that every record satisfies takes 8.4 ms, as long as one that decodes them in full; it
+took 11.8 ms before the query chose. A projection and `Count` never decode a record in full, and
+gain at any share.
 
 ## Conditions as text
 

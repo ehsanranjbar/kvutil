@@ -8,6 +8,7 @@ import (
 	"github.com/RoaringBitmap/roaring/v2/roaring64"
 	"github.com/ehsanranjbar/kvutil/codec"
 	"github.com/ehsanranjbar/kvutil/cond"
+	"github.com/ehsanranjbar/kvutil/internal/decoding"
 	"github.com/ehsanranjbar/kvutil/kv"
 	extstore "github.com/ehsanranjbar/kvutil/store/ext"
 	refstore "github.com/ehsanranjbar/kvutil/store/ref"
@@ -163,9 +164,12 @@ type Iterator[K, V any] struct {
 	// they are decoded into the scratch, which is never handed out.
 	decode  func([]byte, *V) error
 	scratch *V
-	pos     position[K, V] // the record of the current entry, once it is read
-	viewed  entryView      // what the current entry holds, once it is split
-	err     error
+	// choice decides whether the records are decoded in full at once instead, which is cheaper
+	// when most of them satisfy the conditions.
+	choice decoding.Choice
+	pos    position[K, V] // the record of the current entry, once it is read
+	viewed entryView      // what the current entry holds, once it is split
+	err    error
 }
 
 // Bitmap reads the primary keys of the records that the iterator has left into a bitmap, and
@@ -237,25 +241,36 @@ func (it *Iterator[K, V]) matches() (bool, error) {
 		record *V
 		err    error
 	)
-	if it.decode != nil {
+	if it.decode != nil && !it.choice.Full() {
 		// The fields that the conditions read are decoded; the record in full is decoded by Value,
 		// from the same bytes, if it is asked for.
 		var st extstore.Stored[K, V]
 		if st, err = it.Stored(); err == nil {
+			start := it.choice.StartPartial()
 			record, err = st.Partial(it.decode, it.scratch)
+			if record == it.scratch {
+				// A record that was decoded already is not what a decode costs.
+				it.choice.EndPartial(start)
+			}
 		}
 	} else {
+		// Most records satisfy the conditions, or there is no decoder: the record is decoded in
+		// full, and kept for Value.
 		record, err = it.Value()
 	}
 	if err != nil {
 		return false, err
 	}
+	ok := true
 	for _, cnd := range it.filter {
-		if ok, err := cnd.Match(record); !ok || err != nil {
-			return false, err
+		if ok, err = cnd.Match(record); !ok || err != nil {
+			break
 		}
 	}
-	return true, nil
+	if it.decode != nil && err == nil {
+		it.choice.Checked(ok)
+	}
+	return ok, err
 }
 
 // Valid implements the iterutil.Iterator interface.
@@ -301,7 +316,15 @@ func (it *Iterator[K, V]) Value() (*V, error) {
 	if err != nil {
 		return nil, err
 	}
-	return it.pos.value(it.ins.recordGetter(), key)
+	if it.decode == nil {
+		return it.pos.value(it.ins.recordGetter(), key)
+	}
+	// A record that the filter checks is decoded in full here, which the choice of how they are
+	// decoded is made from.
+	start := it.choice.StartWhole()
+	record, err := it.pos.value(it.ins.recordGetter(), key)
+	it.choice.EndWhole(start)
+	return record, err
 }
 
 // Stored returns the record that the current entry belongs to as it is stored, which the store

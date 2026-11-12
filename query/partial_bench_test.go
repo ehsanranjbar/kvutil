@@ -54,7 +54,12 @@ var partialSelectivities = []struct {
 }{
 	{"0.1%", 0, 9},
 	{"10%", 0, 999},
+	{"25%", 0, 2499},
+	{"40%", 0, 3999},
 	{"50%", 0, 4999},
+	{"75%", 0, 7499},
+	{"90%", 0, 8999},
+	{"100%", 0, 9999},
 }
 
 // partialEnv is a store that is loaded, with the fields that the benchmarks read.

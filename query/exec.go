@@ -8,6 +8,7 @@ import (
 
 	"github.com/ehsanranjbar/kvutil/cond"
 	"github.com/ehsanranjbar/kvutil/field"
+	"github.com/ehsanranjbar/kvutil/internal/decoding"
 	"github.com/ehsanranjbar/kvutil/iterutil"
 	"github.com/ehsanranjbar/kvutil/store/ext"
 )
@@ -94,6 +95,10 @@ type filter[K, V any] struct {
 	stored  ext.StoredIterator[K, V]
 	scratch *V
 	yield   bool
+	// choice decides whether the records are decoded in full at once instead, which is cheaper
+	// when most of them satisfy the conditions. A filter that yields partial records never
+	// decodes one in full, so it has nothing to choose.
+	choice decoding.Choice
 
 	// record is the current record, once it is decoded in full. st is the current one before that,
 	// valid as the base has not moved.
@@ -133,9 +138,21 @@ func (f *filter[K, V]) settle() {
 			st     ext.Stored[K, V]
 			err    error
 		)
+		whole := false
 		if f.stored != nil {
 			if st, err = f.stored.Stored(); err == nil {
-				record, err = st.Partial(f.decode, f.scratch)
+				if whole = !f.yield && f.choice.Full(); whole {
+					start := f.choice.StartWhole()
+					record, err = st.Record()
+					f.choice.EndWhole(start)
+				} else {
+					start := f.choice.StartPartial()
+					record, err = st.Partial(f.decode, f.scratch)
+					if record == f.scratch {
+						// A record that was decoded already is not what a decode costs.
+						f.choice.EndPartial(start)
+					}
+				}
 			}
 		} else {
 			record, err = f.base.Value()
@@ -156,8 +173,13 @@ func (f *filter[K, V]) settle() {
 				break
 			}
 		}
+		if f.stored != nil && !f.yield {
+			f.choice.Checked(ok)
+		}
 		if ok {
 			switch {
+			case whole:
+				f.record = record
 			case f.stored != nil && record == f.scratch && f.yield:
 				// What holds on to the record, like a sorter, must not see it change.
 				f.record, f.scratch = record, new(V)
@@ -194,7 +216,9 @@ func (f *filter[K, V]) Value() (*V, error) {
 		return f.record, nil
 	}
 	if f.hasSt {
+		start := f.choice.StartWhole()
 		record, err := f.st.Record()
+		f.choice.EndWhole(start)
 		if err != nil {
 			return nil, err
 		}

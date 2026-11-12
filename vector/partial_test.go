@@ -11,6 +11,7 @@ import (
 	"github.com/ehsanranjbar/kvutil/codec"
 	"github.com/ehsanranjbar/kvutil/cond"
 	"github.com/ehsanranjbar/kvutil/field"
+	"github.com/ehsanranjbar/kvutil/internal/decoding"
 	"github.com/ehsanranjbar/kvutil/internal/testkv"
 	"github.com/ehsanranjbar/kvutil/kv"
 	extstore "github.com/ehsanranjbar/kvutil/store/ext"
@@ -47,6 +48,8 @@ type partialResult struct {
 }
 
 func TestFilteredSearchDecodesPartially(t *testing.T) {
+	// The test counts what two steps decode, whatever the costs of the decodes are.
+	t.Cleanup(decoding.SetAdaptive(false))
 	lang := field.Path[doc, string]("Lang")
 	title := field.Path[doc, string]("Title")
 

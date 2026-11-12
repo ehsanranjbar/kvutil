@@ -11,6 +11,7 @@ import (
 	"github.com/ehsanranjbar/kvutil/cond"
 	"github.com/ehsanranjbar/kvutil/field"
 	"github.com/ehsanranjbar/kvutil/index"
+	"github.com/ehsanranjbar/kvutil/internal/decoding"
 	"github.com/ehsanranjbar/kvutil/internal/testkv"
 	"github.com/ehsanranjbar/kvutil/kv"
 	"github.com/ehsanranjbar/kvutil/query"
@@ -116,7 +117,13 @@ func (f *fixture) requireItems(t *testing.T, db kv.DB, q *query.Query[int64, Ite
 	require.Equal(t, want, ids)
 }
 
+// twoSteps makes the filters decode the records in two steps, the fields that the conditions
+// read and then the records that satisfy them, whatever the costs of the decodes are: for a test
+// that counts what two steps decode, which would otherwise depend on how fast the machine is.
+func twoSteps(t testing.TB) { t.Cleanup(decoding.SetAdaptive(false)) }
+
 func TestResidualCheckDecodesPartially(t *testing.T) {
+	twoSteps(t)
 	scoreIn := func(it *Item) bool { return it.Score >= 1 && it.Score <= 2 }
 
 	testkv.Each(t, func(t *testing.T, db kv.DB) {
@@ -165,6 +172,7 @@ func TestResidualCheckDecodesPartially(t *testing.T) {
 }
 
 func TestFunctionsAreDecodedInFullUnlessTheyDeclareTheirReads(t *testing.T) {
+	twoSteps(t)
 	scoreIn := func(it *Item) bool { return it.Score >= 1 && it.Score <= 2 }
 
 	testkv.Each(t, func(t *testing.T, db kv.DB) {
@@ -214,6 +222,7 @@ func TestCodecWithoutPartialDecoding(t *testing.T) {
 }
 
 func TestCombinedPlansDecodePartially(t *testing.T) {
+	twoSteps(t)
 	testkv.Each(t, func(t *testing.T, db kv.DB) {
 		f, counts := countingItems(t, db, nil)
 
@@ -260,6 +269,7 @@ func (p *Pet) isOdd() bool            { return p.id%2 == 1 }
 func (p *Pet) idAtLeast(n int64) bool { return p.id >= n }
 
 func TestRecordStoreSetsIdsOnPartialRecords(t *testing.T) {
+	twoSteps(t)
 	var (
 		age  = field.Path[Pet, int]("Age")
 		kind = field.Path[Pet, string]("Kind")
@@ -343,5 +353,34 @@ func TestRecordStoreSetsIdsOnPartialRecords(t *testing.T) {
 			require.EqualValues(t, candidates, counts.partial.Load(), test.name)
 			require.EqualValues(t, len(wantIDs), counts.full.Load(), test.name)
 		}
+	})
+}
+
+func TestFiltersChooseHowToDecode(t *testing.T) {
+	testkv.Each(t, func(t *testing.T, db kv.DB) {
+		f, counts := countingItems(t, db, nil)
+		all := cond.Func("all", func(*Item) bool { return true }).Reading("Score")
+		none := cond.Func("none", func(*Item) bool { return false }).Reading("Score")
+
+		// When every record satisfies the conditions, decoding their fields first is a waste:
+		// after the first records the filter decodes them in full at once, each once.
+		q := query.From(f.store).Where(all).FullScan()
+		f.requireItems(t, db, q, f.matching(func(*Item) bool { return true }))
+		require.EqualValues(t, itemCount, counts.full.Load())
+		require.Less(t, counts.partial.Load(), int64(itemCount/2))
+
+		// When none does, the fields are all that is decoded.
+		counts.reset()
+		f.requireItems(t, db, query.From(f.store).Where(none).FullScan(), nil)
+		require.EqualValues(t, itemCount, counts.partial.Load())
+		require.Zero(t, counts.full.Load())
+
+		// Without the choice, the records are decoded in two steps whatever they cost.
+		counts.reset()
+		restore := decoding.SetAdaptive(false)
+		f.requireItems(t, db, q, f.matching(func(*Item) bool { return true }))
+		restore()
+		require.EqualValues(t, itemCount, counts.partial.Load())
+		require.EqualValues(t, itemCount, counts.full.Load())
 	})
 }

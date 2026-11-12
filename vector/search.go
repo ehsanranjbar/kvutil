@@ -11,6 +11,7 @@ import (
 
 	"github.com/ehsanranjbar/kvutil/codec"
 	"github.com/ehsanranjbar/kvutil/cond"
+	"github.com/ehsanranjbar/kvutil/internal/decoding"
 	"github.com/ehsanranjbar/kvutil/iterutil"
 	"github.com/ehsanranjbar/kvutil/kv"
 	"github.com/ehsanranjbar/kvutil/kv/prefix"
@@ -458,7 +459,18 @@ func (s Search[K, V]) filtered(q []float32, src iterutil.Iterator[K, *V]) ([]hit
 		)
 		if partial != nil {
 			if stored, err = partial.getter.GetStored(key); err == nil {
-				record, err = stored.Partial(partial.decode, partial.scratch)
+				if partial.choice.Full() {
+					// Most candidates satisfy the conditions: they are decoded in full at once.
+					start := partial.choice.StartWhole()
+					record, err = stored.Record()
+					partial.choice.EndWhole(start)
+				} else {
+					start := partial.choice.StartPartial()
+					record, err = stored.Partial(partial.decode, partial.scratch)
+					if record == partial.scratch {
+						partial.choice.EndPartial(start)
+					}
+				}
 			}
 		} else {
 			record, err = s.ins.records().Get(key)
@@ -476,12 +488,18 @@ func (s Search[K, V]) filtered(q []float32, src iterutil.Iterator[K, *V]) ([]hit
 				break
 			}
 		}
+		if partial != nil {
+			partial.choice.Checked(match)
+		}
 		if !match {
 			continue
 		}
 		if partial != nil && record == partial.scratch {
 			// The scratch is reused for the next candidate: the record is decoded in full.
-			if record, err = stored.Record(); err != nil {
+			start := partial.choice.StartWhole()
+			record, err = stored.Record()
+			partial.choice.EndWhole(start)
+			if err != nil {
 				return nil, counts{}, fmt.Errorf("failed to get the record %v: %w", key, err)
 			}
 		}
@@ -497,6 +515,9 @@ type partialReader[K, V any] struct {
 	getter  extstore.StoredGetter[K, V]
 	decode  func([]byte, *V) error
 	scratch *V
+	// choice decides whether the candidates are decoded in full at once instead, which is
+	// cheaper when most of them satisfy the conditions.
+	choice decoding.Choice
 }
 
 // partialCheck prepares the partial reading of the records for the conditions of the search, and

@@ -335,6 +335,7 @@ func TestCountDecodesPartially(t *testing.T) {
 }
 
 func TestProjectionOfWhatIsNotKnownToBeReadDecodesInFull(t *testing.T) {
+	twoSteps(t)
 	testkv.Each(t, func(t *testing.T, db kv.DB) {
 		f := newTickets(t, db)
 		from := func() *query.Query[int64, Ticket] { return query.From(f.store) }
