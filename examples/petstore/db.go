@@ -103,12 +103,23 @@ func define(base *badgerkv.DB) (*DB, error) {
 		return nil, err
 	}
 
-	// The stores are given no codecs. The ids are encoded by their types, the messages of
-	// protobuf encode themselves, and the files are in the default format.
-	db.categories = record.New[int64, types.Category](ks.Prefix("categories")).
+	// The ids are encoded by their types, and the files are in the default format. The
+	// categories and the pets encode themselves as FlatBuffers, and are given a codec that
+	// says so: a store records the name of its codec, and refuses to open data that another
+	// one wrote. The pets of the version of this program that used protobuf were stored under
+	// the name "binary", which is the name of the codec that a type gets by its own
+	// MarshalBinary. With the name "flatbuffers" a database of that version fails to open
+	// with an error, and is not read as FlatBuffers without a word.
+	//
+	// The codec also lets a query read some fields of a pet without the others: a table of
+	// FlatBuffers is read at the place of a field, so a condition on the name or the category
+	// of the pets that a scan goes through does not decode the rest of them.
+	db.categories = record.NewWithCodecs[int64, types.Category](ks.Prefix("categories"),
+		nil, types.Codec[types.Category]()).
 		WithIDFunc(badgerkv.SequenceID[int64, types.Category](categoryIDs))
 	// The pets are of the second version: see migratePets.
-	db.pets = record.New[int64, types.PetRecord](ks.Prefix("pets")).
+	db.pets = record.NewWithCodecs[int64, types.PetRecord](ks.Prefix("pets"),
+		nil, types.Codec[types.PetRecord]()).
 		WithVersion(2).
 		WithIDFunc(badgerkv.SequenceID[int64, types.PetRecord](petIDs))
 	migratePets(db.pets)

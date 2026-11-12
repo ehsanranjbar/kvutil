@@ -14,7 +14,7 @@ import (
 // migratePets adds the migrations of the pets.
 func migratePets(pets *record.Store[int64, types.PetRecord]) {
 	// Version 1 had no time for when a pet was added. The field itself needs no migration,
-	// as a message of protobuf is read without the fields that it does not have. But a pet
+	// as a table of FlatBuffers is read without the fields that it does not have. But a pet
 	// without the time would count as added in 1970, so the pets of version 1 are given the
 	// time of the upgrade.
 	//

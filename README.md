@@ -728,7 +728,8 @@ An engine that does not have a capability returns `kv.ErrUnsupported` for it.
 
 [examples/petstore](examples/petstore) is a small HTTP server on Badger with record stores,
 relations that cascade, an index, two aggregations, a running upkeep runner, and a migration from
-the version of its pets before.
+the version of its pets before. Its records are stored as FlatBuffers, which they read in part
+for the queries that look at one field ([types](examples/petstore/types)).
 
 ```sh
 cd examples/petstore && go run .

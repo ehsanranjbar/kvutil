@@ -322,8 +322,10 @@ func writeFirstVersion(t *testing.T, opt badger.Options) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	categories := record.New[int64, types.Category](ks.Prefix("categories"))
-	pets := record.New[int64, types.PetRecord](ks.Prefix("pets"))
+	categories := record.NewWithCodecs[int64, types.Category](ks.Prefix("categories"),
+		nil, types.Codec[types.Category]())
+	pets := record.NewWithCodecs[int64, types.PetRecord](ks.Prefix("pets"),
+		nil, types.Codec[types.PetRecord]())
 	categoryPets := relation.Associate(ks.Prefix("category_pets"), categories, pets).
 		WithParentID(func(p *types.PetRecord) (int64, bool) { return p.CategoryId, true })
 	// The first version had no images and no sequences, so it claimed no more names.

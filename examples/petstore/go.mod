@@ -5,8 +5,8 @@ go 1.27
 require (
 	github.com/dgraph-io/badger/v4 v4.9.6
 	github.com/ehsanranjbar/kvutil v0.0.0
+	github.com/google/flatbuffers v25.12.19+incompatible
 	github.com/labstack/echo/v4 v4.13.3
-	google.golang.org/protobuf v1.36.7
 )
 
 require (
@@ -17,7 +17,6 @@ require (
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
-	github.com/google/flatbuffers v25.2.10+incompatible // indirect
 	github.com/klauspost/compress v1.18.0 // indirect
 	github.com/labstack/gommon v0.4.2 // indirect
 	github.com/mattn/go-colorable v0.1.13 // indirect
@@ -36,6 +35,7 @@ require (
 	golang.org/x/sys v0.41.0 // indirect
 	golang.org/x/text v0.22.0 // indirect
 	golang.org/x/time v0.8.0 // indirect
+	google.golang.org/protobuf v1.36.7 // indirect
 )
 
 replace github.com/ehsanranjbar/kvutil => ../..

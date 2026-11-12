@@ -1,0 +1,23 @@
+// The schema of what the pet store stores. The ids are not in the tables: they are the keys of
+// the records, and the stores set them after a record is read.
+
+namespace fb;
+
+enum Status : int {
+    UNKNOWN = 0,
+    AVAILABLE = 1,
+    PENDING = 2,
+    SOLD = 3,
+}
+
+table Category {
+    name: string;
+}
+
+table PetRecord {
+    category_id: long;
+    name: string;
+    status: Status;
+    // The time that the pet was added at, in seconds since the Unix epoch.
+    created_at: long;
+}
