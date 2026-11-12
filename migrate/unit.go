@@ -27,8 +27,12 @@ type Unit struct {
 	version    uint64
 	attributes func() map[string]string
 	migrations map[uint64]Migration
-	parts      []Part
-	retired    []string
+	// reads are the attributes that the data must have been written with for the migration
+	// from a version to read it, as far as the migration knows them, like the codecs that it
+	// reads the records with.
+	reads   map[uint64]map[string]string
+	parts   []Part
+	retired []string
 }
 
 // Part is something kept under the prefix of a unit and dependent on its data, like an index
@@ -74,6 +78,7 @@ func NewUnit(prefix []byte, kind string, attributes func() map[string]string) *U
 		version:    1,
 		attributes: attributes,
 		migrations: map[uint64]Migration{},
+		reads:      map[uint64]map[string]string{},
 	}
 }
 
@@ -168,6 +173,16 @@ func (u *Unit) AddMigration(from uint64, m Migration) {
 	u.migrations[from] = m
 }
 
+// readsWith records the attributes that the data of a version must have been written with for
+// its migration to read it, like the codecs of the records. Run fails before it migrates a unit
+// whose recorded attributes of the version are others.
+func (u *Unit) readsWith(from uint64, attributes map[string]string) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+
+	u.reads[from] = maps.Clone(attributes)
+}
+
 // AddPart adds a part to the unit. It panics if the name of the part is empty or taken, or if
 // its prefix is not under the prefix of the unit or is the key of the record of the unit.
 func (u *Unit) AddPart(p Part) {
@@ -232,6 +247,7 @@ type snapshot struct {
 	version    uint64
 	attributes func() map[string]string
 	migrations map[uint64]Migration
+	reads      map[uint64]map[string]string
 	parts      []Part
 	retired    []string
 }
@@ -249,6 +265,7 @@ func (u *Unit) snapshot() *snapshot {
 		version:    u.version,
 		attributes: u.attributes,
 		migrations: maps.Clone(u.migrations),
+		reads:      maps.Clone(u.reads),
 		parts:      slices.Clone(u.parts),
 		retired:    slices.Clone(u.retired),
 	}
@@ -257,6 +274,15 @@ func (u *Unit) snapshot() *snapshot {
 // fingerprint returns a hash of what the stored data of the unit depends on.
 func (s *snapshot) fingerprint() []byte {
 	return fingerprint(s.kind, nil, s.attributes)
+}
+
+// attrs returns what the stored data of the unit depends on, as the record keeps it next to the
+// fingerprint, or nil if the unit has no attributes.
+func (s *snapshot) attrs() map[string]string {
+	if s.attributes == nil {
+		return nil
+	}
+	return maps.Clone(s.attributes())
 }
 
 // partName returns the name of a part as reports and errors have it.

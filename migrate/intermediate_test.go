@@ -301,7 +301,8 @@ func TestMigrateFromOfTheTypeOfTheStore(t *testing.T) {
 			return nil
 		}))
 
-		// And it cannot be read with the codec of the store.
+		// And it is not read with the codec of the store, which is not the one that it was
+		// written with.
 		db2 := testkv.NewMem(t)
 		run(t, db2, old)
 		require.NoError(t, db2.Update(func(tx kv.Tx) error { return old.Instantiate(tx).Set(1, pet) }))
@@ -309,7 +310,8 @@ func TestMigrateFromOfTheTypeOfTheStore(t *testing.T) {
 			WithVersion(2).
 			MigrateFrom(1, double)
 		_, err := wrong.Migrate(context.Background(), db2)
-		require.ErrorContains(t, err, "failed to decode the record as it was")
+		require.ErrorIs(t, err, migrate.ErrChanged)
+		require.ErrorContains(t, err, `written with the value codec "msgpack", and the migration from version 1 reads it with "json"`)
 	})
 }
 
@@ -343,7 +345,8 @@ func TestMigrateFromWithCodecsOfAType(t *testing.T) {
 				k.seedMid(t, db, midJSON)
 				pets, _ := k.program(steps{})
 				_, err := pets.Migrate(context.Background(), db)
-				require.ErrorContains(t, err, "failed to decode the record as it was")
+				require.ErrorIs(t, err, migrate.ErrChanged)
+				require.ErrorContains(t, err, `written with the value codec "json"`)
 
 				pets, read := k.program(steps{o2: []migrate.Option{migrate.WithOldCodec(midJSON)}})
 				run(t, db, pets)

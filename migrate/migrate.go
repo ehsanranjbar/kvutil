@@ -35,7 +35,10 @@
 // codec of their type, which is how a program of that version wrote them unless it gave the
 // store another codec. For a program that did, the codec is given to the step that reads the
 // type, with WithOldCodec, and to the step that writes it, with WithNewCodec. The type of the
-// store is always read and written with the codec of the store.
+// store is always read and written with the codec of the store. Run refuses to migrate data
+// that the first step would read with another codec than the one it was written with, which
+// the store records: a program that changes the codec of a store with its version gives the
+// old one to the migration, with WithOldCodec.
 //
 // A value that only gets fields that it did not have needs no migration in the formats that
 // leave out what they do not know, like the default one.
@@ -134,10 +137,17 @@ func Records[K, V, Old, New any](
 	// The options are checked when the migration is defined, as a mistake in them is one of
 	// the program.
 	var o options
-	resolve[K, V, Old, New](store, opts, &o)
+	old, _ := resolve[K, V, Old, New](store, opts, &o)
 
 	store.Unit().AddMigration(from, func(ctx context.Context, m *Migrator) error {
 		return Convert(ctx, m, store, convert, opts...)
+	})
+	// The records are read with these codecs, which Run compares with the ones that the data
+	// of the version was written with, under the names that the stores of the package typed
+	// record them by.
+	store.Unit().readsWith(from, map[string]string{
+		"key":   store.KeyCodec().Name(),
+		"value": old.Name(),
 	})
 }
 

@@ -2,6 +2,7 @@ package migrate_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"testing"
@@ -198,6 +199,50 @@ func TestRecordsInterrupted(t *testing.T) {
 	})
 }
 
+func TestRecordWithoutAttributes(t *testing.T) {
+	testkv.Each(t, func(t *testing.T, db kv.DB) {
+		toV2 := func(_ int64, old *PetV1) (*Pet, error) { return &Pet{Name: old.Name, Species: old.Kind}, nil }
+		wrong := func() *extstore.Store[int64, Pet] {
+			pets := extstore.New[int64, Pet]("pets").WithVersion(2)
+			migrate.Records(pets, 1, toV2)
+			return pets
+		}
+
+		old := extstore.NewWithCodecs[int64, PetV1]("pets", nil, codec.Formatted[PetV1](codec.JSON))
+		run(t, db, old)
+		require.NoError(t, db.Update(func(tx kv.Tx) error {
+			return old.Instantiate(tx).Set(7, &PetV1{Name: "rex", Kind: "dog"})
+		}))
+
+		// A record that a program wrote before the attributes were kept has the fingerprint
+		// only.
+		key := migrate.MetaKey(old.Prefix())
+		require.NoError(t, db.Update(func(tx kv.Tx) error {
+			bz, err := tx.Get(key)
+			require.NoError(t, err)
+			var rec map[string]any
+			require.NoError(t, json.Unmarshal(bz, &rec))
+			require.Equal(t, map[string]any{"key": "int64", "value": "json"}, rec["attributes"])
+			delete(rec, "attributes")
+			bz, err = json.Marshal(rec)
+			require.NoError(t, err)
+			return tx.Set(key, bz)
+		}))
+
+		// What the data was written with is not known, so the migration is not stopped before
+		// it reads the records with another codec, as it was not before.
+		_, err := wrong().Migrate(context.Background(), db)
+		require.ErrorContains(t, err, "failed to decode the record as it was")
+		require.NotErrorIs(t, err, migrate.ErrChanged)
+
+		// The program of the version of the data records the attributes, and a migration is
+		// then checked.
+		run(t, db, old)
+		_, err = wrong().Migrate(context.Background(), db)
+		require.ErrorIs(t, err, migrate.ErrChanged)
+	})
+}
+
 func TestRecordsWithAnotherCodec(t *testing.T) {
 	testkv.Each(t, func(t *testing.T, db kv.DB) {
 		// The first version wrote JSON, and the second one writes the default format.
@@ -221,7 +266,8 @@ func TestRecordsWithAnotherCodec(t *testing.T) {
 			return nil
 		}))
 
-		// Without the codec that the records were written with, they cannot be read.
+		// Without the codec that the records were written with, they are not migrated, and
+		// nothing is changed: the data is still the one of version 1.
 		db2 := testkv.NewMem(t)
 		run(t, db2, old)
 		require.NoError(t, db2.Update(func(tx kv.Tx) error {
@@ -230,7 +276,15 @@ func TestRecordsWithAnotherCodec(t *testing.T) {
 		wrong := extstore.New[int64, Pet]("pets").WithVersion(2)
 		migrate.Records(wrong, 1, toV2)
 		_, err := wrong.Migrate(context.Background(), db2)
-		require.ErrorContains(t, err, "failed to decode the record as it was")
+		require.ErrorIs(t, err, migrate.ErrChanged)
+		require.ErrorContains(t, err, `its data of version 1 was written with the value codec "json", `+
+			`and the migration from version 1 reads it with "msgpack"; give the migration that codec (WithOldCodec)`)
+		require.ErrorIs(t, migrate.Check(db2, wrong), migrate.ErrChanged)
+		require.NoError(t, migrate.Check(db2, old))
+		require.NoError(t, db2.View(func(tx kv.Tx) error {
+			require.Equal(t, PetV1{Name: "rex", Kind: "dog"}, *must(old.Instantiate(tx).Get(7)))
+			return nil
+		}))
 
 		// The codec of the option is one of the old records.
 		require.Panics(t, func() {

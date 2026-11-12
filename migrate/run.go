@@ -154,10 +154,14 @@ const (
 
 // unitState is what the database records of a unit, under its prefix.
 type unitState struct {
-	// Kind and Fingerprint are the ones the data was written with.
-	Kind        string `json:"kind"`
-	Version     uint64 `json:"version"`
-	Fingerprint []byte `json:"fingerprint"`
+	// Kind and Fingerprint are the ones the data was written with, and Attributes are what the
+	// fingerprint is made of, like the names of the codecs. A record that was written before
+	// they were kept has none, and is given them the next time it is of the version of the
+	// program.
+	Kind        string            `json:"kind"`
+	Version     uint64            `json:"version"`
+	Fingerprint []byte            `json:"fingerprint"`
+	Attributes  map[string]string `json:"attributes,omitempty"`
 	// Migrating is set while the data is migrated from the version to the next one, and
 	// Cursor is what the last step of the migration saved.
 	Migrating bool                 `json:"migrating,omitempty"`
@@ -435,6 +439,7 @@ func (w *work) compare(tx kv.Tx, s *snapshot, run bool) error {
 			Kind:        s.kind,
 			Version:     s.version,
 			Fingerprint: s.fingerprint(),
+			Attributes:  s.attrs(),
 			Parts:       map[string]partState{},
 		}
 		p.state, p.write = rec, true
@@ -466,6 +471,10 @@ func (w *work) compare(tx kv.Tx, s *snapshot, run bool) error {
 				return nil
 			}
 		}
+		if err := readable(s, rec); err != nil {
+			w.errs = append(w.errs, err)
+			return nil
+		}
 		w.needsRun = append(w.needsRun,
 			fmt.Sprintf("%q is of version %d, and the program is of version %d", s.name, rec.Version, s.version))
 		p.migrate = true
@@ -483,11 +492,42 @@ func (w *work) compare(tx kv.Tx, s *snapshot, run bool) error {
 			w.fail(ErrChanged, "%s %q is not what its data of version %d was written with", s.kind, s.name, s.version)
 			return nil
 		}
+		if rec.Attributes == nil && s.attributes != nil {
+			// A record of before the attributes were kept: the fingerprint says that they are
+			// these, so that a migration to a later version can check what it reads.
+			rec.Attributes = s.attrs()
+			p.write = true
+		}
 		w.compareParts(p, rec)
 	}
 
 	w.compareUnknown(p, rec, run)
 	return nil
+}
+
+// readable returns an error if the migration from the version of the data of a unit reads it
+// with other attributes than it was written with, like a value codec of another name. The
+// attributes of the data are the ones that the record keeps, and the ones that the migration
+// reads with are what it knows of them (see Records); either may be missing, and then there is
+// nothing to compare. Only the first migration is checked: the ones after it read what the one
+// before them wrote.
+func readable(s *snapshot, rec *unitState) error {
+	reads := s.reads[rec.Version]
+	if rec.Attributes == nil || reads == nil {
+		return nil
+	}
+
+	var errs []error
+	for _, name := range slices.Sorted(maps.Keys(reads)) {
+		was, ok := rec.Attributes[name]
+		if !ok || was == reads[name] {
+			continue
+		}
+		errs = append(errs, fmt.Errorf("%w: %s %q: its data of version %d was written with the %s codec %q, "+
+			"and the migration from version %d reads it with %q; give the migration that codec (WithOldCodec)",
+			ErrChanged, s.kind, s.name, rec.Version, name, was, rec.Version, reads[name]))
+	}
+	return errors.Join(errs...)
 }
 
 // cannotBuild reports whether a part that is new to a unit that is not depends on the data of
@@ -685,6 +725,7 @@ func (w *work) migrate(ctx context.Context, db kv.DB, p *plan) error {
 	err = modifyDB(db, s, func(st *unitState) {
 		st.Kind = s.kind
 		st.Fingerprint = s.fingerprint()
+		st.Attributes = s.attrs()
 		for _, part := range p.settle {
 			if part.Rebuild == nil {
 				st.Parts[part.Name] = readyPart(part)
